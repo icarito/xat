@@ -3,7 +3,9 @@
 set -eu
 XAT="$(cd "$(dirname "$0")/.." && pwd)"
 export GH_HOST=github.com
-GH_TOKEN="$(gh auth token --hostname github.com --user icarito)"
+if [ -z "${GH_TOKEN:-}" ]; then
+  GH_TOKEN="$(gh auth token --hostname github.com --user icarito)"
+fi
 export GH_TOKEN
 [ "$(gh api user --jq .login)" = icarito ] || {
   echo 'La autenticación no corresponde a icarito.' >&2; exit 1;

@@ -1,14 +1,13 @@
-# CI — build y publicación (Android / iOS)
+# CI — build y publicación (Android / iOS / macOS)
 
 `.github/workflows/release.yml` construye el cliente **xat** sin
 compilar el motor: baja el **binario headless** y los **export templates** del
 release pineado del fork `icarito/godot-box3d-3` (ver `.github/box3d_release`).
 
-> Clave: los templates tienen que traer el módulo nativo `modules/xmpp`
-> (libstrophe + expat + SQLite + mbedTLS) **compilado adentro**. El pin actual
-> `v0.5.5-xmpp` es un placeholder pendiente de publicar/verificar;
-> desde este entorno no se pudo consultar GitHub. Hasta que exista con esos assets,
-> el job Android falla al descargarlos. Ver *Prerequisitos del fork*.
+El fork publica templates XMPP separados para xat (`*_xmpp`), además de los
+templates generales sin libstrophe/SQLite. El pin actual `v0.5.5-xmpp` sigue
+pendiente de publicar/verificar; los jobs de xat requieren los assets XMPP y
+fallarán hasta que ese release exista.
 
 ## Qué hace
 
@@ -16,9 +15,9 @@ release pineado del fork `icarito/godot-box3d-3` (ver `.github/box3d_release`).
 el pin del fork y qué plataformas construir.
 
 **Android** (`ubuntu-latest`): en push a `main` construye solo Android; en tag
-`v*` construye Android+iOS y en ejecución manual respeta `platform`. Baja
-`godot.box3d.linux.x86_64.headless` y los
-templates `android_release.apk` / `android_debug.apk` del release pineado al
+`v*` construye Android+iOS+macOS y en ejecución manual respeta `platform`. Baja
+`godot.box3d.linux.x86_64.headless_xmpp` y los templates
+`android_release_xmpp.apk` / `android_debug_xmpp.apk` del release pineado al
 directorio de templates de la versión del binario (p. ej. `…/templates/3.6.4.rc/`),
 configura JDK 17 + Android SDK (`build-tools;34.0.0`, `platform-tools`), escribe
 `editor_settings-3.tres` (SDK, JDK, debug keystore) (los formatos de import
@@ -40,10 +39,14 @@ funcionen en un teléfono.
 - **Sin** ellos: genera un debug keystore y exporta `--export-debug`
   (`xat-<ver>-debug.apk`, marcado con `::warning::`). **No publicable en Play.**
 
+**macOS** (`macos-latest`): instala Godot stock 3.6.2 y su `.tpz`, reemplaza
+`osx.zip` con `osx_xmpp.zip` del fork y exporta el preset macOS a un ZIP.
+El artefacto no está firmado ni notarizado.
+
 **iOS** (`macos-latest`): un job `ios_gate` chequea los secretos de firma y, si
 faltan, el export iOS se **omite limpiamente** (run verde + `::notice::`). Con
-secretos: instala Godot stock 3.6.2 + su `.tpz`, **pisa `iphone.zip` con el del
-fork** (trae `modules/xmpp`), importa el certificado (`import-codesign-certs`),
+secretos: instala Godot stock 3.6.2 + su `.tpz`, **pisa `iphone.zip` con
+`iphone_xmpp.zip` del fork**, importa el certificado (`import-codesign-certs`),
 instala el provisioning profile, parchea el preset iOS (team id, bundle id
 `org.fuentelibre.xat`, UUID del perfil, identidad de firma, `export_method` App
 Store, versión), exporta con `--export "iOS"` (Godot corre **xcodebuild**:
@@ -56,13 +59,13 @@ Godot, igual que Odisea.
 ## Cómo correrlo
 
 ```sh
-# Manual (Actions → Release → Run workflow): platform = android | ios | all,
+# Manual (Actions → Release → Run workflow): platform = android | ios | macos | all,
 # version_name y version_code opcionales.
 gh workflow run release.yml -f platform=all
 
 # Push a main: artefacto Android para smoke test (sin publicar Release).
 # Release: tag y push; Android + iOS (si hay secretos iOS).
-git tag v0.1.0 && git push origin v0.1.0   # android + ios, adjunta al Release
+git tag v0.1.0 && git push origin v0.1.0   # Android + iOS + macOS, adjunta al Release
 ```
 
 Con `version_name`/`version_code` vacíos: en tag usa el tag sin `v` como
@@ -85,28 +88,18 @@ Con `version_name`/`version_code` vacíos: en tag usa el tag sin `v` como
 Sin los tres `IOS_*` el job iOS se saltea (no falla). Sin los tres
 `APP_STORE_CONNECT_*` no se sube a TestFlight (igual exporta el IPA).
 
-## Prerequisitos del fork (paso humano, fuera de xat)
+## Estado del fork
 
-xat **no** modifica el fork. Antes de que este CI sirva:
+xat **no** compila el motor. El fork mantiene `modules/xmpp` opt-in: sus builds
+regulares y `.tpz` no enlazan libstrophe/SQLite; jobs dedicados compilan el
+headless y templates Android/iOS/macOS con el módulo. Para habilitar el CI de xat:
 
-1. **Commitear `modules/xmpp`** (`libstrophe`, expat, SQLite, mbedTLS, el nodo
-   `XmppConnection`, `tls_mbedtls.c`, binding SQLite, `SCsub`/`config.py`) a
-   `icarito/godot-box3d-3`, con los hooks al motor (headers mbedTLS + ruta del CA
-   bundle) en la rama del fork.
-   Incluir también el parche de `RichTextLabel` en
-   `tools/patches/z_emoji_inline_source.patch`: headless y templates deben
-   exponer `add_inline_image` para preservar Unicode al copiar.
-2. **Verificar que los targets `android-templates` e `ios-templates` compilan con
-   el módulo** (`scripts/build.sh android-templates ios-templates`) y que el APK
-   contiene `libstrophe`/el nodo XMPP.
-3. **Cortar un release** etiquetado, p. ej. `v0.5.5-xmpp`, que publique los
-   assets `godot.box3d.linux.x86_64.headless`, `android_release.apk`,
-   `android_debug.apk` e `iphone.zip`.
-4. **Publicar y verificar el release** en GitHub, luego actualizar
-   `.github/box3d_release` en xat. El pin actual `v0.5.5-xmpp` es placeholder:
-   no se verificó que el release ni sus assets existan; el entorno de trabajo no
-   pudo resolver `api.github.com`.
-5. Setear los secretos de arriba en el repo de xat.
+1. Desde `main` del fork, ejecutar `gh workflow run release-xmpp.yml --repo icarito/godot-box3d-3 -f tag=v0.5.5-xmpp`. Ese flujo construye solo XMPP y crea un release sin esperar los builds generales. Verificar los assets `godot.box3d.linux.x86_64.headless_xmpp`,
+   `android_release_xmpp.apk`, `android_debug_xmpp.apk`, `iphone_xmpp.zip` y
+   `osx_xmpp.zip`.
+2. Verificar esos assets y mantener `.github/box3d_release` apuntando a esa
+   release; `v0.5.5-xmpp` aún no se verificó/publicó.
+3. Configurar los secretos de firma indicados arriba.
 
 ## Riesgos conocidos / pendientes
 
@@ -126,10 +119,12 @@ xat **no** modifica el fork. Antes de que este CI sirva:
   `IPHONEOS_DEPLOYMENT_TARGET` viejo. Apple exige ≥ 15.0; si App Store rechaza el
   IPA, portar el parche de Odisea ("Patch iOS minimum OS version") antes de
   exportar.
-- **Versión de templates iOS:** el editor macOS es stock 3.6.2 y el
-  `iphone.zip` es del fork (3.6.4.rc). Odisea usa este mismo arreglo; si falla,
-  considerar un editor del fork para macOS.
+- **Versión de templates Apple:** el editor macOS es stock 3.6.2 y los
+  templates XMPP son del fork (3.6.4.rc). Si la exportación falla, considerar
+  publicar también un editor del fork para macOS.
+- **Firma macOS:** el ZIP de macOS se construye sin firma ni notarización; es un
+  artefacto de CI, no un paquete listo para distribuir a usuarios de Gatekeeper.
 - **Firma Android:** el fallback sin secretos produce un APK **debug** firmado
   con el debug keystore — claramente etiquetado y **no apto para Play**.
-- **Race del Release:** android e ios adjuntan al mismo tag en paralelo
+- **Race del Release:** Android, iOS y macOS adjuntan al mismo tag en paralelo
   (`softprops/action-gh-release` es idempotente; ante un fallo raro, re-correr).

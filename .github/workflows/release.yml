@@ -1,17 +1,16 @@
 name: Release
 
-# Construye y publica el cliente xat: APK de Android y, cuando hay secretos de
-# firma, IPA de iOS. NO compila el motor: baja el binario headless y los export
+# Construye y publica xat para Android, iOS y macOS. NO compila el motor: baja
+# el binario headless y los export
 # templates del release pineado del fork icarito/godot-box3d-3 (ver
-# .github/box3d_release). Esos templates TIENEN que traer el modulo nativo
-# modules/xmpp (libstrophe+expat+SQLite+mbedTLS) compilado adentro, o el APK/IPA
-# arranca sin XMPP. Prerequisito humano: commitear modules/xmpp al fork y cortar
-# ese release; ver docs/ci.md.
+# .github/box3d_release). El fork publica templates XMPP separados para xat;
+# los templates generales siguen sin libstrophe/SQLite para GDTK, Odisea y
+# otros consumidores.
 #
 # Disparadores:
 #   - push a main         -> APK Android de preflight
-#   - push de tags v*    -> android + ios (adjunta los artefactos al GitHub Release)
-#   - workflow_dispatch  -> platform android|ios|all
+#   - push de tags v*    -> Android + iOS + macOS
+#   - workflow_dispatch  -> platform android|ios|macos|all
 
 on:
   workflow_dispatch:
@@ -24,6 +23,7 @@ on:
         options:
           - android
           - ios
+          - macos
           - all
       version_name:
         description: "versionName / marketing version (vacio = tag sin 'v', o 0.1.0)"
@@ -63,6 +63,7 @@ jobs:
       box3d_release: ${{ steps.meta.outputs.box3d_release }}
       build_android: ${{ steps.meta.outputs.build_android }}
       build_ios: ${{ steps.meta.outputs.build_ios }}
+      build_macos: ${{ steps.meta.outputs.build_macos }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -117,9 +118,10 @@ jobs:
           [ -n "$PIN" ] || { echo "::error::.github/box3d_release esta vacio"; exit 1; }
 
           case "$PLATFORM" in
-            android) A=true;  I=false ;;
-            ios)     A=false; I=true  ;;
-            all)     A=true;  I=true  ;;
+            android) A=true;  I=false; M=false ;;
+            ios)     A=false; I=true;  M=false ;;
+            macos)   A=false; I=false; M=true  ;;
+            all)     A=true;  I=true;  M=true  ;;
             *) echo "::error::platform invalida: $PLATFORM"; exit 1 ;;
           esac
 
@@ -131,6 +133,7 @@ jobs:
             echo "box3d_release=$PIN"
             echo "build_android=$A"
             echo "build_ios=$I"
+            echo "build_macos=$M"
           } >> "$GITHUB_OUTPUT"
 
           echo "xat release: platform=$PLATFORM version_name=$VERSION_NAME code=$VERSION_CODE fork=$PIN"
@@ -168,6 +171,86 @@ jobs:
             echo "testflight=false" >> "$GITHUB_OUTPUT"
           fi
 
+  macos:
+    needs: prep
+    if: needs.prep.outputs.build_macos == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      BOX3D_RELEASE: ${{ needs.prep.outputs.box3d_release }}
+      VERSION_SLUG: ${{ needs.prep.outputs.version_slug }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Godot (macOS stock)
+        run: |
+          set -eu
+          GODOT_DIR="$HOME/.local/bin"
+          mkdir -p "$GODOT_DIR"
+          echo "$GODOT_DIR" >> "$GITHUB_PATH"
+          if [ ! -x "$GODOT_DIR/Godot.app/Contents/MacOS/Godot" ]; then
+            curl -fSL -o /tmp/godot.zip \
+              "https://github.com/godotengine/godot/releases/download/${STOCK_GODOT_VERSION}/Godot_v${STOCK_GODOT_VERSION}_osx.universal.zip"
+            rm -rf /tmp/godot_extract "$GODOT_DIR/Godot.app"
+            mkdir -p /tmp/godot_extract
+            unzip -o /tmp/godot.zip -d /tmp/godot_extract
+            mv /tmp/godot_extract/Godot.app "$GODOT_DIR/Godot.app"
+          fi
+          GODOT_MAC="$GODOT_DIR/Godot.app/Contents/MacOS/Godot"
+          chmod +x "$GODOT_MAC"
+          codesign --force --deep --sign - "$GODOT_DIR/Godot.app"
+          "$GODOT_MAC" --version
+          echo "GODOT_BIN=$GODOT_MAC" >> "$GITHUB_ENV"
+
+      - name: Install macOS export template (fork osx_xmpp.zip)
+        run: |
+          set -eu
+          TPL_VERSION="$("$GODOT_BIN" --version 2>/dev/null | grep -Eo '^[0-9]+\.[0-9]+(\.[0-9]+)?\.[a-z0-9]+' | head -n 1)"
+          [ -n "$TPL_VERSION" ] || { echo "::error::No pude derivar la version de Godot"; exit 1; }
+          TPL_DIR="$HOME/Library/Application Support/Godot/templates/$TPL_VERSION"
+          mkdir -p "$TPL_DIR"
+          if [ ! -f "$TPL_DIR/version.txt" ]; then
+            curl -fSL -o /tmp/tpz.zip \
+              "https://github.com/godotengine/godot/releases/download/${STOCK_GODOT_VERSION}/Godot_v${STOCK_GODOT_VERSION}_export_templates.tpz"
+            rm -rf /tmp/tpz_extract
+            mkdir -p /tmp/tpz_extract
+            unzip -o /tmp/tpz.zip -d /tmp/tpz_extract/
+            [ -d /tmp/tpz_extract/templates ] && cp -a /tmp/tpz_extract/templates/. "$TPL_DIR/"
+          fi
+          curl -fSL -o "$TPL_DIR/osx.zip" \
+            "https://github.com/${FORK_REPO}/releases/download/${BOX3D_RELEASE}/osx_xmpp.zip"
+          echo "TPL_DIR=$TPL_DIR" >> "$GITHUB_ENV"
+
+      - name: Export macOS app
+        run: |
+          set -eu
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          OUT="$GITHUB_WORKSPACE/dist/xat-${VERSION_SLUG}-macos.zip"
+          "$GODOT_BIN" --no-window --path app --export "macOS" "$OUT" || true
+          if [ ! -s "$OUT" ]; then
+            echo "::group::archivos macOS generados"
+            find "$GITHUB_WORKSPACE" -maxdepth 5 \( -name '*.app' -o -name '*.zip' \) -print 2>/dev/null || true
+            echo "::endgroup::"
+            echo "::error::No se produjo el paquete macOS en $OUT"
+            exit 1
+          fi
+          echo "macOS OK: $OUT ($(du -h "$OUT" | cut -f1))"
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: xat-macos-${{ env.VERSION_SLUG }}-${{ needs.prep.outputs.version_code }}
+          path: dist/*.zip
+          if-no-files-found: error
+
+      - name: Attach macOS build to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          fail_on_unmatched_files: true
+
   android:
     needs: prep
     if: needs.prep.outputs.build_android == 'true'
@@ -201,7 +284,7 @@ jobs:
           GODOT_DIR="$HOME/.local/bin"
           mkdir -p "$GODOT_DIR"
           curl -fSL -o /tmp/godot-box3d \
-            "https://github.com/${FORK_REPO}/releases/download/${BOX3D_RELEASE}/godot.box3d.linux.x86_64.headless"
+            "https://github.com/${FORK_REPO}/releases/download/${BOX3D_RELEASE}/godot.box3d.linux.x86_64.headless_xmpp"
           chmod +x /tmp/godot-box3d
           mv /tmp/godot-box3d "$GODOT_DIR/godot-xat-headless"
           "$GODOT_DIR/godot-xat-headless" --version
@@ -223,10 +306,10 @@ jobs:
           [ -n "$TPL_VERSION" ] || { echo "::error::No pude derivar la version de $GODOT_BIN"; "$GODOT_BIN" --version || true; exit 1; }
           TPL_DIR="$HOME/.local/share/godot/templates/$TPL_VERSION"
           mkdir -p "$TPL_DIR"
-          for f in android_release.apk android_debug.apk; do
-            curl -fSL -o "$TPL_DIR/$f" \
-              "https://github.com/${FORK_REPO}/releases/download/${BOX3D_RELEASE}/$f"
-          done
+          curl -fSL -o "$TPL_DIR/android_release.apk" \
+            "https://github.com/${FORK_REPO}/releases/download/${BOX3D_RELEASE}/android_release_xmpp.apk"
+          curl -fSL -o "$TPL_DIR/android_debug.apk" \
+            "https://github.com/${FORK_REPO}/releases/download/${BOX3D_RELEASE}/android_debug_xmpp.apk"
           python3 tools/check_android_template.py "$TPL_DIR/android_release.apk" "$TPL_DIR/android_debug.apk"
           ls -lh "$TPL_DIR"
           echo "Templates Android $TPL_VERSION de $BOX3D_RELEASE instaladas en $TPL_DIR"
@@ -468,13 +551,12 @@ jobs:
           "$GODOT_MAC" --version
           echo "GODOT_BIN=$GODOT_MAC" >> "$GITHUB_ENV"
 
-      - name: Install iOS export template (fork iphone.zip)
+      - name: Install iOS export template (fork iphone_xmpp.zip)
         run: |
           set -eu
           # El editor macOS es el stock 3.6.2, asi que el dir de templates sale de
-          # SU version. Se instalan los slots stock y despues se pisa iphone.zip con
-          # el del fork, que trae modules/xmpp compilado adentro (mismo arreglo que
-          # Odisea: editor stock manejando un template del fork).
+          # SU version. Se instalan los slots stock y despues se pisa iphone.zip
+          # con el template xat del fork, que trae modules/xmpp compilado.
           TPL_VERSION="$("$GODOT_BIN" --version 2>/dev/null | grep -Eo '^[0-9]+\.[0-9]+(\.[0-9]+)?\.[a-z0-9]+' | head -n 1)"
           [ -n "$TPL_VERSION" ] || { echo "::error::No pude derivar la version de $GODOT_BIN"; exit 1; }
           TPL_DIR="$HOME/Library/Application Support/Godot/templates/$TPL_VERSION"
@@ -488,7 +570,7 @@ jobs:
             [ -d /tmp/tpz_extract/templates ] && cp -a /tmp/tpz_extract/templates/. "$TPL_DIR/"
           fi
           curl -fSL -o "$TPL_DIR/iphone.zip" \
-            "https://github.com/${FORK_REPO}/releases/download/${BOX3D_RELEASE}/iphone.zip"
+            "https://github.com/${FORK_REPO}/releases/download/${BOX3D_RELEASE}/iphone_xmpp.zip"
           ls -lh "$TPL_DIR/iphone.zip"
           echo "iphone.zip de $BOX3D_RELEASE instalado en $TPL_DIR (editor $TPL_VERSION)"
           echo "TPL_DIR=$TPL_DIR" >> "$GITHUB_ENV"
