@@ -92,8 +92,11 @@ Una ejecución guardó el PNG correctamente y luego abortó al salir; el fork ti
 un fallo de shutdown conocido, por lo que también se revisan los checks y la imagen.
 Draw calls y costes de raster/layout sobre hardware físico quedan por perfilar;
 los tamaños de atlas anteriores no constituyen un benchmark de rendimiento.
-La exportación mediante el editor no se validó en esta sesión porque no pudo
-iniciar X11/Xvfb; la prueba PCK cubre el payload crudo, no APK/IPA ni sus templates.
+La ampliación posterior de arranque produjo un APK ARM64 con un editor headless
+del fork. Se verificaron firma, catálogo y assets importados del APK, y su
+payload extraído pasó carga de las 16 páginas y copia Unicode en desktop.
+La prueba PCK separada cubre el payload crudo. Instalación en teléfono e IPA
+siguen sin validar; ver [startup.md](startup.md).
 Tampoco se enviaron mensajes a contactos reales ni se probó MAM en producción.
 
 ![Vista de revisión de Unicode 17](screenshots/emoji-unicode17.png)

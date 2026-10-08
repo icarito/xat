@@ -93,6 +93,9 @@ xat **no** modifica el fork. Antes de que este CI sirva:
    `XmppConnection`, `tls_mbedtls.c`, binding SQLite, `SCsub`/`config.py`) a
    `icarito/godot-box3d-3`, con los hooks al motor (headers mbedTLS + ruta del CA
    bundle) en la rama del fork.
+   Incluir también el parche de `RichTextLabel` en
+   `tools/patches/z_emoji_inline_source.patch`: headless y templates deben
+   exponer `add_inline_image` para preservar Unicode al copiar.
 2. **Verificar que los targets `android-templates` e `ios-templates` compilan con
    el módulo** (`scripts/build.sh android-templates ios-templates`) y que el APK
    contiene `libstrophe`/el nodo XMPP.

@@ -35,4 +35,16 @@ adb install -r bin/xat-debug.apk
 adb shell monkey -p org.fuentelibre.xat -c android.intent.category.LAUNCHER 1
 ```
 
+`bin/xat-debug.apk` es ARM64 y pasó verificación de firma v1/v2/v3. El
+certificado coincide con el APK local anterior, permitiendo actualizar sin
+desinstalar. Se verificaron los scripts de arranque, el catálogo Emoji 17,
+licencias y las 16 texturas importadas dentro del APK. Los assets extraídos
+pasaron carga de todas las páginas y copia Unicode en el fork desktop; eso
+no sustituye probar el binario Android en un teléfono.
+
+La plantilla Java existente se conservó y se sustituyó su biblioteca nativa
+por la recompilada en el checkout aislado. Gradle no puede abrir sockets aquí.
+La exportación y firma finales las hizo un editor del fork compilado con
+`platform=server tools=yes`, aislando XDG cache/config/data en `/tmp`.
+
 La instalación y la publicación remota no están verificadas desde el sandbox.
