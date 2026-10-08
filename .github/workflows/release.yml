@@ -9,6 +9,7 @@ name: Release
 # ese release; ver docs/ci.md.
 #
 # Disparadores:
+#   - push a main         -> APK Android de preflight
 #   - push de tags v*    -> android + ios (adjunta los artefactos al GitHub Release)
 #   - workflow_dispatch  -> platform android|ios|all
 
@@ -35,6 +36,8 @@ on:
         default: ""
         type: string
   push:
+    branches:
+      - main
     tags:
       - "v*"
 
@@ -69,6 +72,7 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           PLATFORM: ${{ github.event.inputs.platform }}
+          REF_TYPE: ${{ github.ref_type }}
           IN_NAME: ${{ github.event.inputs.version_name }}
           IN_CODE: ${{ github.event.inputs.version_code }}
           REF_NAME: ${{ github.ref_name }}
@@ -76,13 +80,17 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ "$EVENT" = "push" ]; then PLATFORM="all"; fi
+          if [ "$EVENT" = "push" ]; then
+            if [ "$REF_TYPE" = "branch" ]; then PLATFORM="android"; else PLATFORM="all"; fi
+          fi
           [ -n "$PLATFORM" ] || PLATFORM="all"
 
           if [ -n "$IN_NAME" ]; then
             VERSION_NAME="$IN_NAME"
-          elif [ "$EVENT" = "push" ]; then
+          elif [ "$EVENT" = "push" ] && [ "$REF_TYPE" = "tag" ]; then
             VERSION_NAME="${REF_NAME#v}"
+          elif [ "$EVENT" = "push" ]; then
+            VERSION_NAME="0.1.0-${REF_NAME}"
           else
             VERSION_NAME="0.1.0"
           fi
@@ -199,6 +207,13 @@ jobs:
           "$GODOT_DIR/godot-xat-headless" --version
           echo "GODOT_BIN=$GODOT_DIR/godot-xat-headless" >> "$GITHUB_ENV"
 
+      - name: Preflight native runtime APIs
+        env:
+          SDL_VIDEODRIVER: dummy
+        run: |
+          set -eu
+          "$GODOT_BIN" --no-window --path app -s "$GITHUB_WORKSPACE/tools/check_runtime.gd"
+
       - name: Install Android export templates (fork release)
         run: |
           set -eu
@@ -212,11 +227,12 @@ jobs:
             curl -fSL -o "$TPL_DIR/$f" \
               "https://github.com/${FORK_REPO}/releases/download/${BOX3D_RELEASE}/$f"
           done
+          python3 tools/check_android_template.py "$TPL_DIR/android_release.apk" "$TPL_DIR/android_debug.apk"
           ls -lh "$TPL_DIR"
           echo "Templates Android $TPL_VERSION de $BOX3D_RELEASE instaladas en $TPL_DIR"
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
@@ -254,7 +270,6 @@ jobs:
             echo "export/android/debug_keystore_user = \"androiddebugkey\""
             echo "export/android/debug_keystore_pass = \"android\""
           } > "$HOME/.config/godot/editor_settings-3.tres"
-          cat "$HOME/.config/godot/editor_settings-3.tres"
           echo "KEY_DIR=$KEY_DIR" >> "$GITHUB_ENV"
 
       - name: Write preset patch helper

@@ -32,7 +32,7 @@ func _init():
 	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(center)
 	var content := VBoxContainer.new()
-	content.alignment = BoxContainer.ALIGNMENT_CENTER
+	content.alignment = BoxContainer.ALIGN_CENTER
 	content.add_constant_override("separation", 12)
 	content.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	center.add_child(content)
@@ -74,8 +74,13 @@ func show_success() -> void:
 		return
 	state = "success"
 	_timer.stop()
+	_orb.set_connected(true)
+	_orb.set_state({"activity": "available"})
 	_cancel.visible = false
 	_status.text = "Conectado"
+	# CONNECTED may arrive before the entrance tween finishes.
+	_tween.stop_all()
+	modulate.a = 1.0
 	_finish_after(0.85, "connected")
 
 func cancel() -> void:
@@ -97,7 +102,7 @@ func finish(p_outcome: String, p_status := "") -> void:
 	_tween.stop_all()
 	_tween.interpolate_property(self, "modulate:a", modulate.a, 0.0, FADE_SECONDS, Tween.TRANS_CUBIC, Tween.EASE_IN)
 	_tween.start()
-	yield(_tween, "tween_all_completed")
+	yield(get_tree().create_timer(FADE_SECONDS), "timeout")
 	emit_signal("completed", p_outcome)
 
 func _finish_after(p_delay: float, p_outcome: String) -> void:
@@ -114,7 +119,7 @@ func _on_finish_delay(p_outcome: String, p_timer: Timer) -> void:
 	p_timer.queue_free()
 	_tween.interpolate_property(self, "modulate:a", modulate.a, 0.0, FADE_SECONDS, Tween.TRANS_CUBIC, Tween.EASE_IN)
 	_tween.start()
-	yield(_tween, "tween_all_completed")
+	yield(get_tree().create_timer(FADE_SECONDS), "timeout")
 	state = p_outcome
 	emit_signal("completed", p_outcome)
 

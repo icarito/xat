@@ -1,19 +1,23 @@
 # CI — build y publicación (Android / iOS)
 
-`.github/workflows/release.yml` construye y publica el cliente **xat** sin
+`.github/workflows/release.yml` construye el cliente **xat** sin
 compilar el motor: baja el **binario headless** y los **export templates** del
 release pineado del fork `icarito/godot-box3d-3` (ver `.github/box3d_release`).
 
 > Clave: los templates tienen que traer el módulo nativo `modules/xmpp`
-> (libstrophe + expat + SQLite + mbedTLS) **compilado adentro**. Los releases
-> actuales del fork NO lo incluyen; ver *Prerequisitos del fork*.
+> (libstrophe + expat + SQLite + mbedTLS) **compilado adentro**. El pin actual
+> `v0.5.5-xmpp` es un placeholder pendiente de publicar/verificar;
+> desde este entorno no se pudo consultar GitHub. Hasta que exista con esos assets,
+> el job Android falla al descargarlos. Ver *Prerequisitos del fork*.
 
 ## Qué hace
 
 **`prep`** resuelve `version_name` / `version_code` (o los toma de los inputs),
 el pin del fork y qué plataformas construir.
 
-**Android** (`ubuntu-latest`): baja `godot.box3d.linux.x86_64.headless` y los
+**Android** (`ubuntu-latest`): en push a `main` construye solo Android; en tag
+`v*` construye Android+iOS y en ejecución manual respeta `platform`. Baja
+`godot.box3d.linux.x86_64.headless` y los
 templates `android_release.apk` / `android_debug.apk` del release pineado al
 directorio de templates de la versión del binario (p. ej. `…/templates/3.6.4.rc/`),
 configura JDK 17 + Android SDK (`build-tools;34.0.0`, `platform-tools`), escribe
@@ -22,6 +26,14 @@ configura JDK 17 + Android SDK (`build-tools;34.0.0`, `platform-tools`), escribe
 `version/code` y `version/name` en el preset, exporta con `--export "Android"`
 desde `app/`, sube el APK como artefacto y, en tags `v*`, lo adjunta al GitHub
 Release.
+
+Antes de exportar, `tools/check_runtime.gd` corre con el binario descargado y
+falla si faltan `XmppConnection`, `SQLiteBinding`, `SQLiteQuery` o
+`RichTextLabel.add_inline_image`. Luego `tools/check_android_template.py` valida
+que ambos APK templates contengan `lib/arm64-v8a/libgodot_android.so` y las
+marcas de las clases y métodos nativos clave. La inspección de bytes solo confirma
+presencia de cadenas compiladas: no demuestra que el APK arranque ni que XMPP/SQLite
+funcionen en un teléfono.
 
 - **Con** `ANDROID_KEYSTORE_B64` + `ANDROID_KEYSTORE_PASS` + `ANDROID_KEY_ALIAS`:
   firma release con esa keystore.
@@ -48,7 +60,8 @@ Godot, igual que Odisea.
 # version_name y version_code opcionales.
 gh workflow run release.yml -f platform=all
 
-# Release: tag y push.
+# Push a main: artefacto Android para smoke test (sin publicar Release).
+# Release: tag y push; Android + iOS (si hay secretos iOS).
 git tag v0.1.0 && git push origin v0.1.0   # android + ios, adjunta al Release
 ```
 
@@ -86,8 +99,10 @@ xat **no** modifica el fork. Antes de que este CI sirva:
 3. **Cortar un release** etiquetado, p. ej. `v0.5.5-xmpp`, que publique los
    assets `godot.box3d.linux.x86_64.headless`, `android_release.apk`,
    `android_debug.apk` e `iphone.zip`.
-4. **Actualizar `.github/box3d_release`** en xat con ese tag (hoy placeholder
-   `v0.5.5-xmpp`).
+4. **Publicar y verificar el release** en GitHub, luego actualizar
+   `.github/box3d_release` en xat. El pin actual `v0.5.5-xmpp` es placeholder:
+   no se verificó que el release ni sus assets existan; el entorno de trabajo no
+   pudo resolver `api.github.com`.
 5. Setear los secretos de arriba en el repo de xat.
 
 ## Riesgos conocidos / pendientes

@@ -27,10 +27,15 @@ TESTS="$*"
 bad=0
 for t in $TESTS; do
 	[ -f "$t" ] || continue
+	test_data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+	if [ "$t" = "tests/startup_flow_test.gd" ]; then
+		test_data_home=$(mktemp -d /tmp/xat-startup-flow.XXXXXX) || exit 1
+	fi
 	# Aislado de la sesión viva (no heredar WAYLAND_DISPLAY del shell gdtk) y
 	# sin audio. El binario frt puede crashear al salir con todos los checks ok:
 	# mirar ok/FAIL, no sólo el rc.
 	out=$(env -u WAYLAND_DISPLAY -u DISPLAY SDL_VIDEODRIVER=offscreen AUDIODRIVER=Dummy \
+		XAT_AUTOCONNECT=0 XDG_DATA_HOME="$test_data_home" \
 		timeout 60 "$BIN" --no-window --path app -s "$PWD/$t" 2>&1); rc=$?
 	ok=$(printf '%s\n' "$out" | grep -c '^ok' || true)
 	fail=$(printf '%s\n' "$out" | grep -c '^FAIL' || true)

@@ -23,8 +23,8 @@ func _init():
 	success_splash.connect("completed", self, "_on_completed")
 	success_splash.start()
 	success_splash.show_success()
-	check(success_splash.state == "success" and not success_splash._cancel.visible, "success removes cancel action")
-	yield(create_timer(1.25), "timeout")
+	check(success_splash.state == "success" and not success_splash._cancel.visible and success_splash._orb._state.get("activity") == "available", "success changes orb state and removes cancel action")
+	yield(create_timer(1.35), "timeout")
 	check(_outcome == "connected" and success_splash.is_queued_for_deletion() == false, "success completes after its fade")
 	success_splash.queue_free()
 
