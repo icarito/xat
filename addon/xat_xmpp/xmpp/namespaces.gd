@@ -1,0 +1,33 @@
+extends Reference
+
+# Namespaces XMPP usados por xat. Se preloadea como `const NS = preload(...)`
+# y se accede `NS.DELAY` (no hay `class_name` para no chocar con nativas).
+
+const CLIENT := "jabber:client"
+const ROSTER := "jabber:iq:roster"
+const PRESENCE := "jabber:client"
+const DELAY := "urn:xmpp:delay"
+const CHATSTATES := "http://jabber.org/protocol/chatstates"
+const RECEIPTS := "urn:xmpp:receipts"
+const CARBONS := "urn:xmpp:carbons:2"
+const FORWARD := "urn:xmpp:forward:0"
+const CORRECT := "urn:xmpp:message-correct:0"
+const MAM := "urn:xmpp:mam:2"
+const RSM := "http://jabber.org/protocol/rsm"
+const DATA_FORMS := "jabber:x:data"
+const DISCO_INFO := "http://jabber.org/protocol/disco#info"
+const DISCO_ITEMS := "http://jabber.org/protocol/disco#items"
+const COMMANDS := "http://jabber.org/protocol/commands"
+const QUICK_RESPONSE := "urn:xmpp:tmp:quick-response"
+const QUICK_RESPONSE_0 := "urn:xmpp:quick-response:0"
+const SID := "urn:xmpp:sid:0"
+const PING := "urn:xmpp:ping"
+const CAPS := "http://jabber.org/protocol/caps"
+const AVATAR_DATA := "urn:xmpp:avatar:data"
+const AVATAR_METADATA := "urn:xmpp:avatar:metadata"
+const TELEMETRY := "urn:openclaw:telemetry:0"
+const HOOKS_ACTIVITY := "urn:openclaw:hooks:activity:0"
+const HOOKS_APPROVAL := "urn:openclaw:hooks:approval:0"
+const HOOKS_PROGRESS := "urn:openclaw:hooks:progress:0"
+const PUBSUB := "http://jabber.org/protocol/pubsub"
+const PEP := "http://jabber.org/protocol/pubsub#event"

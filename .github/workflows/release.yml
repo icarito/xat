@@ -1,0 +1,651 @@
+name: Release
+
+# Construye y publica el cliente xat: APK de Android y, cuando hay secretos de
+# firma, IPA de iOS. NO compila el motor: baja el binario headless y los export
+# templates del release pineado del fork icarito/godot-box3d-3 (ver
+# .github/box3d_release). Esos templates TIENEN que traer el modulo nativo
+# modules/xmpp (libstrophe+expat+SQLite+mbedTLS) compilado adentro, o el APK/IPA
+# arranca sin XMPP. Prerequisito humano: commitear modules/xmpp al fork y cortar
+# ese release; ver docs/ci.md.
+#
+# Disparadores:
+#   - push de tags v*    -> android + ios (adjunta los artefactos al GitHub Release)
+#   - workflow_dispatch  -> platform android|ios|all
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: "Plataforma a construir"
+        required: true
+        default: all
+        type: choice
+        options:
+          - android
+          - ios
+          - all
+      version_name:
+        description: "versionName / marketing version (vacio = tag sin 'v', o 0.1.0)"
+        required: false
+        default: ""
+        type: string
+      version_code:
+        description: "versionCode / build number, entero (vacio = github.run_number)"
+        required: false
+        default: ""
+        type: string
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}-${{ github.event.inputs.platform || 'all' }}
+  cancel-in-progress: false
+
+env:
+  FORK_REPO: icarito/godot-box3d-3
+  STOCK_GODOT_VERSION: "3.6.2-stable"
+
+jobs:
+  prep:
+    runs-on: ubuntu-latest
+    outputs:
+      version_name: ${{ steps.meta.outputs.version_name }}
+      version_slug: ${{ steps.meta.outputs.version_slug }}
+      ios_short_version: ${{ steps.meta.outputs.ios_short_version }}
+      version_code: ${{ steps.meta.outputs.version_code }}
+      box3d_release: ${{ steps.meta.outputs.box3d_release }}
+      build_android: ${{ steps.meta.outputs.build_android }}
+      build_ios: ${{ steps.meta.outputs.build_ios }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Resolve version, pin and targets
+        id: meta
+        env:
+          EVENT: ${{ github.event_name }}
+          PLATFORM: ${{ github.event.inputs.platform }}
+          IN_NAME: ${{ github.event.inputs.version_name }}
+          IN_CODE: ${{ github.event.inputs.version_code }}
+          REF_NAME: ${{ github.ref_name }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT" = "push" ]; then PLATFORM="all"; fi
+          [ -n "$PLATFORM" ] || PLATFORM="all"
+
+          if [ -n "$IN_NAME" ]; then
+            VERSION_NAME="$IN_NAME"
+          elif [ "$EVENT" = "push" ]; then
+            VERSION_NAME="${REF_NAME#v}"
+          else
+            VERSION_NAME="0.1.0"
+          fi
+
+          if [ -n "$IN_CODE" ]; then
+            VERSION_CODE="$IN_CODE"
+          else
+            VERSION_CODE="$RUN_NUMBER"
+          fi
+          case "$VERSION_CODE" in
+            ''|*[!0-9]*) echo "::error::version_code debe ser un entero, no '$VERSION_CODE'"; exit 1 ;;
+          esac
+
+          # Slug seguro para nombres de archivo/asset.
+          VERSION_SLUG="$(printf '%s' "$VERSION_NAME" | sed -E 's/[^A-Za-z0-9.+_-]+/-/g; s/^-+//; s/-+$//')"
+          [ -n "$VERSION_SLUG" ] || VERSION_SLUG="0.0.0"
+
+          # CFBundleShortVersionString solo acepta digitos y puntos; extrae la
+          # parte numerica inicial (p.ej. 0.1.0-xmpp -> 0.1.0).
+          IOS_SHORT="$(printf '%s' "$VERSION_NAME" | grep -Eo '^[0-9]+(\.[0-9]+){0,2}' || true)"
+          [ -n "$IOS_SHORT" ] || IOS_SHORT="0.0.0"
+
+          PIN="$(tr -d '[:space:]' < .github/box3d_release)"
+          [ -n "$PIN" ] || { echo "::error::.github/box3d_release esta vacio"; exit 1; }
+
+          case "$PLATFORM" in
+            android) A=true;  I=false ;;
+            ios)     A=false; I=true  ;;
+            all)     A=true;  I=true  ;;
+            *) echo "::error::platform invalida: $PLATFORM"; exit 1 ;;
+          esac
+
+          {
+            echo "version_name=$VERSION_NAME"
+            echo "version_slug=$VERSION_SLUG"
+            echo "ios_short_version=$IOS_SHORT"
+            echo "version_code=$VERSION_CODE"
+            echo "box3d_release=$PIN"
+            echo "build_android=$A"
+            echo "build_ios=$I"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "xat release: platform=$PLATFORM version_name=$VERSION_NAME code=$VERSION_CODE fork=$PIN"
+
+  ios_gate:
+    needs: prep
+    if: needs.prep.outputs.build_ios == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.gate.outputs.skip }}
+      testflight: ${{ steps.gate.outputs.testflight }}
+    steps:
+      # `secrets` no se puede usar en un `if` a nivel job; se resuelve aca y el
+      # job ios queda gateado por el output. Mismos nombres de secreto que Odisea.
+      - name: Check iOS signing availability
+        id: gate
+        env:
+          IOS_CERT_P12_B64: ${{ secrets.IOS_CERT_P12_B64 }}
+          IOS_CERT_PASSWORD: ${{ secrets.IOS_CERT_PASSWORD }}
+          IOS_PROVISION_B64: ${{ secrets.IOS_PROVISION_B64 }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          ASC_API_KEY_P8: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
+        run: |
+          set -eu
+          if [ -z "$IOS_CERT_P12_B64" ] || [ -z "$IOS_CERT_PASSWORD" ] || [ -z "$IOS_PROVISION_B64" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Faltan secretos de firma iOS (IOS_CERT_P12_B64 / IOS_CERT_PASSWORD / IOS_PROVISION_B64): se omite el export iOS."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -n "$ASC_KEY_ID" ] && [ -n "$ASC_ISSUER_ID" ] && [ -n "$ASC_API_KEY_P8" ]; then
+            echo "testflight=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "testflight=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  android:
+    needs: prep
+    if: needs.prep.outputs.build_android == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      BOX3D_RELEASE: ${{ needs.prep.outputs.box3d_release }}
+      VERSION_NAME: ${{ needs.prep.outputs.version_name }}
+      VERSION_SLUG: ${{ needs.prep.outputs.version_slug }}
+      VERSION_CODE: ${{ needs.prep.outputs.version_code }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Cache Godot (templates + config)
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/godot
+            ~/.config/godot
+            ~/.local/share/godot
+            .godot
+          key: ${{ runner.os }}-godot-xat-${{ env.BOX3D_RELEASE }}-${{ hashFiles('app/project.godot') }}
+          restore-keys: |
+            ${{ runner.os }}-godot-xat-${{ env.BOX3D_RELEASE }}-
+            ${{ runner.os }}-godot-xat-
+
+      - name: Install Godot (fork headless)
+        run: |
+          set -eu
+          GODOT_DIR="$HOME/.local/bin"
+          mkdir -p "$GODOT_DIR"
+          curl -fSL -o /tmp/godot-box3d \
+            "https://github.com/${FORK_REPO}/releases/download/${BOX3D_RELEASE}/godot.box3d.linux.x86_64.headless"
+          chmod +x /tmp/godot-box3d
+          mv /tmp/godot-box3d "$GODOT_DIR/godot-xat-headless"
+          "$GODOT_DIR/godot-xat-headless" --version
+          echo "GODOT_BIN=$GODOT_DIR/godot-xat-headless" >> "$GITHUB_ENV"
+
+      - name: Install Android export templates (fork release)
+        run: |
+          set -eu
+          # El dir de templates lo fija la version del PROPIO binario del fork
+          # (VERSION_FULL_CONFIG, p.ej. 3.6.4.rc), no se escribe a mano.
+          TPL_VERSION="$("$GODOT_BIN" --version 2>/dev/null | grep -Eo '^[0-9]+\.[0-9]+(\.[0-9]+)?\.[a-z0-9]+' | head -n 1)"
+          [ -n "$TPL_VERSION" ] || { echo "::error::No pude derivar la version de $GODOT_BIN"; "$GODOT_BIN" --version || true; exit 1; }
+          TPL_DIR="$HOME/.local/share/godot/templates/$TPL_VERSION"
+          mkdir -p "$TPL_DIR"
+          for f in android_release.apk android_debug.apk; do
+            curl -fSL -o "$TPL_DIR/$f" \
+              "https://github.com/${FORK_REPO}/releases/download/${BOX3D_RELEASE}/$f"
+          done
+          ls -lh "$TPL_DIR"
+          echo "Templates Android $TPL_VERSION de $BOX3D_RELEASE instaladas en $TPL_DIR"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Install Android build-tools
+        run: |
+          set -eu
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "build-tools;34.0.0" "platforms;android-34" >/dev/null
+          ls "$ANDROID_SDK_ROOT/build-tools"
+
+      - name: Configure Godot editor settings + debug keystore
+        run: |
+          set -eu
+          JDK_PATH="${JAVA_HOME:?JAVA_HOME no definido}"
+          KEY_DIR="$RUNNER_TEMP/android"
+          mkdir -p "$KEY_DIR"
+          # Godot exige un debug keystore configurado aunque se exporte release.
+          keytool -genkeypair -v -keystore "$KEY_DIR/debug.keystore" -alias androiddebugkey \
+            -storepass android -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+          mkdir -p "$HOME/.config/godot"
+          {
+            echo '[gd_resource type="EditorSettings" format=2]'
+            echo
+            echo '[resource]'
+            echo "export/android/android_sdk_path = \"$ANDROID_SDK_ROOT\""
+            echo "export/android/java_sdk_path = \"$JDK_PATH\""
+            echo "export/android/debug_keystore = \"$KEY_DIR/debug.keystore\""
+            echo "export/android/debug_keystore_user = \"androiddebugkey\""
+            echo "export/android/debug_keystore_pass = \"android\""
+          } > "$HOME/.config/godot/editor_settings-3.tres"
+          cat "$HOME/.config/godot/editor_settings-3.tres"
+          echo "KEY_DIR=$KEY_DIR" >> "$GITHUB_ENV"
+
+      - name: Write preset patch helper
+        run: |
+          cat > "$RUNNER_TEMP/patch_preset.py" <<'PY'
+          #!/usr/bin/env python3
+          """Parchea un preset de app/export_presets.cfg por nombre de plataforma.
+
+          Uso: patch_preset.py <Platform> key=value [key=value ...]
+          Las claves numericas se escriben sin comillas; el resto JSON-quoteadas.
+          """
+          import json
+          import re
+          import sys
+
+          NUMERIC = {
+              "version/code",
+              "custom_build/export_format",
+              "application/export_method_release",
+              "application/export_method_debug",
+          }
+
+          CFG = "app/export_presets.cfg"
+          platform = sys.argv[1]
+          updates = {}
+          for arg in sys.argv[2:]:
+              key, _, value = arg.partition("=")
+              updates[key] = value
+
+          lines = open(CFG, encoding="utf-8").read().splitlines()
+
+          idx = None
+          i = 0
+          while i < len(lines):
+              m = re.match(r"^\[preset\.(\d+)\]\s*$", lines[i])
+              if m:
+                  j = i + 1
+                  plat = None
+                  while j < len(lines) and not lines[j].startswith("["):
+                      if lines[j].strip().startswith("platform="):
+                          plat = lines[j].split("=", 1)[1].strip().strip('"')
+                      j += 1
+                  if plat == platform:
+                      idx = m.group(1)
+                      break
+                  i = j
+              else:
+                  i += 1
+
+          if idx is None:
+              sys.exit("patch_preset: no hay preset con platform=%r" % platform)
+
+          start = lines.index("[preset.%s.options]" % idx)
+          end = len(lines)
+          for k in range(start + 1, len(lines)):
+              if lines[k].startswith("["):
+                  end = k
+                  break
+
+          def render(key, value):
+              if key in NUMERIC:
+                  return "%s=%s" % (key, value)
+              return "%s=%s" % (key, json.dumps(value))
+
+          found = set()
+          for k in range(start + 1, end):
+              if "=" not in lines[k]:
+                  continue
+              key = lines[k].split("=", 1)[0].strip()
+              if key in updates:
+                  lines[k] = render(key, updates[key])
+                  found.add(key)
+
+          extra = [render(k, updates[k]) for k in updates if k not in found]
+          lines[end:end] = extra
+
+          open(CFG, "w", encoding="utf-8").write("\n".join(lines) + "\n")
+          print("patched preset.%s (%s): %s" % (idx, platform, ", ".join(sorted(updates))))
+          PY
+          python3 -m py_compile "$RUNNER_TEMP/patch_preset.py"
+          echo "helper listo"
+
+      - name: Configure release keystore (or fall back to debug)
+        id: keystore
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          ANDROID_KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -eu
+          if [ -n "$ANDROID_KEYSTORE_B64" ] && [ -n "$ANDROID_KEYSTORE_PASS" ] && [ -n "$ANDROID_KEY_ALIAS" ]; then
+            printf '%s' "$ANDROID_KEYSTORE_B64" | base64 --decode > "$KEY_DIR/release.keystore"
+            python3 "$RUNNER_TEMP/patch_preset.py" Android \
+              "keystore/release=$KEY_DIR/release.keystore" \
+              "keystore/release_user=$ANDROID_KEY_ALIAS" \
+              "keystore/release_password=$ANDROID_KEYSTORE_PASS"
+            echo "mode=release" >> "$GITHUB_OUTPUT"
+            echo "::notice::Firmando el APK con la keystore de release (secreto ANDROID_KEYSTORE_B64)."
+          else
+            echo "mode=debug" >> "$GITHUB_OUTPUT"
+            echo "::warning::Faltan ANDROID_KEYSTORE_B64/ANDROID_KEYSTORE_PASS/ANDROID_KEY_ALIAS: se exporta un APK **debug** (no publicable en Play). Setear los secretos para firmar release."
+          fi
+
+      - name: Stamp version into Android preset
+        run: |
+          set -eu
+          python3 "$RUNNER_TEMP/patch_preset.py" Android \
+            "version/code=$VERSION_CODE" \
+            "version/name=$VERSION_NAME"
+          grep -E '^version/(code|name)=' app/export_presets.cfg
+
+      - name: Export Android
+        run: |
+          set -eu
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          MODE="${{ steps.keystore.outputs.mode }}"
+          if [ "$MODE" = "release" ]; then
+            OUT="$GITHUB_WORKSPACE/dist/xat-${VERSION_SLUG}.apk"
+            echo "=== godot --export Android (release) ==="
+            "$GODOT_BIN" --no-window --path app --export "Android" "$OUT" || true
+          else
+            OUT="$GITHUB_WORKSPACE/dist/xat-${VERSION_SLUG}-debug.apk"
+            echo "=== godot --export-debug Android (fallback sin secretos) ==="
+            "$GODOT_BIN" --no-window --path app --export-debug "Android" "$OUT" || true
+          fi
+          # Godot 3.6 headless devuelve rc != 0 aun con export OK: verificar el archivo.
+          if [ ! -s "$OUT" ]; then
+            echo "::group::APKs encontrados"
+            find "$GITHUB_WORKSPACE" -name '*.apk' -print 2>/dev/null || true
+            echo "::endgroup::"
+            echo "::error::No se produjo APK en $OUT"
+            exit 1
+          fi
+          echo "APK OK: $OUT ($(du -h "$OUT" | cut -f1))"
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: xat-android-${{ env.VERSION_SLUG }}-${{ env.VERSION_CODE }}
+          path: dist/*.apk
+          if-no-files-found: error
+
+      - name: Attach APK to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.apk
+          fail_on_unmatched_files: true
+
+  ios:
+    needs: [prep, ios_gate]
+    if: needs.prep.outputs.build_ios == 'true' && needs.ios_gate.outputs.skip != 'true'
+    runs-on: macos-latest
+    timeout-minutes: 90
+    env:
+      BOX3D_RELEASE: ${{ needs.prep.outputs.box3d_release }}
+      VERSION_NAME: ${{ needs.prep.outputs.version_name }}
+      IOS_SHORT_VERSION: ${{ needs.prep.outputs.ios_short_version }}
+      VERSION_SLUG: ${{ needs.prep.outputs.version_slug }}
+      VERSION_CODE: ${{ needs.prep.outputs.version_code }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Cache Godot (templates + config)
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/godot
+            ~/.config/godot
+            ~/Library/Application Support/Godot
+            .godot
+          key: ${{ runner.os }}-godot-xat-ios-${{ env.BOX3D_RELEASE }}-${{ hashFiles('app/project.godot') }}
+          restore-keys: |
+            ${{ runner.os }}-godot-xat-ios-${{ env.BOX3D_RELEASE }}-
+            ${{ runner.os }}-godot-xat-ios-
+
+      - name: Install Godot (macOS stock)
+        run: |
+          set -eu
+          GODOT_DIR="$HOME/.local/bin"
+          mkdir -p "$GODOT_DIR"
+          echo "$GODOT_DIR" >> "$GITHUB_PATH"
+          if [ ! -x "$GODOT_DIR/Godot.app/Contents/MacOS/Godot" ]; then
+            curl -fSL -o /tmp/godot.zip \
+              "https://github.com/godotengine/godot/releases/download/${STOCK_GODOT_VERSION}/Godot_v${STOCK_GODOT_VERSION}_osx.universal.zip"
+            rm -rf /tmp/godot_extract "$GODOT_DIR/Godot.app"
+            mkdir -p /tmp/godot_extract
+            unzip -o /tmp/godot.zip -d /tmp/godot_extract
+            mv /tmp/godot_extract/Godot.app "$GODOT_DIR/Godot.app"
+          fi
+          GODOT_MAC="$GODOT_DIR/Godot.app/Contents/MacOS/Godot"
+          chmod +x "$GODOT_MAC"
+          codesign --force --deep --sign - "$GODOT_DIR/Godot.app"
+          codesign --verify --deep --strict "$GODOT_DIR/Godot.app"
+          "$GODOT_MAC" --version
+          echo "GODOT_BIN=$GODOT_MAC" >> "$GITHUB_ENV"
+
+      - name: Install iOS export template (fork iphone.zip)
+        run: |
+          set -eu
+          # El editor macOS es el stock 3.6.2, asi que el dir de templates sale de
+          # SU version. Se instalan los slots stock y despues se pisa iphone.zip con
+          # el del fork, que trae modules/xmpp compilado adentro (mismo arreglo que
+          # Odisea: editor stock manejando un template del fork).
+          TPL_VERSION="$("$GODOT_BIN" --version 2>/dev/null | grep -Eo '^[0-9]+\.[0-9]+(\.[0-9]+)?\.[a-z0-9]+' | head -n 1)"
+          [ -n "$TPL_VERSION" ] || { echo "::error::No pude derivar la version de $GODOT_BIN"; exit 1; }
+          TPL_DIR="$HOME/Library/Application Support/Godot/templates/$TPL_VERSION"
+          mkdir -p "$TPL_DIR"
+          if [ ! -f "$TPL_DIR/version.txt" ]; then
+            curl -fSL -o /tmp/tpz.zip \
+              "https://github.com/godotengine/godot/releases/download/${STOCK_GODOT_VERSION}/Godot_v${STOCK_GODOT_VERSION}_export_templates.tpz"
+            rm -rf /tmp/tpz_extract
+            mkdir -p /tmp/tpz_extract
+            unzip -o /tmp/tpz.zip -d /tmp/tpz_extract/
+            [ -d /tmp/tpz_extract/templates ] && cp -a /tmp/tpz_extract/templates/. "$TPL_DIR/"
+          fi
+          curl -fSL -o "$TPL_DIR/iphone.zip" \
+            "https://github.com/${FORK_REPO}/releases/download/${BOX3D_RELEASE}/iphone.zip"
+          ls -lh "$TPL_DIR/iphone.zip"
+          echo "iphone.zip de $BOX3D_RELEASE instalado en $TPL_DIR (editor $TPL_VERSION)"
+          echo "TPL_DIR=$TPL_DIR" >> "$GITHUB_ENV"
+
+      - name: Write preset patch helper
+        run: |
+          cat > "$RUNNER_TEMP/patch_preset.py" <<'PY'
+          #!/usr/bin/env python3
+          """Parchea un preset de app/export_presets.cfg por nombre de plataforma.
+
+          Uso: patch_preset.py <Platform> key=value [key=value ...]
+          Las claves numericas se escriben sin comillas; el resto JSON-quoteadas.
+          """
+          import json
+          import re
+          import sys
+
+          NUMERIC = {
+              "version/code",
+              "custom_build/export_format",
+              "application/export_method_release",
+              "application/export_method_debug",
+          }
+
+          CFG = "app/export_presets.cfg"
+          platform = sys.argv[1]
+          updates = {}
+          for arg in sys.argv[2:]:
+              key, _, value = arg.partition("=")
+              updates[key] = value
+
+          lines = open(CFG, encoding="utf-8").read().splitlines()
+
+          idx = None
+          i = 0
+          while i < len(lines):
+              m = re.match(r"^\[preset\.(\d+)\]\s*$", lines[i])
+              if m:
+                  j = i + 1
+                  plat = None
+                  while j < len(lines) and not lines[j].startswith("["):
+                      if lines[j].strip().startswith("platform="):
+                          plat = lines[j].split("=", 1)[1].strip().strip('"')
+                      j += 1
+                  if plat == platform:
+                      idx = m.group(1)
+                      break
+                  i = j
+              else:
+                  i += 1
+
+          if idx is None:
+              sys.exit("patch_preset: no hay preset con platform=%r" % platform)
+
+          start = lines.index("[preset.%s.options]" % idx)
+          end = len(lines)
+          for k in range(start + 1, len(lines)):
+              if lines[k].startswith("["):
+                  end = k
+                  break
+
+          def render(key, value):
+              if key in NUMERIC:
+                  return "%s=%s" % (key, value)
+              return "%s=%s" % (key, json.dumps(value))
+
+          found = set()
+          for k in range(start + 1, end):
+              if "=" not in lines[k]:
+                  continue
+              key = lines[k].split("=", 1)[0].strip()
+              if key in updates:
+                  lines[k] = render(key, updates[key])
+                  found.add(key)
+
+          extra = [render(k, updates[k]) for k in updates if k not in found]
+          lines[end:end] = extra
+
+          open(CFG, "w", encoding="utf-8").write("\n".join(lines) + "\n")
+          print("patched preset.%s (%s): %s" % (idx, platform, ", ".join(sorted(updates))))
+          PY
+          echo "helper listo"
+
+      - name: iOS Certificates Setup
+        uses: apple-actions/import-codesign-certs@v7
+        with:
+          p12-file-base64: ${{ secrets.IOS_CERT_P12_B64 }}
+          p12-password: ${{ secrets.IOS_CERT_PASSWORD }}
+
+      - name: iOS Provisioning Setup + version stamp
+        env:
+          IOS_PROVISION_B64: ${{ secrets.IOS_PROVISION_B64 }}
+        run: |
+          set -eu
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          PROFILE="$HOME/Library/MobileDevice/Provisioning Profiles/xat.mobileprovision"
+          echo "$IOS_PROVISION_B64" | base64 --decode > "$PROFILE"
+
+          security cms -D -i "$PROFILE" > "$RUNNER_TEMP/xat-profile.plist"
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$RUNNER_TEMP/xat-profile.plist")
+          TEAM_ID=$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' "$RUNNER_TEMP/xat-profile.plist")
+          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c 'Print :Name' "$RUNNER_TEMP/xat-profile.plist")
+          test -n "$PROFILE_UUID" && test -n "$TEAM_ID"
+          mv "$PROFILE" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+
+          python3 "$RUNNER_TEMP/patch_preset.py" iOS \
+            "application/app_store_team_id=$TEAM_ID" \
+            "application/identifier=org.fuentelibre.xat" \
+            "application/provisioning_profile_uuid_release=$PROFILE_UUID" \
+            "application/code_sign_identity_release=Apple Distribution" \
+            "application/export_method_release=0" \
+            "application/name=xat" \
+            "application/short_version=$IOS_SHORT_VERSION" \
+            "application/version=$VERSION_CODE"
+
+          echo "Perfil instalado: $PROFILE_NAME ($PROFILE_UUID), team $TEAM_ID"
+          echo "iOS version: $IOS_SHORT_VERSION ($VERSION_CODE)"
+
+      - name: Export iOS (Godot -> xcodebuild -> IPA)
+        run: |
+          set -eu
+          echo "=== Identidades de firma disponibles ==="
+          security find-identity -v -p codesigning | sed -E 's/("Apple Distribution:[^"]*").*/\1/' || true
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          OUT="$GITHUB_WORKSPACE/dist/xat-${VERSION_SLUG}.ipa"
+          # Godot 3.6 exporta iOS en release y llama a xcodebuild (archive + export
+          # del IPA) con el template iphone.zip. rc != 0 es benigno; importa el IPA.
+          "$GODOT_BIN" --no-window --path app --export "iOS" "$OUT" || true
+          if [ ! -s "$OUT" ]; then
+            ACTUAL=$(find "$(dirname "$OUT")" -maxdepth 1 -type f -name '*.ipa' -print -quit)
+            if [ -n "$ACTUAL" ]; then mv "$ACTUAL" "$OUT"; echo "IPA normalizado: $ACTUAL -> $OUT"; fi
+          fi
+          if [ ! -s "$OUT" ]; then
+            echo "::group::build/ios"
+            find "$GITHUB_WORKSPACE" -maxdepth 4 \( -name '*.ipa' -o -name '*.xcarchive' \) -print 2>/dev/null || true
+            echo "::endgroup::"
+            echo "::error::No se produjo IPA en $OUT"
+            exit 1
+          fi
+          echo "IPA OK: $OUT ($(du -h "$OUT" | cut -f1))"
+
+      - name: Upload iOS artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: xat-ios-${{ env.VERSION_SLUG }}-${{ env.VERSION_CODE }}
+          path: dist/*.ipa
+          if-no-files-found: error
+
+      - name: Upload iOS build to TestFlight
+        if: needs.ios_gate.outputs.testflight == 'true'
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          ASC_API_KEY_P8: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          IPA="$GITHUB_WORKSPACE/dist/xat-${VERSION_SLUG}.ipa"
+          KEY_DIR="$HOME/.appstoreconnect/private_keys"
+          KEY_FILE="$KEY_DIR/AuthKey_${ASC_KEY_ID}.p8"
+          test -s "$IPA" || { echo "::error::No hay IPA para TestFlight"; exit 1; }
+          mkdir -p "$KEY_DIR"
+          printf '%s\n' "$ASC_API_KEY_P8" > "$KEY_FILE"
+          chmod 600 "$KEY_FILE"
+          trap 'rm -f "$KEY_FILE"' EXIT
+          echo "=== Subiendo IPA a TestFlight ==="
+          xcrun altool --upload-app --type ios --file "$IPA" \
+            --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
+          echo "TestFlight acepto el build $VERSION_CODE."
+
+      - name: Attach IPA to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.ipa
+          fail_on_unmatched_files: true

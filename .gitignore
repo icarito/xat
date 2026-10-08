@@ -1,0 +1,19 @@
+# Binarios
+/bin/
+/bin/godot-xat
+
+# Godot
+.import/
+app/.import/
+*.import
+.godot/
+
+# Build/crash
+*crash*
+__pycache__/
+*.o
+*.tmp
+
+# Credenciales (nunca versionar)
+*.secret
+credentials.json

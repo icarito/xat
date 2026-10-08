@@ -1,0 +1,56 @@
+; Engine configuration file.
+; It's best edited using the editor UI and not directly,
+; since the parameters that go here are not all obvious.
+;
+; Format:
+;   [section] ; section goes between []
+;   param=value ; assign values to parameters
+
+config_version=4
+
+_global_script_classes=[ {
+"base": "Reference",
+"class": "XatXmpp",
+"language": "GDScript",
+"path": "res://addons/xat_xmpp/xat_xmpp.gd"
+} ]
+_global_script_class_icons={
+"XatXmpp": ""
+}
+
+[application]
+
+config/name="xat"
+config/description="Cliente XMPP para agentes OpenClaw"
+run/main_scene="res://main.tscn"
+run/low_processor_mode=true
+run/low_processor_mode_sleep_usec=8000
+
+[audio]
+
+driver="SDL2"
+
+[autoload]
+
+FontZoom="*res://addons/xat_xmpp/ui/font_zoom.gd"
+
+[display]
+
+window/size/width=980
+window/size/height=680
+window/handheld/orientation="sensor"
+window/size/width.mobile=420
+window/size/height.mobile=880
+window/stretch/mode.mobile="2d"
+window/stretch/aspect.mobile="expand"
+
+[physics]
+
+common/physics_fps=10
+
+[rendering]
+
+quality/driver/fallback_to_gles2=true
+vram_compression/import_etc=true
+vram_compression/import_pvrtc=true
+environment/default_clear_color=Color( 0.09, 0.1, 0.12, 1 )
