@@ -696,11 +696,29 @@ jobs:
           security find-identity -v -p codesigning | sed -E 's/("Apple Distribution:[^"]*").*/\1/' || true
           mkdir -p "$GITHUB_WORKSPACE/dist"
           OUT="$GITHUB_WORKSPACE/dist/xat-${VERSION_SLUG}.ipa"
-          # Godot 3.6 exporta iOS en release y llama a xcodebuild (archive + export
-          # del IPA) con el template iphone.zip. rc != 0 es benigno; importa el IPA.
+          BASE="$GITHUB_WORKSPACE/dist/xat-${VERSION_SLUG}"
+          # Godot 3.6 escribe el proyecto Xcode con el template iphone.zip. Si no
+          # llega a armar el IPA (pasa en este runner), lo archivamos y exportamos
+          # con xcodebuild usando el export_options.plist que genera el motor.
+          # rc != 0 de Godot es benigno: importa que quede el .xcodeproj.
           "$GODOT_BIN" --no-window --path app --export "iOS" "$OUT" || true
+          if [ ! -s "$OUT" ] && [ -d "$BASE.xcodeproj" ]; then
+            ARCH="$BASE.xcarchive"
+            echo "=== xcodebuild archive ==="
+            xcodebuild -project "$BASE.xcodeproj" -scheme "xat-${VERSION_SLUG}" \
+              -sdk iphoneos -configuration Release -destination "generic/platform=iOS" \
+              archive -allowProvisioningUpdates \
+              CODE_SIGN_STYLE=Manual \
+              CODE_SIGN_IDENTITY="Apple Distribution" \
+              PROVISIONING_PROFILE_SPECIFIER="xat App Store CI" \
+              -archivePath "$ARCH"
+            echo "=== xcodebuild -exportArchive ==="
+            xcodebuild -exportArchive -archivePath "$ARCH" \
+              -exportOptionsPlist "$BASE/export_options.plist" \
+              -allowProvisioningUpdates -exportPath "$GITHUB_WORKSPACE/dist"
+          fi
           if [ ! -s "$OUT" ]; then
-            ACTUAL=$(find "$(dirname "$OUT")" -maxdepth 1 -type f -name '*.ipa' -print -quit)
+            ACTUAL=$(find "$GITHUB_WORKSPACE/dist" -maxdepth 1 -type f -name '*.ipa' -print -quit)
             if [ -n "$ACTUAL" ]; then mv "$ACTUAL" "$OUT"; echo "IPA normalizado: $ACTUAL -> $OUT"; fi
           fi
           if [ ! -s "$OUT" ]; then
