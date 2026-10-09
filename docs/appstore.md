@@ -87,6 +87,12 @@ Notas:
   - `tracking_enabled=false`, sin dominios de rastreo, sin datos recopilados.
 - `ITSAppUsesNonExemptEncryption=false` viene en la plantilla iOS del fork.
 - No se habilita `UIBackgroundModes` ni el entitlement de push/voip.
+- **Iconos**: `app/project.godot` fija `config/icon="res://icon.png"` (el
+  `app/icon.png` 1024² opaco). Sin esto el `AppIcon.appiconset` queda vacío y
+  App Store Connect rechaza la subida con 90022/90023/90713 (faltan 120×120,
+  152×152, 167×167 y `CFBundleIconName`). Godot genera todas las tallas desde
+  el icono 1024² y Xcode inyecta `CFBundleIconName` vía
+  `ASSETCATALOG_COMPILER_APPICON_NAME=AppIcon`.
 - El job `ios` de `.github/workflows/release.yml` verifica, tras exportar, que
   el IPA contiene `PrivacyInfo.xcprivacy` sin placeholders, declara
   `NSPrivacyAccessedAPICategoryUserDefaults`, fija
@@ -115,6 +121,7 @@ Notas:
 | Servidor XMPP por IPv6 + TLS | TLS ok; **falta registro AAAA** |
 | Sin crashes en login/envío/recepción | login/envío verificados con la cuenta demo; falta prueba en dispositivo iOS |
 | UGC (chat público/anónimo) | no aplica (1:1); declarado en Review Notes |
+| Pipeline iOS → TestFlight | **ok**: run `37885671806` (build 12) subido a TestFlight sin errores |
 
 ## 6. Acciones manuales pendientes (fuera del repo)
 
