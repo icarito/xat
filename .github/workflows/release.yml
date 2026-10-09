@@ -575,6 +575,36 @@ jobs:
           echo "iphone.zip de $BOX3D_RELEASE instalado en $TPL_DIR (editor $TPL_VERSION)"
           echo "TPL_DIR=$TPL_DIR" >> "$GITHUB_ENV"
 
+      - name: Patch iOS template ($os_deployment_target)
+        run: |
+          set -eu
+          # El template del fork (3.6.4-rc) usa el placeholder $os_deployment_target,
+          # que el editor stock 3.6.2 NO conoce: quedaría literal en el pbxproj y
+          # xcodebuild lo rechaza ("project is damaged / parse error"). Se sustituye
+          # por el setting completo, igual que hace el motor del fork. Idempotente.
+          TPL_DIR="$TPL_DIR" python3 - <<'PY'
+          import os, shutil, zipfile
+          template = os.path.join(os.environ["TPL_DIR"], "iphone.zip")
+          member = "godot_ios.xcodeproj/project.pbxproj"
+          target = "IPHONEOS_DEPLOYMENT_TARGET = 15.0;"
+          with zipfile.ZipFile(template) as src:
+              if member not in src.namelist():
+                  raise SystemExit("iphone.zip no tiene " + member)
+              pbxproj = src.read(member).decode("utf-8")
+              if "$os_deployment_target" not in pbxproj:
+                  print("Nada que parchear: el pbxproj ya no tiene $os_deployment_target")
+                  raise SystemExit(0)
+              pbxproj = pbxproj.replace("$os_deployment_target", target)
+              patched = template + ".patched"
+              with zipfile.ZipFile(patched, "w") as dst:
+                  for info in src.infolist():
+                      data = pbxproj.encode("utf-8") if info.filename == member else src.read(info)
+                      dst.writestr(info, data, compress_type=info.compress_type)
+          shutil.move(patched, template)
+          print("pbxproj parcheado: $os_deployment_target -> " + target)
+          PY
+          unzip -p "$TPL_DIR/iphone.zip" godot_ios.xcodeproj/project.pbxproj | grep -c "IPHONEOS_DEPLOYMENT_TARGET = 15.0;"
+
       - name: Write preset patch helper
         run: |
           cat > "$RUNNER_TEMP/patch_preset.py" <<'PY'
