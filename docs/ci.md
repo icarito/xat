@@ -5,7 +5,7 @@ compilar el motor: baja el **binario headless** y los **export templates** del
 release pineado del fork `icarito/godot-box3d-3` (ver `.github/box3d_release`).
 
 El fork publica templates XMPP separados para xat (`*_xmpp`), además de los
-templates generales sin libstrophe/SQLite. El pin actual `v0.5.6-xmpp` ya está
+templates generales sin libstrophe/SQLite. El pin actual `v0.5.7-xmpp` ya está
 publicado y verificado (incluye el plugin nativo iOS `XatMedia`); los jobs de
 xat requieren los assets XMPP.
 
@@ -94,11 +94,11 @@ xat **no** compila el motor. El fork mantiene `modules/xmpp` opt-in: sus builds
 regulares y `.tpz` no enlazan libstrophe/SQLite; jobs dedicados compilan el
 headless y templates Android/iOS/macOS con el módulo. Para habilitar el CI de xat:
 
-1. Desde `main` del fork, ejecutar `gh workflow run release-xmpp.yml --repo icarito/godot-box3d-3 -f tag=v0.5.6-xmpp`. Ese flujo construye solo XMPP y crea un release sin esperar los builds generales. Verificar los assets `godot.box3d.linux.x86_64.headless_xmpp`,
+1. Desde `main` del fork, ejecutar `gh workflow run release-xmpp.yml --repo icarito/godot-box3d-3 -f tag=v0.5.7-xmpp`. Ese flujo construye solo XMPP y crea un release sin esperar los builds generales. Verificar los assets `godot.box3d.linux.x86_64.headless_xmpp`,
    `android_release_xmpp.apk`, `android_debug_xmpp.apk`, `iphone_xmpp.zip` y
    `osx_xmpp.zip`.
 2. Verificar esos assets y mantener `.github/box3d_release` apuntando a esa
-   release. `v0.5.6-xmpp` está publicado y verificado con `iphone_xmpp.zip`
+   release. `v0.5.7-xmpp` está publicado y verificado con `iphone_xmpp.zip`
    (con el plugin iOS `XatMedia`), `osx_xmpp.zip` y el headless `_xmpp`.
 3. Configurar los secretos de firma indicados arriba.
 
