@@ -48,17 +48,33 @@ func _add_field(p_field: Dictionary) -> void:
 	label.rect_min_size = Vector2(140, 0)
 	h.add_child(label)
 
-	var control = _make_control(ftype, value, p_field.get("options", []))
+	var control = _make_control(p_field)
 	h.add_child(control)
 	_inputs.append(control)
 	_box.add_child(h)
 
-func _make_control(p_type: String, p_value: String, p_options: Array):
+func _make_control(p_field: Dictionary):
+	var p_type = str(p_field.get("type", "text-single"))
+	var p_value = str(p_field.get("value", ""))
+	var p_options = p_field.get("options", [])
 	if p_type == "boolean":
 		var cb = CheckBox.new()
 		cb.pressed = (p_value == "1" or p_value.to_lower() == "true")
 		return cb
-	if p_type == "list-single" or p_type == "list-multi":
+	if p_type == "list-multi":
+		# Multi-selección: un checkbox por opción (los valores vienen en la lista).
+		var box = VBoxContainer.new()
+		box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		box.set_meta("multi", true)
+		var chosen = p_field.get("values", [])
+		for opt in p_options:
+			var cb = CheckBox.new()
+			cb.text = str(opt.get("label", opt.get("value", "")))
+			cb.set_meta("value", str(opt.get("value", "")))
+			cb.pressed = chosen.has(str(opt.get("value", "")))
+			box.add_child(cb)
+		return box
+	if p_type == "list-single":
 		var ob = OptionButton.new()
 		var selected := 0
 		for i in range(p_options.size()):
@@ -92,6 +108,10 @@ func collect() -> Array:
 			values = ["1" if c.pressed else "0"]
 		elif c is OptionButton:
 			values = [str(c.get_item_metadata(c.selected))]
+		elif c is VBoxContainer and c.has_meta("multi"):
+			for ch in c.get_children():
+				if ch is CheckBox and ch.pressed:
+					values.append(str(ch.get_meta("value")))
 		else:
 			values = [c.text]
 		out.append({"var": f["var"], "type": f["type"], "values": values})

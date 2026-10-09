@@ -1,7 +1,7 @@
 name: Release
 
-# Construye y publica xat para Android, iOS y macOS. NO compila el motor: baja
-# el binario headless y los export
+# Construye y publica xat para Android, iOS, macOS y Linux. NO compila el
+# motor: baja el binario headless y los export
 # templates del release pineado del fork icarito/godot-box3d-3 (ver
 # .github/box3d_release). El fork publica templates XMPP separados para xat;
 # los templates generales siguen sin libstrophe/SQLite para GDTK, Odisea y
@@ -9,8 +9,8 @@ name: Release
 #
 # Disparadores:
 #   - push a main         -> APK Android de preflight
-#   - push de tags v*    -> Android + iOS + macOS
-#   - workflow_dispatch  -> platform android|ios|macos|all
+#   - push de tags v*    -> Android + iOS + macOS + Linux
+#   - workflow_dispatch  -> platform android|ios|macos|linux|all
 
 on:
   workflow_dispatch:
@@ -24,6 +24,7 @@ on:
           - android
           - ios
           - macos
+          - linux
           - all
       version_name:
         description: "versionName / marketing version (vacio = tag sin 'v', o 0.1.0)"
@@ -64,6 +65,7 @@ jobs:
       build_android: ${{ steps.meta.outputs.build_android }}
       build_ios: ${{ steps.meta.outputs.build_ios }}
       build_macos: ${{ steps.meta.outputs.build_macos }}
+      build_linux: ${{ steps.meta.outputs.build_linux }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -118,10 +120,11 @@ jobs:
           [ -n "$PIN" ] || { echo "::error::.github/box3d_release esta vacio"; exit 1; }
 
           case "$PLATFORM" in
-            android) A=true;  I=false; M=false ;;
-            ios)     A=false; I=true;  M=false ;;
-            macos)   A=false; I=false; M=true  ;;
-            all)     A=true;  I=true;  M=true  ;;
+            android) A=true;  I=false; M=false; L=false ;;
+            ios)     A=false; I=true;  M=false; L=false ;;
+            macos)   A=false; I=false; M=true;  L=false ;;
+            linux)   A=false; I=false; M=false; L=true  ;;
+            all)     A=true;  I=true;  M=true;  L=true  ;;
             *) echo "::error::platform invalida: $PLATFORM"; exit 1 ;;
           esac
 
@@ -134,6 +137,7 @@ jobs:
             echo "build_android=$A"
             echo "build_ios=$I"
             echo "build_macos=$M"
+            echo "build_linux=$L"
           } >> "$GITHUB_OUTPUT"
 
           echo "xat release: platform=$PLATFORM version_name=$VERSION_NAME code=$VERSION_CODE fork=$PIN"
@@ -249,6 +253,82 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*.zip
+          fail_on_unmatched_files: true
+
+  linux:
+    needs: prep
+    if: needs.prep.outputs.build_linux == 'true'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    env:
+      BOX3D_RELEASE: ${{ needs.prep.outputs.box3d_release }}
+      VERSION_SLUG: ${{ needs.prep.outputs.version_slug }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download headless export engine (fork)
+        run: |
+          set -eu
+          mkdir -p "$HOME/.local/bin"
+          curl -fSL -o "$HOME/.local/bin/godot-xat-headless" \
+            "https://github.com/${FORK_REPO}/releases/download/${BOX3D_RELEASE}/godot.box3d.linux.x86_64.headless_xmpp"
+          chmod +x "$HOME/.local/bin/godot-xat-headless"
+          echo "GODOT_BIN=$HOME/.local/bin/godot-xat-headless" >> "$GITHUB_ENV"
+          "$HOME/.local/bin/godot-xat-headless" --version
+
+      - name: Install Linux export templates (fork linux_xmpp)
+        run: |
+          set -eu
+          TPL_VERSION="$("$GODOT_BIN" --version 2>/dev/null | grep -Eo '^[0-9]+\.[0-9]+(\.[0-9]+)?\.[a-z0-9]+' | head -n 1)"
+          [ -n "$TPL_VERSION" ] || { echo "::error::No pude derivar la version de Godot"; exit 1; }
+          TPL_DIR="$HOME/.local/share/godot/templates/$TPL_VERSION"
+          mkdir -p "$TPL_DIR"
+          if [ ! -f "$TPL_DIR/version.txt" ]; then
+            curl -fSL -o /tmp/tpz.zip \
+              "https://github.com/godotengine/godot/releases/download/${STOCK_GODOT_VERSION}/Godot_v${STOCK_GODOT_VERSION}_export_templates.tpz"
+            rm -rf /tmp/tpz_extract
+            mkdir -p /tmp/tpz_extract
+            unzip -o /tmp/tpz.zip -d /tmp/tpz_extract/
+            [ -d /tmp/tpz_extract/templates ] && cp -a /tmp/tpz_extract/templates/. "$TPL_DIR/"
+          fi
+          # Slots exactos que busca Godot para Linux/X11; los binarios traen el
+          # modulo xmpp (los templates stock no lo tienen).
+          curl -fSL -o "$TPL_DIR/linux_x11_64_release" \
+            "https://github.com/${FORK_REPO}/releases/download/${BOX3D_RELEASE}/linux_x11_64_release_xmpp"
+          curl -fSL -o "$TPL_DIR/linux_x11_64_debug" \
+            "https://github.com/${FORK_REPO}/releases/download/${BOX3D_RELEASE}/linux_x11_64_debug_xmpp"
+          chmod +x "$TPL_DIR/linux_x11_64_release" "$TPL_DIR/linux_x11_64_debug"
+          echo "TPL_DIR=$TPL_DIR" >> "$GITHUB_ENV"
+
+      - name: Export Linux/X11
+        run: |
+          set -eu
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          OUT="$GITHUB_WORKSPACE/dist/xat-${VERSION_SLUG}-linux.x86_64"
+          "$GODOT_BIN" --no-window --path app --export "Linux/X11" "$OUT" || true
+          if [ ! -s "$OUT" ]; then
+            echo "::group::archivos Linux generados"
+            find "$GITHUB_WORKSPACE" -maxdepth 3 -name 'xat*' -print 2>/dev/null || true
+            echo "::endgroup::"
+            echo "::error::No se produjo el binario Linux en $OUT"
+            exit 1
+          fi
+          chmod +x "$OUT"
+          echo "Linux OK: $OUT ($(du -h "$OUT" | cut -f1))"
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: xat-linux-${{ env.VERSION_SLUG }}-${{ needs.prep.outputs.version_code }}
+          path: dist/xat-*-linux.x86_64
+          if-no-files-found: error
+
+      - name: Attach Linux build to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/xat-*-linux.x86_64
           fail_on_unmatched_files: true
 
   android:

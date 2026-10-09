@@ -70,9 +70,10 @@ SceneTree`, `load().new()`, `check()`, `OS.exit_code`, `quit()`).
 
 ## Plataforma
 
-v1: **Linux / gdtk** (core agnóstico; Android/iOS en fases posteriores). Persistencia
+v1: **Linux / gdtk** (core agnóstico; Android/iOS ya empaquetados). Persistencia
 SQLite local. Credenciales: archivo `0600` + override por variable de entorno.
-Notificaciones: **sólo in-app**.
+Notificaciones: in-app; fuera de primer plano en preparación (fachada portable en
+`ui/notifier.gd`, plan nativo en `docs/notifications.md`).
 
 ## XEPs v1
 
@@ -80,10 +81,80 @@ Obligatorias: transmisión + STARTTLS/SASL SCRAM-SHA-1/256 + bind + sesión
 (libstrophe); XEP-0199 ping; XEP-0198 SM (libstrophe); roster (`jabber:iq:roster`) +
 presence; XEP-0203 delay; XEP-0184 recibos; XEP-0280 carbons; XEP-0085 chat states;
 XEP-0313 MAM; XEP-0308 correcciones; XEP-0115 caps; XEP-0163 PEP + XEP-0084 avatares
-(+ telemetría); XEP-0050 ad-hoc + XEP-0004 data forms; XEP-0439 quick responses.
+(+ telemetría); XEP-0050 ad-hoc + XEP-0004 data forms; XEP-0439 quick responses;
+XEP-0045 MUC (entrar/salir, ocupantes, groupchat, sujeto, invitaciones mediadas
+XEP-0045 §7.8 y directas XEP-0249, MAM de sala, administración de afiliaciones
+`muc#admin`, edición de config `muc#owner` y destrucción de sala).
 
-Fuera de v1: 0045 MUC, 0066 OOB, 0363 upload, 0357 push. 0384 OMEMO: siguiente
-prioridad, ver `docs/omemo.md` (política interina incluida).
+Fuera de v1: 0066 OOB, 0363 upload, 0357 push. 0384 OMEMO: siguiente
+prioridad, ver `docs/omemo.md` (política interina incluida). En salas quedan fuera
+PM entre ocupantes (XEP-0045 §7.4), OMEMO, XEP-0402 bookmarks nativos, listar
+afiliados/roles en una vista dedicada y XEP-0372 refs de mención (la mención es
+texto `@nick ` plano, que interopera con el plugin de OpenClaw y con cualquier
+cliente).
+
+## Salas (MUC, XEP-0045)
+
+- `xmpp/muc.gd` — helper puro (testeable headless): builders de join/leave/
+  groupchat, parser de presencia de sala (códigos 110 self / 201 creada / 210
+  renombrado / 307 expulsado / 301 vetado), parser de invitaciones, estado de
+  ocupantes y `disco_has_muc`.
+- `session.gd` — `_rooms` (nick/sujeto/joined por sala) + `_muc_state` (nick ->
+  ocupante). `_on_presence` rutea a la sala **antes** de `presence_model.update`,
+  de modo que una presencia de sala nunca contamina el anillo verde de contactos.
+  `_on_message` rutea `type=groupchat` (vivo o MAM) por la sala: sin recibos ni
+  chat states, dedupe del eco propio por `origin-id`/id de stanza, guardado con
+  `sender=nick`. Autojoin de las salas persistidas tras `send_presence()`.
+- `store.gd` — columna `sender` en `messages` y tabla `rooms(bare_jid, nick,
+  autojoin)`. El dedupe global de `open()` incluye `sender`, para no plegar a dos
+  ocupantes que digan lo mismo en el mismo minuto.
+- `roster_panel.gd` — sección "Salas" (bajo Contactos) con unread; el botón
+  "Unirse a sala" abre `join_room_dialog.gd` (dominio de salas prellenado con el
+  componente descubierto). Invitaciones como tarjeta en la banda de solicitudes.
+- `chat_panel.gd` + `bubble.gd` — modo sala: título = sala, botón de ocupantes
+  (oprimir un nick inserta `@nick ` en el composer), chip de remitente oprimible
+  en la primera burbuja de cada grupo entrante, y se suprimen quick/approvals/
+  estados/adjuntos.
+- **Menú de sala** (botón `⋯`): "Invitar a contacto" (`invite_dialog.gd`, elige
+  contacto del roster + razón), "Cambiar tema" (`text_prompt_dialog.gd`),
+  "Ajustes de sala" y "Destruir sala" (estos dos sólo dueño/admin/dueño).
+- **Moderación de ocupantes**: en el popup de ocupantes, cada nick ajeno trae un
+  `⋯` con acciones según nuestra afiliación/rol: hacer/quitar miembro, admin,
+  moderador, expulsar y expulsar+banear. `session.muc_can_moderate()/muc_is_owner()`
+  guían la UI.
+- **Ajustes de sala**: `session.muc_request_config(room)` pide el formulario
+  `muc#owner` y emite `muc_config_form(room, form)`; `main.gd` lo muestra con
+  `command_dialog.gd` (XEP-0004, con soporte `list-multi`) y
+  `session.muc_submit_config(room, fields)` lo guarda. Invitar a una sala
+  sólo-miembros también afilia `member` antes (si somos dueño/admin).
+
+### Notas del spike (Prosody de `hablar.fuentelibre.org`, 2026-10)
+
+- Crear la sala al unirse devuelve códigos `[201, 100, 110]` (creada, no anónima,
+  self) y el `<item>` trae `jid` (sala no anónima). La creación sólo está permitida
+  en el dominio local (`restrict_room_creation=local`).
+- El eco propio llega como `from=room/nick` con `origin-id` (XEP-0359) igual al id
+  enviado y `stanza-id by=room`: el dedupe por `origin-id`/id es fiable.
+- Un `<message type=groupchat from=room><subject/></message>` vacío llega al
+  entrar; se ignora (sin body) y los cambios de sujeto se emiten por `muc_subject`.
+- Presencia de salida propia: `type=unavailable` + código 110, `role=none`.
+- **Sala recién creada queda BLOQUEADA**: Prosody trae `muc_room_locking=true`
+  por defecto; la sala sólo se desbloquea (y entonces admite a otros) cuando el
+  dueño envía su configuración inicial. Sin esto, el segundo ocupante recibe
+  `<presence type=error><error type=cancel><item-not-found/>`. `session.gd`
+  detecta el código 201 al crear, pide el formulario `muc#owner` y lo reenvía tal
+  cual (conserva los defaults del servidor: `members_only`, etc.), lo que dispara
+  `muc-config-submitted`.
+- Las presencias de error de sala (`type=error`) NO deben tratarse como altas de
+  ocupante: se descartan, se emite `muc_error(room, condition)` y `muc_left`.
+- `muc_room_default_members_only=true`: una sala creada por xat sólo admite al
+  dueño hasta agregar afiliados `member`; la UI de invitación ya afilia `member`
+  (si somos dueño/admin) antes de invitar, así el invitado puede entrar.
+- Verificado en vivo (dos cuentas): invitar+afiliar → el invitado entra como
+  `member`; cambio de tema visto por ambos; expulsión (rol `none`) cae el ocupante;
+  `muc_request_config` devuelve 22 campos; `muc_destroy` expulsa a los ocupantes.
+- El eco propio llega con `<origin-id>` y `<occupant-id>`; MAM de sala devuelve
+  el remitente en `from=room/nick` y en `<x><item jid=... affiliation=...>`.
 
 ## Validación
 
@@ -103,6 +174,10 @@ prioridad, ver `docs/omemo.md` (política interina incluida).
   cert inválido. Plan B: backend OpenSSL.
 - `libstrophe` vendorizado: sincronía; validar SM resume.
 - XEP-0308: plegado de cadenas (live y MAM) delicado.
+- MUC: la semántica de presencia de sala (códigos 110/201/210/307/301) varía entre
+  servicios; el branch de `_on_presence` es lo primero a proteger con test, porque
+  contaminar `presence_model` rompería el anillo verde de contactos. Sin `origin-id`
+  fiable habría burbujas dobles del eco propio.
 - Caps 0115: si xat anuncia caps propias, el `ver` es opaco y se sube a mano.
 - Overlay del fork: cambios obligan a recompilar/releasear templates.
 - SQLite: binding + hilos; no tocarlo desde el hilo de libstrophe.

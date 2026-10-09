@@ -22,6 +22,7 @@ static func parse(p_message) -> Dictionary:
 		"type": "",
 		"id": "",
 		"body": "",
+		"subject": "",
 		"timestamp": "",
 		"delayed": false,
 		"chat_state": "",
@@ -79,6 +80,10 @@ static func parse(p_message) -> Dictionary:
 	var body_node = stanza.get_child("body")
 	if body_node != null:
 		out["body"] = body_node.get_text()
+	# Sujeto de sala (XEP-0045 §7.2): llega como groupchat sin body.
+	var subject_node = stanza.get_child("subject")
+	if subject_node != null:
+		out["subject"] = subject_node.get_text()
 
 	var delay = stanza.get_child("delay", NS.DELAY)
 	if delay != null:

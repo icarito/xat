@@ -5,6 +5,12 @@ extends PanelContainer
 # gtk-llm-chat). Un clic selecciona. Emite peer_selected.
 
 signal peer_selected(bare)
+signal add_contact_requested()
+signal join_room_requested()
+signal subscription_accept(bare)
+signal subscription_deny(bare)
+signal room_invite_accept(room)
+signal room_invite_ignore(room)
 
 const P = preload("res://addons/xat_xmpp/ui/palette.gd")
 const AgentOrb = preload("res://addons/xat_xmpp/ui/agent_orb.gd")
@@ -13,19 +19,32 @@ const AvatarBadge = preload("res://addons/xat_xmpp/ui/avatar_badge.gd")
 const XatXmpp = preload("res://addons/xat_xmpp/xat_xmpp.gd")
 
 var _peers := []
-var _online := {}
 var _agents := {} # bare -> último state de agente
+var _online := {} # bare -> disponible
 var _unread := {} # bare -> mensajes sin leer
 var _avatars := {} # bare -> textura de avatar
 var _activity := {} # bare -> timestamp ISO del último mensaje (orden)
 var _selected := ""
 var _box: VBoxContainer
+var _rooms := [] # salas (bare) persistidas
+var _rooms_box: VBoxContainer
+var _rooms_header: Label
+var _rooms_activity := {} # sala -> timestamp ISO del último mensaje (orden)
 var _scroll: ScrollContainer
+var _grid_scroll: ScrollContainer
+var _grid: HBoxContainer
+var _columns := 1 # 1 = lista simple; >1 = multicolumna (landscape) con scroll lateral
+var _requests := {} # bare -> status (solicitudes de suscripción pendientes)
+var _invites := {} # sala -> {from, reason} (invitaciones MUC pendientes)
+var _req_box: VBoxContainer
 var _scrolling := false
 var _juice = null
 var _sound_btn: Button
 var _motion_btn: Button
 var _haptic_btn: Button
+var _add_btn: Button
+var _room_btn: Button
+var _foot: HBoxContainer
 
 # La lista es una columna de ancho fijo, centrada en el panel: los avatares
 # quedan alineados entre filas (no pegados al borde izquierdo a pantalla completa).
@@ -37,6 +56,17 @@ func _init() -> void:
 	rect_min_size = Vector2(240, 0)
 	var root = VBoxContainer.new()
 	add_child(root)
+	root.add_child(_make_header())
+	# Solicitudes de suscripción pendientes: banda arriba de la lista, oculta
+	# mientras no haya ninguna.
+	_req_box = VBoxContainer.new()
+	_req_box.visible = false
+	_req_box.add_constant_override("separation", 4)
+	var req_margin = MarginContainer.new()
+	req_margin.add_constant_override("margin_left", COLUMN_MARGIN)
+	req_margin.add_constant_override("margin_right", COLUMN_MARGIN)
+	req_margin.add_child(_req_box)
+	root.add_child(req_margin)
 	var sc = ScrollContainer.new()
 	_scroll = sc
 	sc.scroll_horizontal_enabled = false
@@ -44,10 +74,23 @@ func _init() -> void:
 	sc.connect("scroll_started", self, "_on_scroll_started")
 	sc.connect("scroll_ended", self, "_on_scroll_ended")
 	root.add_child(sc)
+	# Vista multicolumna (landscape): columnas en un HBox con scroll lateral.
+	_grid_scroll = ScrollContainer.new()
+	_grid_scroll.scroll_horizontal_enabled = true
+	_grid_scroll.scroll_vertical_enabled = true
+	_grid_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_grid_scroll.visible = false
+	root.add_child(_grid_scroll)
+	_grid = HBoxContainer.new()
+	_grid.add_constant_override("separation", 4)
+	_grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_grid.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_grid_scroll.add_child(_grid)
 	# Recoloca la columna cuando cambia el ancho (móvil portrait/landscape).
 	connect("resized", self, "_on_resized")
 	# Pie: ajustes de juice (sonido / movimiento reducido).
 	var foot = HBoxContainer.new()
+	_foot = foot
 	foot.alignment = BoxContainer.ALIGN_CENTER
 	root.add_child(foot)
 	_sound_btn = _toggle("♪", "sound_enabled", "Sonido")
@@ -67,12 +110,198 @@ func _init() -> void:
 	_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_box.mouse_filter = Control.MOUSE_FILTER_IGNORE # deja pasar el arrastre táctil entre filas
 	_box.add_constant_override("separation", 2)
+	# Sección "Salas" (XEP-0045), bajo Contactos. Oculta mientras no haya salas.
+	_rooms_header = Label.new()
+	_rooms_header.text = "Salas"
+	_rooms_header.visible = false
+	_rooms_header.add_color_override("font_color", P.TEXT_DIM)
+	_rooms_header.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_rooms_box = VBoxContainer.new()
+	_rooms_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_rooms_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_rooms_box.add_constant_override("separation", 2)
+	_rooms_box.visible = false
+	var content = VBoxContainer.new()
+	content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	content.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	content.add_constant_override("separation", 2)
+	content.add_child(_box)
+	content.add_child(_rooms_header)
+	content.add_child(_rooms_box)
 	var top = MarginContainer.new()
 	top.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	top.add_constant_override("margin_top", 12)
 	top.add_constant_override("margin_bottom", 6)
 	sc.add_child(top)
-	top.add_child(_box)
+	top.add_child(content)
+
+# Encabezado del roster: título y botón para añadir contacto.
+func _make_header() -> HBoxContainer:
+	var h = HBoxContainer.new()
+	h.add_constant_override("separation", 6)
+	var m = MarginContainer.new()
+	m.add_constant_override("margin_left", COLUMN_MARGIN)
+	m.add_constant_override("margin_right", 8)
+	m.add_constant_override("margin_top", 12)
+	m.add_constant_override("margin_bottom", 4)
+	m.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	h.add_child(m)
+	var title = Label.new()
+	title.text = "Contactos"
+	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	m.add_child(title)
+	var add = Button.new()
+	add.text = "+ Añadir"
+	add.hint_tooltip = "Añadir contacto por JID"
+	add.focus_mode = Control.FOCUS_NONE
+	add.connect("pressed", self, "_on_add_contact")
+	_add_btn = add
+	h.add_child(add)
+	var room = Button.new()
+	room.text = "+ Sala"
+	room.hint_tooltip = "Unirse a una sala (MUC)"
+	room.focus_mode = Control.FOCUS_NONE
+	room.connect("pressed", self, "_on_join_room")
+	_room_btn = room
+	h.add_child(room)
+	return h
+
+# Oculta los botones propios del roster (añadir/sala y pie de ajustes) cuando la
+# navegación vive en el sidebar (landscape).
+func set_chrome_visible(p_visible: bool) -> void:
+	if _add_btn != null:
+		_add_btn.visible = p_visible
+	if _room_btn != null:
+		_room_btn.visible = p_visible
+	if _foot != null:
+		_foot.visible = p_visible
+
+func _on_add_contact() -> void:
+	emit_signal("add_contact_requested")
+
+func _on_join_room() -> void:
+	emit_signal("join_room_requested")
+
+# --- Solicitudes de suscripción pendientes ---
+
+func add_request(p_bare: String, p_status: String = "") -> void:
+	if _requests.has(p_bare):
+		return
+	_requests[p_bare] = p_status
+	_rebuild_requests()
+
+func remove_request(p_bare: String) -> void:
+	if _requests.has(p_bare):
+		_requests.erase(p_bare)
+		_rebuild_requests()
+
+func has_request(p_bare: String) -> bool:
+	return _requests.has(p_bare)
+
+# --- Invitaciones a salas (MUC) ---
+
+func add_invite(p_room: String, p_from: String, p_reason: String = "") -> void:
+	_invites[p_room] = {"from": p_from, "reason": p_reason}
+	_rebuild_requests()
+
+func remove_invite(p_room: String) -> void:
+	if _invites.has(p_room):
+		_invites.erase(p_room)
+		_rebuild_requests()
+
+func _rebuild_requests() -> void:
+	for c in _req_box.get_children():
+		_req_box.remove_child(c)
+		c.queue_free()
+	_req_box.visible = not _requests.empty() or not _invites.empty()
+	for bare in _requests.keys():
+		_req_box.add_child(_make_request_row(str(bare)))
+	for room in _invites.keys():
+		_req_box.add_child(_make_invite_row(str(room)))
+
+func _make_invite_row(p_room: String) -> PanelContainer:
+	var info = _invites.get(p_room, {})
+	var who = str(info.get("from", ""))
+	var reason = str(info.get("reason", ""))
+	var card = PanelContainer.new()
+	card.add_stylebox_override("panel", XatTheme.with_border(XatTheme.box(P.BG2, 10), P.AGENT_EDGE))
+	var v = VBoxContainer.new()
+	v.add_constant_override("separation", 4)
+	card.add_child(v)
+	var l = Label.new()
+	l.text = "%s te invita a %s" % [who if who != "" else "Alguien", p_room]
+	l.clip_text = true
+	l.hint_tooltip = p_room
+	v.add_child(l)
+	if reason != "":
+		var note = Label.new()
+		note.text = reason
+		note.clip_text = true
+		note.add_color_override("font_color", P.TEXT_DIM)
+		v.add_child(note)
+	var actions = HBoxContainer.new()
+	actions.add_constant_override("separation", 6)
+	v.add_child(actions)
+	var accept = Button.new()
+	accept.text = "Unirse"
+	accept.focus_mode = Control.FOCUS_NONE
+	accept.connect("pressed", self, "_on_invite_accept", [p_room])
+	actions.add_child(accept)
+	var ignore = Button.new()
+	ignore.text = "Ignorar"
+	ignore.focus_mode = Control.FOCUS_NONE
+	ignore.connect("pressed", self, "_on_invite_ignore", [p_room])
+	actions.add_child(ignore)
+	return card
+
+func _on_invite_accept(p_room: String) -> void:
+	remove_invite(p_room)
+	emit_signal("room_invite_accept", p_room)
+
+func _on_invite_ignore(p_room: String) -> void:
+	remove_invite(p_room)
+	emit_signal("room_invite_ignore", p_room)
+
+func _make_request_row(p_bare: String) -> PanelContainer:
+	var card = PanelContainer.new()
+	card.add_stylebox_override("panel", XatTheme.with_border(XatTheme.box(P.BG2, 10), P.PENDING))
+	var v = VBoxContainer.new()
+	v.add_constant_override("separation", 4)
+	card.add_child(v)
+	var who = Label.new()
+	who.text = "%s quiere agregarte" % p_bare
+	who.clip_text = true
+	who.hint_tooltip = p_bare
+	v.add_child(who)
+	var status = str(_requests.get(p_bare, ""))
+	if status != "":
+		var note = Label.new()
+		note.text = status
+		note.clip_text = true
+		note.add_color_override("font_color", P.TEXT_DIM)
+		v.add_child(note)
+	var actions = HBoxContainer.new()
+	actions.add_constant_override("separation", 6)
+	v.add_child(actions)
+	var accept = Button.new()
+	accept.text = "Aceptar"
+	accept.focus_mode = Control.FOCUS_NONE
+	accept.connect("pressed", self, "_on_request_accept", [p_bare])
+	actions.add_child(accept)
+	var deny = Button.new()
+	deny.text = "Rechazar"
+	deny.focus_mode = Control.FOCUS_NONE
+	deny.connect("pressed", self, "_on_request_deny", [p_bare])
+	actions.add_child(deny)
+	return card
+
+func _on_request_accept(p_bare: String) -> void:
+	remove_request(p_bare)
+	emit_signal("subscription_accept", p_bare)
+
+func _on_request_deny(p_bare: String) -> void:
+	remove_request(p_bare)
+	emit_signal("subscription_deny", p_bare)
 
 func set_juice(p_juice) -> void:
 	_juice = p_juice
@@ -105,6 +334,7 @@ func set_peers(p_bares: Array) -> void:
 # Rehace las filas descartando la fuente cacheada (p. ej. tras cambiar el zoom).
 func refresh() -> void:
 	_rebuild()
+	_rebuild_rooms()
 
 func set_online(p_bare: String, p_online: bool) -> void:
 	_online[p_bare] = p_online
@@ -128,8 +358,14 @@ func set_avatar(p_bare: String, p_tex) -> void:
 	_avatars[p_bare] = p_tex
 	_rebuild()
 
-# Último mensaje con el peer: si cambia el orden, se reordena.
+# Último mensaje con el peer/sala: si cambia el orden, se reordena.
 func touch(p_bare: String, p_ts: String) -> void:
+	if _rooms.has(p_bare):
+		if p_ts <= str(_rooms_activity.get(p_bare, "")):
+			return
+		_rooms_activity[p_bare] = p_ts
+		_rebuild_rooms()
+		return
 	if p_ts <= str(_activity.get(p_bare, "")):
 		return
 	_activity[p_bare] = p_ts
@@ -162,7 +398,7 @@ func set_unread(p_bare: String, p_n: int) -> void:
 		if had:
 			_rebuild() # restaura el color de estado
 		return
-	var row = _box.get_node_or_null(_row_name(p_bare))
+	var row = _find_row(p_bare)
 	if row != null:
 		var st = row.get_meta("status")
 		st.text = _status_text(p_bare)
@@ -173,11 +409,136 @@ func select(p_bare: String) -> void:
 	_selected = p_bare
 	for row in _box.get_children():
 		row.pressed = row.get_meta("bare") == p_bare
+	for row in _rooms_box.get_children():
+		row.pressed = row.get_meta("bare") == p_bare
+
+func _find_row(p_bare: String):
+	var row = _box.get_node_or_null(_row_name(p_bare))
+	if row == null:
+		row = _rooms_box.get_node_or_null(_room_row_name(p_bare))
+	return row
+
+# --- Salas (XEP-0045) ---
+
+# Reemplaza la lista de salas persistidas (bares) y reconstruye la sección.
+func set_rooms(p_rooms: Array) -> void:
+	_rooms = p_rooms
+	var kept := {}
+	for r in _rooms:
+		kept[str(r)] = true
+	for b in _rooms_activity.keys():
+		if not kept.has(b):
+			_rooms_activity.erase(b)
+	_rebuild_rooms()
+
+func _sorted_rooms() -> Array:
+	var out = _rooms.duplicate()
+	out.sort_custom(self, "_before_room")
+	return out
+
+func _before_room(a, b) -> bool:
+	var ta = str(_rooms_activity.get(a, ""))
+	var tb = str(_rooms_activity.get(b, ""))
+	if ta != tb:
+		return ta > tb
+	return str(a) < str(b)
+
+func _rebuild_rooms() -> void:
+	if _rooms_box == null:
+		return
+	if _columns > 1:
+		_rebuild() # la vista grid incluye contactos + salas
+		return
+	for c in _rooms_box.get_children():
+		_rooms_box.remove_child(c)
+		c.queue_free()
+	var has = not _rooms.empty()
+	_rooms_header.visible = has
+	_rooms_box.visible = has
+	if not has:
+		return
+	for b in _sorted_rooms():
+		_rooms_box.add_child(_make_room_row(str(b)))
+
+# Alterna entre lista simple (portrait) y multicolumna con scroll lateral
+# (landscape). El número de columnas lo decide main según el ancho.
+func set_columns(p_n: int) -> void:
+	p_n = max(1, p_n)
+	if p_n == _columns:
+		return
+	_columns = p_n
+	var grid = _columns > 1
+	if _scroll != null:
+		_scroll.visible = not grid
+	if _grid_scroll != null:
+		_grid_scroll.visible = grid
+	_rebuild()
+	if not grid:
+		_rebuild_rooms()
+
+func _make_room_row(p_room: String) -> Button:
+	var row = Button.new()
+	row.name = _room_row_name(p_room)
+	row.toggle_mode = true
+	row.mouse_filter = Control.MOUSE_FILTER_PASS
+	row.add_stylebox_override("normal", StyleBoxEmpty.new())
+	row.add_stylebox_override("focus", StyleBoxEmpty.new())
+	row.add_stylebox_override("hover", XatTheme.box(P.BG2.darkened(0.15), 10))
+	row.add_stylebox_override("pressed", XatTheme.with_border(XatTheme.box(P.BG2, 10), P.LINE))
+	row.pressed = p_room == _selected
+	row.rect_min_size = Vector2(0, 54)
+	row.set_meta("bare", p_room)
+	row.set_meta("room", true)
+	row.connect("pressed", self, "_on_row", [p_room])
+	var h = HBoxContainer.new()
+	h.anchor_right = 1.0
+	h.anchor_bottom = 1.0
+	h.margin_left = 8
+	h.margin_right = -8
+	h.alignment = BoxContainer.ALIGN_CENTER
+	h.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	h.add_constant_override("separation", 0)
+	row.add_child(h)
+	var inner = HBoxContainer.new()
+	inner.rect_min_size.x = _column_width()
+	inner.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	inner.add_constant_override("separation", 10)
+	h.add_child(inner)
+	row.set_meta("inner", inner)
+	var hash_l = Label.new()
+	hash_l.text = "#"
+	hash_l.rect_min_size = Vector2(48, 0)
+	hash_l.align = Label.ALIGN_CENTER
+	hash_l.valign = Label.VALIGN_CENTER
+	hash_l.add_color_override("font_color", P.LINE)
+	hash_l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	inner.add_child(hash_l)
+	var v = VBoxContainer.new()
+	v.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	v.alignment = BoxContainer.ALIGN_CENTER
+	v.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	v.add_constant_override("separation", 0)
+	inner.add_child(v)
+	var name_l = Label.new()
+	name_l.text = p_room.split("@")[0]
+	name_l.clip_text = true
+	name_l.hint_tooltip = p_room
+	v.add_child(name_l)
+	var st = Label.new()
+	st.text = _status_text(p_room)
+	st.clip_text = true
+	st.add_color_override("font_color", P.TEXT_DIM)
+	v.add_child(st)
+	row.set_meta("status", st)
+	return row
 
 func _rebuild() -> void:
 	for c in _box.get_children():
 		_box.remove_child(c)
 		c.queue_free()
+	if _columns > 1:
+		_rebuild_grid()
+		return
 	for b in _sorted():
 		var row = _make_row(str(b))
 		_box.add_child(row)
@@ -185,6 +546,45 @@ func _rebuild() -> void:
 		if row.has_meta("orb"):
 			row.get_meta("orb").set_state(_agents[str(b)])
 			row.get_meta("orb").set_connected(_online.get(str(b), false))
+
+# Multicolumna (landscape): reparte contactos y salas en `_columns` columnas,
+# llenando de izquierda a derecha (orden de lectura) y con scroll lateral.
+func _rebuild_grid() -> void:
+	for c in _grid.get_children():
+		_grid.remove_child(c)
+		c.queue_free()
+	if _rooms_header != null:
+		_rooms_header.visible = false
+	if _rooms_box != null:
+		_rooms_box.visible = false
+	var items := []
+	for b in _sorted():
+		items.append(_make_row(str(b)))
+	if not _rooms.empty():
+		var hdr = Label.new()
+		hdr.text = "Salas"
+		hdr.add_color_override("font_color", P.TEXT_DIM)
+		hdr.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		items.append(hdr)
+		for b in _sorted_rooms():
+			items.append(_make_room_row(str(b)))
+	var n = max(1, _columns)
+	var cols := []
+	for i in range(n):
+		var v = VBoxContainer.new()
+		v.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		v.add_constant_override("separation", 2)
+		v.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		cols.append(v)
+		_grid.add_child(v)
+	for i in range(items.size()):
+		var it = items[i]
+		cols[i % n].add_child(it)
+		if it.has_meta("bare") and it.has_meta("orb"):
+			var b = str(it.get_meta("bare"))
+			if _agents.has(b):
+				it.get_meta("orb").set_state(_agents[b])
+			it.get_meta("orb").set_connected(_online.get(b, false))
 
 func _make_row(p_bare: String) -> Button:
 	var row = Button.new()
@@ -254,19 +654,34 @@ func _make_row(p_bare: String) -> Button:
 # Ancho de la columna: acotado a COLUMN_MAX y con margen simétrico; si el panel
 # es angosto (sidebar de escritorio), ocupa el ancho disponible.
 func _column_width() -> float:
-	var avail = _scroll.rect_size.x if _scroll != null else rect_size.x
+	var avail := 0.0
+	if _columns > 1:
+		avail = rect_size.x
+	elif _scroll != null:
+		avail = _scroll.rect_size.x
 	if avail <= 0.0:
 		avail = rect_size.x
 	if avail <= 0.0:
 		return COLUMN_MAX
+	if _columns > 1:
+		# Ancho de celda: reparte el ancho entre las columnas.
+		return max(160.0, (avail - 2.0 * COLUMN_MARGIN) / float(_columns))
 	return min(max(140.0, avail - 2.0 * COLUMN_MARGIN), COLUMN_MAX)
 
 func _on_resized() -> void:
 	var w = _column_width()
 	for row in _box.get_children():
-		var inner = row.get_meta("inner", null)
-		if inner != null:
-			inner.rect_min_size.x = w
+		if row.has_meta("inner"):
+			row.get_meta("inner").rect_min_size.x = w
+	if _rooms_box != null:
+		for row in _rooms_box.get_children():
+			if row.has_meta("inner"):
+				row.get_meta("inner").rect_min_size.x = w
+	if _columns > 1 and _grid != null:
+		for col in _grid.get_children():
+			for row in col.get_children():
+				if row.has_meta("inner"):
+					row.get_meta("inner").rect_min_size.x = w
 
 func _on_scroll_started() -> void:
 	_scrolling = true
@@ -278,6 +693,8 @@ func _status_text(p_bare: String) -> String:
 	var n = int(_unread.get(p_bare, 0))
 	if n > 0:
 		return "● %d nuevo%s" % [n, "" if n == 1 else "s"]
+	if _rooms.has(p_bare):
+		return "sala"
 	if not _online.get(p_bare, false):
 		return "desconectado"
 	if not _agents.has(p_bare):
@@ -304,3 +721,6 @@ func _on_row(p_bare: String) -> void:
 
 func _row_name(p_bare: String) -> String:
 	return "row_" + p_bare.replace("@", "_").replace(".", "_")
+
+func _room_row_name(p_room: String) -> String:
+	return "room_" + p_room.replace("@", "_").replace(".", "_")

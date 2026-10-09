@@ -23,6 +23,10 @@ const _SCHEMA := [
 	+ "UNIQUE(bare_jid, mam_id))",
 	"CREATE INDEX IF NOT EXISTS idx_messages_jid_ts ON messages(bare_jid, timestamp)",
 	"CREATE INDEX IF NOT EXISTS idx_messages_jid_request ON messages(bare_jid, request_id)",
+	"CREATE TABLE IF NOT EXISTS rooms (" \
+	+ "bare_jid TEXT PRIMARY KEY," \
+	+ "nick TEXT NOT NULL," \
+	+ "autojoin INTEGER NOT NULL DEFAULT 1)",
 ]
 
 var _db = null
@@ -52,8 +56,10 @@ func open(p_path: String) -> int:
 	# además no traen acciones (nunca hay filas legítimas sin cuerpo y sin acciones).
 	_db.exec("DELETE FROM messages WHERE trim(body) = '' AND (commands IS NULL OR commands IN ('', '[]')) AND (quick_responses IS NULL OR quick_responses IN ('', '[]'))")
 	# Dedupe de entregas repetidas (vivo+MAM, o espejo del agente): para cada
-	# (peer, dirección, cuerpo, minuto) se conserva la fila más antigua.
-	_db.exec("DELETE FROM messages WHERE trim(body) <> '' AND id NOT IN (SELECT MIN(id) FROM messages WHERE trim(body) <> '' GROUP BY bare_jid, direction, trim(body), substr(timestamp, 1, 16))")
+	# (peer, dirección, remitente, cuerpo, minuto) se conserva la fila más
+	# antigua. `sender` entra en la clave para no plegar a dos ocupantes de una
+	# sala que digan lo mismo en el mismo minuto (en 1:1 es NULL para todos).
+	_db.exec("DELETE FROM messages WHERE trim(body) <> '' AND id NOT IN (SELECT MIN(id) FROM messages WHERE trim(body) <> '' GROUP BY bare_jid, direction, sender, trim(body), substr(timestamp, 1, 16))")
 	return 0
 
 func close() -> void:
@@ -66,6 +72,8 @@ func _migrate() -> void:
 	var cols := _column_names()
 	if not cols.has("attachment"):
 		_db.exec("ALTER TABLE messages ADD COLUMN attachment TEXT")
+	if not cols.has("sender"):
+		_db.exec("ALTER TABLE messages ADD COLUMN sender TEXT")
 
 func _column_names() -> Array:
 	var out := []
@@ -79,7 +87,7 @@ func _column_names() -> Array:
 func record_message(p_rec: Dictionary) -> bool:
 	if not _available:
 		return false
-	var q = _db.prepare("INSERT OR IGNORE INTO messages(bare_jid,body,direction,timestamp,mam_id,quick_responses,commands,request_id,attachment) VALUES(?,?,?,?,?,?,?,?,?)")
+	var q = _db.prepare("INSERT OR IGNORE INTO messages(bare_jid,body,direction,timestamp,mam_id,quick_responses,commands,request_id,attachment,sender) VALUES(?,?,?,?,?,?,?,?,?,?)")
 	if q == null:
 		return false
 	q.bind_text(1, str(p_rec.get("bare_jid", "")))
@@ -103,6 +111,11 @@ func record_message(p_rec: Dictionary) -> bool:
 		q.bind_null(9)
 	else:
 		q.bind_text(9, _json(attach))
+	var sender = str(p_rec.get("sender", ""))
+	if sender == "":
+		q.bind_null(10)
+	else:
+		q.bind_text(10, sender)
 	q.step()
 	q.finalize()
 	var inserted = _db.changes() > 0
@@ -126,6 +139,9 @@ func _update_metadata(p_rec: Dictionary, p_request_id: String) -> void:
 	if p_rec.has("attach") and p_rec["attach"] is Dictionary and not (p_rec["attach"] as Dictionary).empty():
 		sets.append("attachment = COALESCE(attachment, ?)")
 		values.append(_json(p_rec["attach"]))
+	if p_rec.has("sender") and str(p_rec["sender"]) != "":
+		sets.append("sender = COALESCE(sender, ?)")
+		values.append(str(p_rec["sender"]))
 	if sets.empty():
 		return
 	var q = _db.prepare("UPDATE messages SET " + ", ".join(sets) + " WHERE bare_jid = ? AND mam_id IS ?")
@@ -266,7 +282,45 @@ func _decode_row(r: Dictionary) -> Dictionary:
 		"commands": _unjson(r.get("commands", "")),
 		"request_id": r.get("request_id", ""),
 		"attach": _unjson_obj(r.get("attachment", "")),
+		"sender": r.get("sender", ""),
 	}
+
+# --- Salas (XEP-0045) ---
+
+func list_rooms() -> Array:
+	var rows = _db.query("SELECT bare_jid, nick, autojoin FROM rooms ORDER BY bare_jid", [])
+	var out := []
+	for r in rows:
+		out.append({
+			"bare_jid": str(r.get("bare_jid", "")),
+			"nick": str(r.get("nick", "")),
+			"autojoin": int(r.get("autojoin", 1)) != 0,
+		})
+	return out
+
+func save_room(p_bare_jid: String, p_nick: String, p_autojoin: bool = true) -> bool:
+	if not _available or p_bare_jid == "":
+		return false
+	var q = _db.prepare("INSERT OR REPLACE INTO rooms(bare_jid, nick, autojoin) VALUES(?,?,?)")
+	if q == null:
+		return false
+	q.bind_text(1, p_bare_jid)
+	q.bind_text(2, p_nick)
+	q.bind_int(3, 1 if p_autojoin else 0)
+	q.step()
+	q.finalize()
+	return _db.changes() > 0
+
+func remove_room(p_bare_jid: String) -> bool:
+	if not _available:
+		return false
+	var q = _db.prepare("DELETE FROM rooms WHERE bare_jid = ?")
+	if q == null:
+		return false
+	q.bind_text(1, p_bare_jid)
+	q.step()
+	q.finalize()
+	return _db.changes() > 0
 
 func _json(p_value) -> String:
 	return to_json(p_value)

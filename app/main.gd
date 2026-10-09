@@ -6,6 +6,10 @@ extends Control
 const SessionScript = preload("res://addons/xat_xmpp/xmpp/session.gd")
 const AccountPanel = preload("res://addons/xat_xmpp/ui/account_panel.gd")
 const RosterPanel = preload("res://addons/xat_xmpp/ui/roster_panel.gd")
+const AddContactDialog = preload("res://addons/xat_xmpp/ui/add_contact_dialog.gd")
+const JoinRoomDialog = preload("res://addons/xat_xmpp/ui/join_room_dialog.gd")
+const InviteDialog = preload("res://addons/xat_xmpp/ui/invite_dialog.gd")
+const TextPromptDialog = preload("res://addons/xat_xmpp/ui/text_prompt_dialog.gd")
 const ChatPanel = preload("res://addons/xat_xmpp/ui/chat_panel.gd")
 const CommandDialog = preload("res://addons/xat_xmpp/ui/command_dialog.gd")
 const Credentials = preload("res://addons/xat_xmpp/xmpp/credentials.gd")
@@ -21,6 +25,9 @@ const CameraCapture = preload("res://addons/xat_xmpp/xmpp/camera.gd")
 const Media = preload("res://addons/xat_xmpp/xmpp/media.gd")
 const MediaUtil = preload("res://addons/xat_xmpp/ui/media_util.gd")
 const MediaLightbox = preload("res://addons/xat_xmpp/ui/media_lightbox.gd")
+const Notifier = preload("res://addons/xat_xmpp/ui/notifier.gd")
+const Push = preload("res://addons/xat_xmpp/xmpp/push.gd")
+const XatXmpp = preload("res://addons/xat_xmpp/xat_xmpp.gd")
 
 # Por debajo de este ancho el panel "mente" se oculta (se abre con el orbe del header).
 const MIND_MIN_WIDTH := 1000
@@ -45,6 +52,26 @@ var juice
 var _last_tool := {} # bare -> tool en curso (para abrir/cerrar tool cards)
 var _unread := {} # bare -> mensajes vivos llegados sin tener el chat abierto
 var _cmd_dialog
+var _add_contact
+var _join_room
+var _invite_dialog
+var _prompt_dialog
+var _room_settings
+var _prompt_ctx := {}
+var _sidebar
+var _sidebar_title
+var _sb_roster
+var _sb_chat
+var _sb_mind
+var _sb_add
+var _sb_room
+var _sb_occ
+var _sb_act
+var _sb_leave
+var _sb_sound
+var _sb_motion
+var _sb_haptic
+var _sb_about
 var _credentials
 var _startup_splash
 var _startup_cfg := {}
@@ -61,11 +88,15 @@ var _rec_start_ms := 0
 var _playing_path := ""
 var _native_media = null          # singleton XatMedia (selector/cámara nativa)
 var _pending_media_peer := ""     # peer que espera el resultado del selector
+var _notifier
 
 func _ready() -> void:
 	theme = XatTheme.build()
 	juice = Juice.new()
 	add_child(juice)
+	_notifier = Notifier.new()
+	_notifier.name = "Notifier"
+	add_child(_notifier)
 	# Zoom tipográfico persistido (Ctrl+scroll / Ctrl+±): aplicar antes de armar
 	# la UI para que las fuentes nazcan ya al tamaño guardado.
 	var fz = get_node_or_null("/root/FontZoom")
@@ -92,6 +123,15 @@ func _ready() -> void:
 	session.connect("media_upload_state", self, "_on_media_upload_state")
 	session.connect("media_ready", self, "_on_media_ready")
 	session.connect("media_failed", self, "_on_media_failed")
+	session.connect("subscription_request", self, "_on_subscription_request")
+	session.connect("push_registration_changed", self, "_on_push_registration_changed")
+	session.connect("muc_joined", self, "_on_muc_joined")
+	session.connect("muc_left", self, "_on_muc_left")
+	session.connect("muc_subject", self, "_on_muc_subject")
+	session.connect("muc_occupants_changed", self, "_on_muc_occupants_changed")
+	session.connect("muc_invite", self, "_on_muc_invite")
+	session.connect("muc_error", self, "_on_muc_error")
+	session.connect("muc_config_form", self, "_on_muc_config_form")
 
 	_account = AccountPanel.new()
 	_account.anchor_right = 1.0
@@ -117,6 +157,12 @@ func _ready() -> void:
 	_roster = RosterPanel.new()
 	_split.add_child(_roster)
 	_roster.connect("peer_selected", self, "_on_peer_selected")
+	_roster.connect("add_contact_requested", self, "_on_add_contact_requested")
+	_roster.connect("subscription_accept", self, "_on_subscription_accept")
+	_roster.connect("subscription_deny", self, "_on_subscription_deny")
+	_roster.connect("join_room_requested", self, "_on_join_room_requested")
+	_roster.connect("room_invite_accept", self, "_on_room_invite_accept")
+	_roster.connect("room_invite_ignore", self, "_on_room_invite_ignore")
 	_roster.set_juice(juice)
 	_chat = ChatPanel.new()
 	_split.add_child(_chat)
@@ -129,6 +175,8 @@ func _ready() -> void:
 	_split.add_child(_mind)
 	_mind.connect("command_requested", self, "_on_agent_command")
 	_mind.connect("back_requested", self, "_on_mind_back")
+	# Sidebar de navegación/acciones (sólo móvil landscape), a la derecha.
+	_build_sidebar()
 	# Mini-orbe en el header del chat: abre/cierra la mente en pantallas angostas.
 	_header_avatar = AvatarBadge.new(34.0)
 	_chat.header_slot.add_child(_header_avatar)
@@ -148,6 +196,12 @@ func _ready() -> void:
 	_chat.connect("voice_cancel", self, "_on_voice_cancel")
 	_chat.connect("media_action", self, "_on_media_action")
 	_chat.connect("text_copied", self, "_on_text_copied")
+	_chat.connect("room_leave_requested", self, "_on_room_leave_requested")
+	_chat.connect("room_invite_requested", self, "_on_room_invite_requested")
+	_chat.connect("room_settings_requested", self, "_on_room_settings_requested")
+	_chat.connect("room_subject_requested", self, "_on_room_subject_requested")
+	_chat.connect("room_destroy_requested", self, "_on_room_destroy_requested")
+	_chat.connect("occupant_action", self, "_on_occupant_action")
 	_recorder = Recorder.new()
 	_recorder.name = "Recorder"
 	add_child(_recorder)
@@ -177,6 +231,22 @@ func _ready() -> void:
 	_cmd_dialog = CommandDialog.new()
 	add_child(_cmd_dialog)
 	_cmd_dialog.connect("submitted", self, "_on_command_submitted")
+	_add_contact = AddContactDialog.new()
+	add_child(_add_contact)
+	_add_contact.connect("submitted", self, "_on_add_contact_submitted")
+	_join_room = JoinRoomDialog.new()
+	add_child(_join_room)
+	_join_room.connect("submitted", self, "_on_join_room_submitted")
+	_invite_dialog = InviteDialog.new()
+	add_child(_invite_dialog)
+	_invite_dialog.connect("submitted", self, "_on_invite_submitted")
+	_prompt_dialog = TextPromptDialog.new()
+	add_child(_prompt_dialog)
+	_prompt_dialog.connect("submitted", self, "_on_prompt_submitted")
+	_room_settings = CommandDialog.new()
+	add_child(_room_settings)
+	_room_settings.window_title = "Ajustes de sala"
+	_room_settings.connect("submitted", self, "_on_room_settings_submitted")
 	if not _startup_cfg.empty():
 		_startup_splash = StartupSplash.new()
 		_startup_splash.connect("canceled", self, "_on_startup_canceled")
@@ -187,6 +257,26 @@ func _ready() -> void:
 	# Con la UI ya armada, fijar la base de stretch móvil (landscape/portrait).
 	_apply_mobile_stretch()
 	_update_safe_area()
+	# Hook de desarrollo: pinta los paneles con datos falsos (sin conectar) para
+	# revisar el layout. Uso: XAT_DEV_PANELS=1 XAT_LANDSCAPE=1.
+	if OS.get_environment("XAT_DEV_PANELS") == "1":
+		_dev_seed()
+
+func _dev_seed() -> void:
+	_account.visible = false
+	_split.visible = true
+	var peers = ["kangurito@hablar.fuentelibre.org", "lazaro@hablar.fuentelibre.org", "mateo@hablar.fuentelibre.org", "ana@hablar.fuentelibre.org", "beto@hablar.fuentelibre.org"]
+	_roster.set_peers(peers)
+	for p in peers.slice(0, 3):
+		_roster.set_online(p, true)
+	_roster.set_rooms(["agentes@conference.hablar.fuentelibre.org", "general@conference.hablar.fuentelibre.org"])
+	_peer = peers[0]
+	_roster.select(peers[0])
+	_header_avatar.visible = true
+	_header_avatar.bare = peers[0]
+	_mind.set_agent(peers[0])
+	_show_roster = true
+	_update_mind_visibility()
 
 func _autoconnect() -> void:
 	if not _startup_cfg.empty():
@@ -215,11 +305,17 @@ func _on_state_changed(p_state: int) -> void:
 			_account.set_status("Conectado como %s" % session.bare())
 			_account.visible = false
 			_split.visible = true
+			if _notifier != null:
+				_notifier.set_connected()
+				if OS.get_name() in ["Android", "iOS"]:
+					_notifier.request_permission()
+				_register_push()
 			if _startup_splash != null:
 				_startup_splash.show_success()
 			# Fijar el layout ya (móvil: un panel; escritorio: ambos). Sin esto
 			# dependía de un resize posterior y podía quedar en dos paneles.
 			_update_mind_visibility()
+			_refresh_rooms()
 			# Persistir la cuenta recién conectada (archivo 0600).
 			if not _pending_cfg.empty():
 				_credentials.save(Credentials.DEFAULT_PATH, _pending_cfg)
@@ -246,6 +342,12 @@ func _on_presence_changed(p_bare: String) -> void:
 
 func _on_peer_selected(p_bare: String) -> void:
 	_peer = p_bare
+	if _notifier != null:
+		_notifier.clear(p_bare)
+	if session.is_room(p_bare):
+		_open_room(p_bare)
+		return
+	_header_avatar.visible = true
 	_header_avatar.bare = p_bare
 	_header_avatar.set_texture(session.avatars.get(p_bare))
 	_mind.set_agent(p_bare)
@@ -256,25 +358,281 @@ func _on_peer_selected(p_bare: String) -> void:
 	_last_tool[p_bare] = ""
 	_show_roster = false
 	_update_mind_visibility()
+	# Cambio de vista instantáneo: el panel se muestra ya, aunque vacío. El
+	# historial (consulta SQLite + render de burbujas) va en un frame posterior
+	# para no bloquear el frame que pinta el cambio de panel.
+	_chat.set_peer(p_bare)
 	# En móvil no auto-enfocar el composer: abriría el teclado virtual solo.
 	if not (OS.get_name() in ["Android", "iOS"]):
 		_chat.focus_composer()
-	_chat.set_peer(p_bare)
+	_load_peer(p_bare)
+
+# Carga diferida del historial: cambia la vista al instante y rellena después.
+func _load_peer(p_bare: String) -> void:
+	yield(get_tree(), "idle_frame")
+	if p_bare != _peer:
+		return
 	var hist = session.get_recent_history(p_bare)
-	_chat.set_history(hist)
-	# Miniaturas de imágenes ya guardadas en el historial.
+	if p_bare != _peer:
+		return
+	var n = int(_unread.get(p_bare, 0))
+	if n > 0:
+		_unread[p_bare] = 0
+		_roster.set_unread(p_bare, 0)
+	# Render por tandas: no bloquea la UI aunque haya muchas burbujas.
+	_chat.set_history_deferred(hist, int(max(0, hist.size() - n)) if n > 0 else -1)
+	# Miniaturas de imágenes ya guardadas en el historial (descargas async).
 	for r in hist:
 		var att = r.get("attach", {})
 		if att is Dictionary and str(att.get("kind", "")) == "image" and str(att.get("local", "")) == "":
 			session.ensure_media(p_bare, {"id": r.get("request_id", ""), "attach": att, "direction": "in"})
-	var n = int(_unread.get(p_bare, 0))
-	if n > 0:
-		_chat.mark_unread_from(-n)
-		_unread[p_bare] = 0
-		_roster.set_unread(p_bare, 0)
 	session.load_history(p_bare)
 
+# --- Salas (MUC) ---
+
+func _refresh_rooms() -> void:
+	var rooms := []
+	for r in session.saved_rooms():
+		rooms.append(str(r.get("bare_jid", "")))
+	_roster.set_rooms(rooms)
+
+func _open_room(p_room: String) -> void:
+	_show_roster = false
+	_header_avatar.visible = false
+	_header_orb.visible = false
+	_update_mind_visibility()
+	_chat.set_room(p_room, session.room_nick(p_room), session.muc_occupants(p_room), session.muc_affiliation(p_room), session.muc_role(p_room))
+	if not (OS.get_name() in ["Android", "iOS"]):
+		_chat.focus_composer()
+	_load_room(p_room)
+
+func _load_room(p_room: String) -> void:
+	yield(get_tree(), "idle_frame")
+	if p_room != _peer:
+		return
+	var hist = session.get_recent_history(p_room)
+	if p_room != _peer:
+		return
+	var n = int(_unread.get(p_room, 0))
+	if n > 0:
+		_unread[p_room] = 0
+		_roster.set_unread(p_room, 0)
+	_chat.set_history_deferred(hist, int(max(0, hist.size() - n)) if n > 0 else -1)
+	# Backfill MAM de la sala (query to=sala, sin with).
+	session.load_history(p_room)
+
+func _on_join_room_requested() -> void:
+	if session.state != SessionScript.State.CONNECTED:
+		juice.toast("Conectate antes de unirte a una sala", P.ERROR)
+		return
+	_join_room.open(session.muc_conference(), session.bare().split("@")[0])
+
+func _on_join_room_submitted(p_room: String, p_nick: String) -> void:
+	var rc = session.join_room(p_room, p_nick)
+	if rc != 0:
+		juice.play("alert")
+		juice.toast("No se pudo unir a la sala", P.ERROR)
+		return
+	juice.haptic("tick")
+	juice.toast("Uniéndose a %s…" % p_room)
+	_refresh_rooms()
+	if _peer != p_room:
+		_on_peer_selected(p_room)
+
+func _on_room_leave_requested() -> void:
+	if _peer == "" or not session.is_room(_peer):
+		return
+	var room = _peer
+	session.leave_room(room)
+	_peer = ""
+	_show_roster = true
+	_header_avatar.visible = true
+	_update_mind_visibility()
+	_refresh_rooms()
+	juice.toast("Saliste de la sala")
+
+func _on_muc_joined(p_room: String) -> void:
+	_refresh_rooms()
+	if p_room == _peer:
+		_chat.update_occupants(session.muc_occupants(p_room))
+		_chat.set_room_caps(session.muc_affiliation(p_room), session.muc_role(p_room))
+	juice.haptic("tick")
+
+func _on_muc_left(p_room: String, _reason: String) -> void:
+	_refresh_rooms()
+	if p_room == _peer:
+		_peer = ""
+		_show_roster = true
+		_header_avatar.visible = true
+		_update_mind_visibility()
+		juice.toast("Saliste de la sala")
+
+func _on_muc_subject(p_room: String, p_subject: String) -> void:
+	if p_room == _peer:
+		_chat.set_room_subject(p_subject)
+
+func _on_muc_occupants_changed(p_room: String) -> void:
+	if p_room == _peer:
+		_chat.update_occupants(session.muc_occupants(p_room))
+		_chat.set_room_caps(session.muc_affiliation(p_room), session.muc_role(p_room))
+
+# El servidor rechazó el join (sala bloqueada, sólo miembros, nick en uso).
+func _on_muc_error(p_room: String, p_condition: String) -> void:
+	_refresh_rooms()
+	if p_room == _peer:
+		_peer = ""
+		_show_roster = true
+		_header_avatar.visible = true
+		_update_mind_visibility()
+	var msg = "No se pudo entrar a la sala"
+	if p_condition == "item-not-found":
+		msg = "La sala no existe o todavía está bloqueada"
+	elif p_condition == "conflict":
+		msg = "Ese nick ya está en uso en la sala"
+	elif p_condition in ["not-allowed", "registration-required", "forbidden"]:
+		msg = "La sala es sólo para miembros"
+	juice.play("alert")
+	juice.toast(msg, P.ERROR)
+
+func _on_muc_invite(p_room: String, p_from: String, p_reason: String) -> void:
+	_roster.add_invite(p_room, p_from, p_reason)
+	juice.play("alert")
+	juice.haptic("alert")
+	juice.toast("%s te invita a %s" % [_display_name(p_from), p_room])
+
+func _on_room_invite_accept(p_room: String) -> void:
+	_roster.remove_invite(p_room)
+	if session.state != SessionScript.State.CONNECTED:
+		return
+	session.join_room(p_room, session.bare().split("@")[0])
+	_refresh_rooms()
+	_on_peer_selected(p_room)
+
+func _on_room_invite_ignore(p_room: String) -> void:
+	_roster.remove_invite(p_room)
+
+# --- Acciones de sala (invitar / ajustes / tema / destruir / moderar) ---
+
+func _on_room_invite_requested() -> void:
+	if _peer == "" or not session.is_room(_peer):
+		return
+	var contacts := []
+	for bare in session.roster_model.bare_jids():
+		var it = session.roster_model.get_item(bare)
+		contacts.append({"jid": str(bare), "name": str(it.get("name", "")) if it != null else ""})
+	_invite_dialog.open(contacts)
+
+func _on_invite_submitted(p_jid: String, p_reason: String) -> void:
+	var room = _peer
+	if room == "" or not session.is_room(room):
+		return
+	# En salas sólo-miembros hay que afiliar antes de invitar; lo hacemos si
+	# tenemos permiso (odiado el error de "no es miembro" al aceptar).
+	if session.muc_affiliation(room) in ["owner", "admin"]:
+		session.muc_set_affiliation(room, p_jid, "member")
+	var rc = session.muc_invite(room, p_jid, p_reason)
+	if rc == 0:
+		juice.haptic("success")
+		juice.toast("Invitación enviada a %s" % p_jid)
+	else:
+		juice.toast("No se pudo invitar", P.ERROR)
+
+func _on_room_settings_requested() -> void:
+	if _peer == "" or not session.is_room(_peer):
+		return
+	if session.muc_request_config(_peer) != 0:
+		juice.toast("No se pudo pedir la configuración", P.ERROR)
+
+func _on_muc_config_form(p_room: String, p_form: Dictionary) -> void:
+	if p_room != _peer:
+		return
+	_room_settings.open_form("Ajustes de sala", p_form)
+	_room_settings.popup_centered()
+
+func _on_room_settings_submitted(p_fields: Array) -> void:
+	if _peer == "" or not session.is_room(_peer):
+		return
+	if session.muc_submit_config(_peer, p_fields) == 0:
+		juice.toast("Ajustes guardados")
+	else:
+		juice.toast("No se pudo guardar", P.ERROR)
+
+func _on_room_subject_requested() -> void:
+	if _peer == "" or not session.is_room(_peer):
+		return
+	_prompt_ctx = {"kind": "subject", "room": _peer}
+	_prompt_dialog.open("Cambiar tema", session.room_subject(_peer), "Nuevo tema de la sala")
+
+func _on_prompt_submitted(p_text: String) -> void:
+	var ctx = _prompt_ctx
+	_prompt_ctx = {}
+	if str(ctx.get("kind", "")) == "subject":
+		var room = str(ctx.get("room", ""))
+		if room == "" or not session.is_room(room):
+			return
+		if session.muc_set_subject(room, p_text) == 0:
+			_chat.set_room_subject(p_text)
+			juice.toast("Tema actualizado")
+
+func _on_room_destroy_requested() -> void:
+	if _peer == "" or not session.is_room(_peer):
+		return
+	var room = _peer
+	session.muc_destroy(room)
+	_peer = ""
+	_show_roster = true
+	_header_avatar.visible = true
+	_update_mind_visibility()
+	_refresh_rooms()
+	juice.toast("Sala destruida")
+
+# Moderación sobre un ocupante: traduce la acción al método de sesión.
+func _on_occupant_action(p_room: String, p_nick: String, p_jid: String, p_action: String) -> void:
+	if not session.is_room(p_room):
+		return
+	var rc = 0
+	match p_action:
+		"member":
+			rc = session.muc_set_affiliation(p_room, p_jid, "member")
+		"unmember":
+			rc = session.muc_set_affiliation(p_room, p_jid, "none")
+		"admin":
+			rc = session.muc_set_affiliation(p_room, p_jid, "admin")
+		"unadmin":
+			rc = session.muc_set_affiliation(p_room, p_jid, "none")
+		"moderator":
+			rc = session.muc_set_role(p_room, p_nick, "moderator")
+		"unmoderator":
+			rc = session.muc_set_role(p_room, p_nick, "participant")
+		"kick":
+			rc = session.muc_kick(p_room, p_nick)
+		"ban":
+			rc = session.muc_ban(p_room, p_jid)
+	if rc == 0:
+		juice.haptic("tick")
+	else:
+		juice.toast("La acción falló", P.ERROR)
+
 func _on_message_submitted(p_bare: String, p_text: String) -> void:
+	if session.is_room(p_bare):
+		var rrc = session.send_groupchat(p_bare, p_text)
+		_roster.touch(p_bare, _now_iso())
+		if rrc == 0:
+			juice.play("send")
+			juice.haptic("tick")
+		_chat.add_message({
+			"from": session.bare(),
+			"to": p_bare,
+			"body": p_text,
+			"direction": "out",
+			"timestamp": _now_iso(),
+			"id": session.last_sent_id if rrc == 0 else "",
+			"commands": [],
+			"quick_responses": [],
+			"muc": true,
+			"sender": session.room_nick(p_bare),
+		})
+		return
 	var rc = session.send_message(p_bare, p_text)
 	_roster.touch(p_bare, _now_iso())
 	if rc == 0:
@@ -302,6 +660,9 @@ func _on_message_received(p_rec: Dictionary) -> void:
 	if p_rec.get("direction", "in") != "out" and not p_rec.get("is_mam", false) and not p_rec.get("stale", false) and str(p_rec.get("body", "")) != "":
 		juice.play("receive")
 		juice.haptic("receive")
+		# Fuera de primer plano el aviso va a la barra del sistema.
+		if _notifier != null:
+			_notifier.notify_message(peer, _display_name(peer), p_rec)
 	if peer == _peer:
 		_chat.add_message(p_rec)
 		_maybe_fetch_media(peer, p_rec)
@@ -552,7 +913,8 @@ func _on_chat_state(p_bare: String, p_state: String) -> void:
 
 func _on_history_fetched(p_bare: String, p_rows: Array, _p_complete: bool) -> void:
 	if p_bare == _peer and not p_rows.empty():
-		_chat.set_history(p_rows)
+		# Diferido: MAM llega durante el uso y un rebuild síncrono daría un salto.
+		_chat.set_history_deferred(p_rows)
 		# Descargar las miniaturas de imágenes históricas.
 		for r in p_rows:
 			var att = r.get("attach", {})
@@ -580,6 +942,75 @@ func _on_command_submitted(p_fields: Array) -> void:
 	if _pending_command.empty():
 		return
 	session.submit_command(_pending_command["jid"], _pending_command["node"], _pending_command["sessionid"], p_fields)
+
+# --- Contactos y solicitudes de suscripción ---
+
+func _on_add_contact_requested() -> void:
+	if session.state != SessionScript.State.CONNECTED:
+		juice.toast("Conectate antes de añadir contactos", P.ERROR)
+		return
+	_add_contact.open()
+
+func _on_add_contact_submitted(p_jid: String, p_name: String) -> void:
+	var rc = session.add_contact(p_jid, p_name)
+	if rc == 0:
+		juice.toast("Solicitud enviada a %s" % p_jid)
+		juice.haptic("tick")
+	else:
+		juice.play("alert")
+		juice.toast("No se pudo añadir el contacto", P.ERROR)
+
+func _on_subscription_request(p_bare: String, p_status: String) -> void:
+	_roster.add_request(p_bare, p_status)
+	juice.play("alert")
+	juice.haptic("alert")
+	juice.toast("%s quiere agregarte" % p_bare)
+
+func _on_subscription_accept(p_bare: String) -> void:
+	session.approve_subscription(p_bare)
+	juice.toast("Contacto %s aceptado" % p_bare)
+	juice.haptic("success")
+
+func _on_subscription_deny(p_bare: String) -> void:
+	session.deny_subscription(p_bare)
+	juice.toast("Solicitud de %s rechazada" % p_bare)
+
+# XEP-0357: registra el token de push del dispositivo con el servicio del
+# servidor (para avisos con la app cerrada). El servicio se elige por SO
+# (`xat/push_service_android` = FCM, `xat/push_service_ios` = APNs; con
+# `xat/push_service` como fallback común). Sin token nativo aún, se reintenta al
+# reconectar.
+func _register_push() -> void:
+	var service = _push_service_for_os()
+	if service == "":
+		return
+	# Android: Firebase debe inicializarse con la config de la app (del
+	# google-services.json) antes de poder pedir el token FCM.
+	if OS.get_name() == "Android" and _notifier != null:
+		_notifier.configure_firebase(_psetting("xat/firebase_api_key"), _psetting("xat/firebase_app_id"),
+				_psetting("xat/firebase_project_id"), _psetting("xat/firebase_sender_id"))
+	var token = _notifier.device_token()
+	if token == "":
+		return
+	# Filtro del servidor: no pushear mensajes de desconocidos (los agentes son
+	# contactos del roster). Es el principal anti-ruido del lado del gateway.
+	session.enable_push(service, token, {"ignore_unknown": true})
+
+func _psetting(p_key: String) -> String:
+	return str(ProjectSettings.get_setting(p_key)) if ProjectSettings.has_setting(p_key) else ""
+
+func _push_service_for_os() -> String:
+	var key = Push.setting_key(OS.get_name())
+	var service = str(ProjectSettings.get_setting(key)) if ProjectSettings.has_setting(key) else ""
+	if service == "" and ProjectSettings.has_setting("xat/push_service"):
+		service = str(ProjectSettings.get_setting("xat/push_service"))
+	return service
+
+func _on_push_registration_changed(p_registered: bool, p_error: String) -> void:
+	if p_registered:
+		return
+	if p_error != "":
+		juice.toast("Push no disponible (%s)" % p_error, P.ERROR)
 
 func _on_agent_state(p_bare: String, p_state: Dictionary) -> void:
 	_roster.set_agent_state(p_bare, p_state)
@@ -629,7 +1060,208 @@ func _single_pane() -> bool:
 	return _is_mobile_landscape()
 
 func _is_mobile_landscape() -> bool:
+	if OS.get_environment("XAT_LANDSCAPE") == "1":
+		return rect_size.x > rect_size.y
 	return OS.get_name() in ["Android", "iOS"] and rect_size.x > rect_size.y
+
+# Sidebar de navegación/acciones (sólo móvil landscape), en el borde DERECHO:
+# título + navegación (Contactos/Chat/Agente) + acciones de la vista + ajustes.
+# Consolida acá todos los botones que en portrait viven en las esquinas del
+# roster (añadir/sala, sonido/animación/vibración) para no dejar botones chicos
+# dispersos.
+func _build_sidebar() -> void:
+	_sidebar = PanelContainer.new()
+	_sidebar.rect_min_size = Vector2(96, 0)
+	_sidebar.visible = false
+	var sb = XatTheme.box(P.BG1, 0, 0, 0)
+	sb.border_width_left = 1
+	sb.border_color = P.LINE
+	_sidebar.add_stylebox_override("panel", sb)
+	var sc = ScrollContainer.new()
+	sc.scroll_horizontal_enabled = false
+	_sidebar.add_child(sc)
+	var sv = VBoxContainer.new()
+	sv.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	sv.add_constant_override("separation", 6)
+	sc.add_child(sv)
+	var tm = MarginContainer.new()
+	tm.add_constant_override("margin_left", 6)
+	tm.add_constant_override("margin_right", 6)
+	tm.add_constant_override("margin_top", 10)
+	tm.add_constant_override("margin_bottom", 4)
+	sv.add_child(tm)
+	_sidebar_title = Label.new()
+	_sidebar_title.text = "—"
+	_sidebar_title.align = Label.ALIGN_CENTER
+	_sidebar_title.autowrap = true
+	_sidebar_title.clip_text = true
+	_sidebar_title.add_color_override("font_color", P.TEXT)
+	_sidebar_title.add_font_override("font", XatTheme.font(P.FONT_MEDIUM, P.FONT_SIZE))
+	tm.add_child(_sidebar_title)
+	# Navegación (botones grandes).
+	_sb_roster = _sidebar_button("Contactos", "Contactos y salas")
+	_sb_roster.connect("pressed", self, "_on_sidebar_roster")
+	sv.add_child(_sb_roster)
+	_sb_chat = _sidebar_button("Chat", "Conversación abierta")
+	_sb_chat.connect("pressed", self, "_on_sidebar_chat")
+	sv.add_child(_sb_chat)
+	_sb_mind = _sidebar_button("Agente", "Panel del agente")
+	_sb_mind.visible = false
+	_sb_mind.connect("pressed", self, "_on_sidebar_mind")
+	sv.add_child(_sb_mind)
+	# Acciones de la vista activa.
+	sv.add_child(_sidebar_sep())
+	_sb_add = _sidebar_action("Añadir", "Añadir contacto por JID")
+	_sb_add.connect("pressed", self, "_on_sidebar_add")
+	sv.add_child(_sb_add)
+	_sb_room = _sidebar_action("Sala", "Unirse a una sala (MUC)")
+	_sb_room.connect("pressed", self, "_on_sidebar_room")
+	sv.add_child(_sb_room)
+	_sb_occ = _sidebar_action("Ocupantes", "Ver ocupantes de la sala")
+	_sb_occ.connect("pressed", self, "_on_sidebar_occ")
+	sv.add_child(_sb_occ)
+	_sb_act = _sidebar_action("Acciones", "Acciones de la sala")
+	_sb_act.connect("pressed", self, "_on_sidebar_act")
+	sv.add_child(_sb_act)
+	_sb_leave = _sidebar_action("Salir", "Salir de la sala")
+	_sb_leave.connect("pressed", self, "_on_sidebar_leave")
+	sv.add_child(_sb_leave)
+	# Ajustes (sonido/animación/vibración/acerca) en grilla 2×2.
+	var spacer = Control.new()
+	spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	sv.add_child(spacer)
+	sv.add_child(_sidebar_sep())
+	var grid = GridContainer.new()
+	grid.columns = 2
+	grid.add_constant_override("hseparation", 6)
+	grid.add_constant_override("vseparation", 6)
+	sv.add_child(grid)
+	_sb_sound = _sidebar_toggle("♪", "Sonido")
+	_sb_sound.connect("toggled", self, "_on_sidebar_setting", ["sound_enabled"])
+	grid.add_child(_sb_sound)
+	_sb_motion = _sidebar_toggle("✦", "Animación")
+	_sb_motion.connect("toggled", self, "_on_sidebar_setting", ["motion_enabled"])
+	grid.add_child(_sb_motion)
+	_sb_haptic = _sidebar_toggle("≋", "Vibración")
+	_sb_haptic.connect("toggled", self, "_on_sidebar_setting", ["haptics_enabled"])
+	grid.add_child(_sb_haptic)
+	_sb_about = _sidebar_toggle("ⓘ", "Privacidad y soporte")
+	_sb_about.connect("pressed", self, "_on_sidebar_about")
+	grid.add_child(_sb_about)
+	_init_sidebar_settings()
+	_split.add_child(_sidebar)
+
+func _sidebar_sep() -> HSeparator:
+	return HSeparator.new()
+
+func _sidebar_button(p_text: String, p_tip: String) -> Button:
+	var b = Button.new()
+	b.text = p_text
+	b.hint_tooltip = p_tip
+	b.toggle_mode = true
+	b.focus_mode = Control.FOCUS_NONE
+	b.rect_min_size = Vector2(84, 60)
+	b.add_font_override("font", XatTheme.font(P.FONT_MEDIUM, P.FONT_SIZE + 1))
+	for st in ["normal", "hover", "pressed", "focus"]:
+		var bg = P.BG2.lightened(0.12) if st == "hover" else P.BG2
+		b.add_stylebox_override(st, XatTheme.box(bg, 12, 6, 8))
+	return b
+
+func _sidebar_action(p_text: String, p_tip: String) -> Button:
+	var b = Button.new()
+	b.text = p_text
+	b.hint_tooltip = p_tip
+	b.focus_mode = Control.FOCUS_NONE
+	b.rect_min_size = Vector2(84, 46)
+	b.add_font_override("font", XatTheme.font(P.FONT_MEDIUM, P.FONT_SIZE))
+	for st in ["normal", "hover", "pressed", "focus"]:
+		var bg = P.BG2.lightened(0.12) if st == "hover" else P.BG2.darkened(0.1)
+		b.add_stylebox_override(st, XatTheme.box(bg, 10, 4, 6))
+	return b
+
+func _sidebar_toggle(p_text: String, p_tip: String) -> Button:
+	var b = Button.new()
+	b.text = p_text
+	b.hint_tooltip = p_tip
+	b.toggle_mode = true
+	b.focus_mode = Control.FOCUS_NONE
+	b.rect_min_size = Vector2(40, 40)
+	for st in ["normal", "hover", "pressed", "focus"]:
+		var bg = P.BG2.lightened(0.12) if st == "hover" else P.BG2
+		b.add_stylebox_override(st, XatTheme.box(bg, 10, 4, 4))
+	return b
+
+func _init_sidebar_settings() -> void:
+	if juice == null:
+		return
+	_sb_sound.pressed = bool(juice.settings.get("sound_enabled", true))
+	_sb_motion.pressed = bool(juice.settings.get("motion_enabled", true))
+	_sb_haptic.pressed = bool(juice.settings.get("haptics_enabled", true))
+
+func _on_sidebar_setting(p_on: bool, p_key: String) -> void:
+	if juice != null:
+		juice.set_setting(p_key, p_on)
+
+func _on_sidebar_about() -> void:
+	OS.shell_open(XatXmpp.PRIVACY_URL)
+
+func _on_sidebar_roster() -> void:
+	_show_roster = true
+	_update_mind_visibility()
+
+func _on_sidebar_chat() -> void:
+	if _peer == "":
+		return
+	_show_roster = false
+	_update_mind_visibility()
+
+func _on_sidebar_mind() -> void:
+	if _peer == "" or not session.agent_model.has_agent(_peer):
+		return
+	_mind_pinned = not _mind_pinned
+	_update_mind_visibility()
+
+func _on_sidebar_add() -> void:
+	_on_add_contact_requested()
+
+func _on_sidebar_room() -> void:
+	_on_join_room_requested()
+
+func _on_sidebar_occ() -> void:
+	_chat.toggle_occupants()
+
+func _on_sidebar_act() -> void:
+	_chat.popup_room_menu()
+
+func _on_sidebar_leave() -> void:
+	_on_room_leave_requested()
+
+# Refresca el sidebar: título = peer/sala; navegación y acciones de la vista.
+func _refresh_sidebar() -> void:
+	if _sidebar == null or not _sidebar.visible:
+		return
+	var roster = _peer == "" or _show_roster
+	var is_agent = _peer != "" and session.agent_model.has_agent(_peer)
+	var in_room = _peer != "" and session.is_room(_peer) and not roster
+	_sidebar_title.text = _peer.split("@")[0] if _peer != "" else "xat"
+	# "Agente" sólo tiene sentido dentro de una conversación con un agente.
+	_sb_mind.visible = not roster and is_agent
+	_sb_chat.disabled = _peer == ""
+	_sb_roster.pressed = roster
+	_sb_chat.pressed = not roster
+	_sb_mind.pressed = _mind_pinned
+	# Acciones de roster vs. de sala.
+	_sb_add.visible = roster
+	_sb_room.visible = roster
+	_sb_occ.visible = in_room
+	_sb_act.visible = in_room
+	_sb_leave.visible = in_room
+
+# Columnas del roster en landscape: más ancho → más columnas (2–4).
+func _landscape_columns() -> int:
+	if not _is_mobile_landscape():
+		return 1
+	return int(clamp(rect_size.x / 260.0, 2.0, 4.0))
 
 func _on_agent_command(p_node: String) -> void:
 	var res = session.presence_model.best(_peer)
@@ -670,6 +1302,9 @@ func _celebrate() -> void:
 
 # Angosto: un panel por vez (roster, chat o mente); ancho: ambos (+ mente si cabe).
 func _update_panes(p_single: bool, p_mind: bool) -> void:
+	var landscape = _is_mobile_landscape()
+	if _sidebar != null:
+		_sidebar.visible = landscape
 	if p_single:
 		var roster = _peer == "" or _show_roster
 		_roster.visible = roster and not p_mind
@@ -679,7 +1314,15 @@ func _update_panes(p_single: bool, p_mind: bool) -> void:
 		_chat.visible = true
 	_roster.size_flags_horizontal = Control.SIZE_EXPAND_FILL if p_single else 0
 	_mind.size_flags_horizontal = Control.SIZE_EXPAND_FILL if p_single else 0
-	_chat.back_button.visible = p_single and _chat.visible
+	# En landscape la navegación y el título van al sidebar: la cabecera del chat
+	# queda compacta para ganar alto.
+	_chat.set_nav_visible(p_single and _chat.visible and not landscape, not landscape)
+	# Los botones chicos del roster y de la cabecera del chat pasan al sidebar.
+	_roster.set_chrome_visible(not landscape)
+	_chat.set_header_actions_visible(not landscape)
+	if _roster.has_method("set_columns"):
+		_roster.set_columns(_landscape_columns())
+	_refresh_sidebar()
 
 func _on_back() -> void:
 	_show_roster = true
@@ -842,6 +1485,13 @@ func _bare(p_jid: String) -> String:
 	if slash < 0:
 		return p_jid
 	return p_jid.substr(0, slash)
+
+# Nombre visible de un contacto: el del roster (si lo hay) o la parte local.
+func _display_name(p_bare: String) -> String:
+	var item = session.roster_model.get_item(p_bare)
+	if item != null and str(item.get("name", "")) != "":
+		return str(item["name"])
+	return p_bare.split("@")[0]
 
 func _now_iso() -> String:
 	return Time.get_datetime_string_from_system(true) + "Z"

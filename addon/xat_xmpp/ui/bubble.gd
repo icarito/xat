@@ -6,6 +6,7 @@ extends VBoxContainer
 # (miniatura, reproductor de audio o chip de archivo).
 
 signal media_action(rec, action) # action: "open" | "play"
+signal nick_clicked(nick)        # chip de remitente de sala (@mención)
 
 const LocalTime = preload("res://addons/xat_xmpp/ui/localtime.gd")
 const Palette = preload("res://addons/xat_xmpp/ui/palette.gd")
@@ -15,9 +16,43 @@ const MediaUtil = preload("res://addons/xat_xmpp/ui/media_util.gd")
 const XatTheme = preload("res://addons/xat_xmpp/ui/xat_theme.gd")
 const EmojiInline = preload("res://addons/xat_xmpp/ui/emoji_inline.gd")
 
+# Paleta de acentos para el chip de remitente (elegida por nick.hash()).
+const NICK_COLORS := [Palette.AGENT_EDGE, Palette.OK, Palette.PENDING, Palette.TOOL, Palette.IDLE, Palette.ERROR]
+
+static func color_for(p_nick: String) -> Color:
+	if p_nick == "":
+		return Palette.TEXT_DIM
+	return NICK_COLORS[int(abs(p_nick.hash())) % NICK_COLORS.size()]
+
 const MAX_FRAC := 0.7
 const SLIDE := 14.0
 const THUMB_MAX := 240
+
+const SCRIPT_PATH := "res://addons/xat_xmpp/ui/bubble.gd"
+const BBCODE_CACHE_KEY := "xat_bbcode_cache_v1"
+const BBCODE_CACHE_MAX := 400
+
+# Markdown -> BBCode memoizado por (tamaño de emoji, texto). `to_bbcode` compila
+# tres RegEx y recorre el texto carácter a carácter en cada llamada; al cambiar
+# de chat se reconstruyen todas las burbujas, así que sin esto se re-parseaba
+# todo el historial.
+static func _bbcode(p_text: String, p_emoji) -> String:
+	var size = int(p_emoji.size) if p_emoji != null else 0
+	var cache := _bbcode_cache()
+	var key = str(size) + "\u0000" + p_text
+	if cache.has(key):
+		return cache[key]
+	var out = Markdown.to_bbcode(p_text, p_emoji)
+	if cache.size() >= BBCODE_CACHE_MAX:
+		cache.erase(cache.keys()[0])
+	cache[key] = out
+	return out
+
+static func _bbcode_cache() -> Dictionary:
+	var script = load(SCRIPT_PATH)
+	if not script.has_meta(BBCODE_CACHE_KEY):
+		script.set_meta(BBCODE_CACHE_KEY, {})
+	return script.get_meta(BBCODE_CACHE_KEY)
 
 var rec := {}
 var _last := false
@@ -41,6 +76,8 @@ var _inner: VBoxContainer
 var _media_host: VBoxContainer
 var _thumb_path := ""
 var _thumb_tex = null
+var _sender_btn: Button
+var _sender := ""
 
 func _init() -> void:
 	mouse_filter = Control.MOUSE_FILTER_PASS
@@ -96,6 +133,15 @@ func _init() -> void:
 	_metarow.add_constant_override("separation", 4)
 	_metarow.add_child(_meta)
 	_metarow.add_child(_ticks)
+	# Chip de remitente (sala): sobre la burbuja, oprimible -> @mención.
+	_sender_btn = Button.new()
+	_sender_btn.visible = false
+	_sender_btn.flat = true
+	_sender_btn.focus_mode = Control.FOCUS_NONE
+	_sender_btn.size_flags_horizontal = 0 # tamaño mínimo, pegado al inicio
+	_sender_btn.add_font_override("font", XatTheme.font(Palette.FONT_MEDIUM, Palette.FONT_SIZE - 3))
+	_sender_btn.connect("pressed", self, "_on_sender_pressed")
+	col.add_child(_sender_btn)
 	col.add_child(_panel)
 	col.add_child(_metarow)
 	var pad = Control.new()
@@ -160,6 +206,20 @@ func set_group_last(p_last: bool) -> void:
 	_style()
 	_update_meta()
 
+# Muestra el nombre del ocupante sobre la burbuja (sólo mensajes de sala
+# entrantes, en la primera del grupo). Oprimirlo inserta `@nick` en el composer.
+func set_sender(p_nick: String, p_color: Color) -> void:
+	_sender = p_nick
+	_sender_btn.visible = p_nick != ""
+	_sender_btn.text = p_nick
+	_sender_btn.add_color_override("font_color", p_color)
+	_sender_btn.add_color_override("font_color_hover", p_color.lightened(0.2))
+	_sender_btn.hint_tooltip = "Mencionar a @%s" % p_nick
+
+func _on_sender_pressed() -> void:
+	if _sender != "":
+		emit_signal("nick_clicked", _sender)
+
 func deselect() -> void:
 	_label.deselect()
 
@@ -171,18 +231,65 @@ func text_global_rect() -> Rect2:
 func is_text_visible() -> bool:
 	return _label.visible
 
-# El panel llama a esto al detectar una pulsación larga: el label pasa a
-# consumir el arrastre y selecciona todo el mensaje (se puede ajustar).
+var _drag_active := false
+var _last_global := Vector2.ZERO
+
+# Inicia una selección parcial anclada en `p_global` (donde el dedo tocó): el
+# label recibe un "mouse down" sintético y los arrastres posteriores extienden la
+# selección. Así se puede elegir sólo una parte del mensaje, no todo.
+func begin_selection_at(p_global: Vector2) -> void:
+	_label.mouse_filter = Control.MOUSE_FILTER_STOP
+	_label.deselect()
+	_drag_active = true
+	_feed_mouse(p_global, true)
+
+func drag_selection(p_global: Vector2) -> void:
+	if _drag_active:
+		_feed_motion(p_global)
+
+func end_selection_drag() -> void:
+	if _drag_active:
+		_drag_active = false
+		_feed_mouse(_last_global, false)
+
+# Selecciona todo el mensaje (botón "Todo" de la barra).
+func select_all() -> void:
+	_label.mouse_filter = Control.MOUSE_FILTER_STOP
+	_label.select_all()
+
 func begin_selection() -> void:
 	_label.mouse_filter = Control.MOUSE_FILTER_STOP
 	_label.select_all()
 
 func end_selection() -> void:
+	if _drag_active:
+		end_selection_drag()
 	_label.deselect()
 	_label.mouse_filter = Control.MOUSE_FILTER_IGNORE if OS.has_touchscreen_ui_hint() else Control.MOUSE_FILTER_PASS
 
 func selected_text() -> String:
 	return _label.get_selected_text()
+
+# El RichTextLabel 3.x no procesa eventos táctiles para la selección: se los
+# inyectamos como mouse sintético en coordenadas locales del label.
+func _feed_mouse(p_global: Vector2, p_pressed: bool) -> void:
+	_last_global = p_global
+	var local = _label.get_global_transform().affine_inverse().xform(p_global)
+	var ev = InputEventMouseButton.new()
+	ev.button_index = BUTTON_LEFT
+	ev.pressed = p_pressed
+	ev.position = local
+	ev.global_position = p_global
+	_label.call("_gui_input", ev)
+
+func _feed_motion(p_global: Vector2) -> void:
+	_last_global = p_global
+	var local = _label.get_global_transform().affine_inverse().xform(p_global)
+	var ev = InputEventMouseMotion.new()
+	ev.position = local
+	ev.global_position = p_global
+	ev.relative = Vector2.ZERO
+	_label.call("_gui_input", ev)
 
 # Re-renderiza cuerpo, marcas y estilo (corrección, entrega, media).
 func refresh() -> void:
@@ -194,12 +301,12 @@ func refresh() -> void:
 		var url = str(attach.get("url", ""))
 		_render_media(attach)
 		var caption = Media.caption_of(str(rec.get("body", "")), url)
-		_label.bbcode_text = Markdown.to_bbcode(caption, _emoji)
+		_label.bbcode_text = _bbcode(caption, _emoji)
 		_label.visible = caption != ""
 	else:
 		_clear_media()
 		_label.visible = true
-		_label.bbcode_text = Markdown.to_bbcode(str(rec.get("body", "")), _emoji)
+		_label.bbcode_text = _bbcode(str(rec.get("body", "")), _emoji)
 	_fit_w = -1.0
 	_fit()
 	_style()
@@ -391,7 +498,7 @@ func _fit() -> void:
 	# El zoom cambia métricas y tamaño de imágenes, además de los glifos Slug.
 	if _emoji != null and _emoji.size != int(_font.get_height()):
 		_emoji = EmojiInline.new(int(_font.get_height()))
-		_label.bbcode_text = Markdown.to_bbcode(body, _emoji)
+		_label.bbcode_text = _bbcode(body, _emoji)
 	for line in body.split("\n"):
 		var line_w = _emoji.line_width(line, _font) if _emoji != null else _font.get_string_size(line).x
 		w = max(w, line_w * 1.06)

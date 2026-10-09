@@ -23,6 +23,10 @@ const QUICK_RESPONSE_0 := "urn:xmpp:quick-response:0"
 const SID := "urn:xmpp:sid:0"
 const PING := "urn:xmpp:ping"
 const CAPS := "http://jabber.org/protocol/caps"
+# XEP-0357: notificaciones push. El cliente registra un token de dispositivo con
+# el servicio push del servidor para recibir avisos con la app cerrada.
+const PUSH := "urn:xmpp:push:0"
+const PUBSUB_PUBLISH_OPTIONS := "http://jabber.org/protocol/pubsub#publish-options"
 const AVATAR_DATA := "urn:xmpp:avatar:data"
 const AVATAR_METADATA := "urn:xmpp:avatar:metadata"
 const TELEMETRY := "urn:openclaw:telemetry:0"
@@ -36,3 +40,11 @@ const OOB := "jabber:x:oob"
 const HTTP_UPLOAD := "urn:xmpp:http:upload:0"
 # Variante legacy de disco#items (algunos servidores la usan para el upload).
 const DISCO_ITEMS_META := "http://jabber.org/protocol/disco#items"
+# Salas multi-usuario (XEP-0045) e invitaciones (XEP-0045 §7.8 / XEP-0249).
+const MUC := "http://jabber.org/protocol/muc"
+const MUC_USER := "http://jabber.org/protocol/muc#user"
+const MUC_OWNER := "http://jabber.org/protocol/muc#owner"
+const MUC_ADMIN := "http://jabber.org/protocol/muc#admin"
+const MUC_ROOMCONFIG := "http://jabber.org/protocol/muc#roomconfig"
+const CONFERENCE_INVITE := "jabber:x:conference"
+const STANZAS := "urn:ietf:params:xml:ns:xmpp-stanzas"

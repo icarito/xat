@@ -73,6 +73,11 @@ func _init():
 	check(s.get_recent("h@h", 10).back()["attach"]["state"] == "sent", "get_recent decodifica attach")
 	check(s.get_attachment("h@h", "no-existe").empty(), "get_attachment ausente")
 
+	# Remitente de sala (XEP-0045): se guarda y decodifica.
+	s.record_message({"bare_jid": "room@conference.h", "body": "hola sala", "direction": "in", "ts": "2026-08-08T01:00:00Z", "request_id": "sr1", "sender": "ana"})
+	check(s.find_by_request_id("room@conference.h", "sr1")["sender"] == "ana", "sender round-trip")
+	check(s.get_recent("room@conference.h", 5)[0]["sender"] == "ana", "sender en get_recent")
+
 	# open() limpia filas sin cuerpo heredadas.
 	var tmp = "user://store_test_tmp.db"
 	var s2 = Store.new()
@@ -82,11 +87,24 @@ func _init():
 	# Duplicado por mismo cuerpo+minuto: open() debe colapsarlo.
 	s2.record_message({"bare_jid": "g@h", "body": "hola", "direction": "in", "ts": "2026-06-06T00:00:01Z", "mam_id": "a1"})
 	s2.record_message({"bare_jid": "g@h", "body": "hola", "direction": "in", "ts": "2026-06-06T00:00:20Z", "mam_id": "a2"})
+	# Salas: mismo cuerpo+minuto pero distinto remitente NO se plega.
+	s2.record_message({"bare_jid": "sala@conference.h", "body": "ok", "direction": "in", "ts": "2026-08-08T00:00:01Z", "mam_id": "r1", "sender": "ana"})
+	s2.record_message({"bare_jid": "sala@conference.h", "body": "ok", "direction": "in", "ts": "2026-08-08T00:00:02Z", "mam_id": "r2", "sender": "beto"})
+	s2.record_message({"bare_jid": "sala@conference.h", "body": "ok", "direction": "in", "ts": "2026-08-08T00:00:03Z", "mam_id": "r3", "sender": "beto"})
+	s2.save_room("sala@conference.h", "ana", true)
 	s2.close()
 	var s3 = Store.new()
 	check(s3.open(tmp) == 0, "reopen archivo temporal")
 	check(s3.get_recent("c@h", 10).size() == 1, "open limpia filas sin cuerpo")
 	check(s3.get_recent("g@h", 10).size() == 1, "open colapsa duplicados del mismo minuto")
+	check(s3.get_recent("sala@conference.h", 10).size() == 2, "salas: no plega remitentes distintos")
+	var rooms = s3.list_rooms()
+	check(rooms.size() == 1 and rooms[0]["bare_jid"] == "sala@conference.h" and rooms[0]["nick"] == "ana" and rooms[0]["autojoin"], "list_rooms")
+	check(s3.save_room("sala@conference.h", "ana2", false), "save_room reemplaza")
+	var rooms2 = s3.list_rooms()
+	check(rooms2[0]["nick"] == "ana2" and not rooms2[0]["autojoin"], "save_room actualiza nick/autojoin")
+	check(s3.remove_room("sala@conference.h"), "remove_room")
+	check(s3.list_rooms().empty(), "room removida")
 	s3.close()
 	var d = Directory.new()
 	d.remove(tmp)

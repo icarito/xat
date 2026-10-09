@@ -16,6 +16,12 @@ signal camera_requested(peer)          # tomar foto
 signal voice_toggle(peer, start)       # empezar/terminar grabación
 signal voice_cancel(peer)              # descartar la grabación en curso
 signal text_copied(text)               # texto de una burbuja copiado al portapapeles
+signal room_leave_requested()          # salir de la sala abierta
+signal room_invite_requested()         # invitar a un contacto a la sala
+signal room_settings_requested()       # editar la config de la sala (dueño/admin)
+signal room_subject_requested()        # cambiar el tema de la sala
+signal room_destroy_requested()        # destruir la sala (dueño)
+signal occupant_action(room, nick, jid, action) # moderación sobre un ocupante
 
 const Palette = preload("res://addons/xat_xmpp/ui/palette.gd")
 const XatTheme = preload("res://addons/xat_xmpp/ui/xat_theme.gd")
@@ -28,6 +34,7 @@ const Shimmer = preload("res://addons/xat_xmpp/ui/fx/shimmer.gd")
 
 const MAX_LINES := 6
 const MAX_BUBBLES := 200  # más viejas se liberan (el modelo _messages queda completo)
+const RENDER_CHUNK := 12  # burbujas por frame en el render diferido (no bloquear la UI)
 const NEAR_PX := 80.0
 const WHEEL_STEP := 72.0  # px por muesca de rueda/pan; el ScrollContainer usa page/8 (brusco en pantallas grandes)
 const WEEKDAYS := ["dom", "lun", "mar", "mié", "jue", "vie", "sáb"]
@@ -35,6 +42,11 @@ const MONTHS := ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", 
 
 var _peer := ""
 var _messages := []
+var _room := ""          # sala activa ("" = chat 1:1)
+var _room_nick := ""     # nick propio recordado en la sala
+var _occupants := []     # ocupantes (dicts) de la sala activa
+var _room_affiliation := "" # nuestra afiliación (owner/admin/member/none)
+var _room_role := ""     # nuestro rol (moderator/participant/...)
 var _bubbles := []  # burbujas de _messages[_first:]
 var _first := 0
 var _limit := MAX_BUBBLES
@@ -52,6 +64,7 @@ var _tool = null  # última tool card (ToolCard)
 var _break := false  # una tool card corta el grupo de burbujas
 var _typing := ""
 var _thinking := false
+var _render_seq := 0  # aborta renders diferidos cuando llega uno nuevo
 var header_slot: HBoxContainer  # a la derecha del título (mini-orbe, etc.)
 
 var _title: Label
@@ -78,6 +91,16 @@ var _press := false
 var _press_pos := Vector2.ZERO
 var _press_moved := false
 var _sel_bubble = null
+var _occ_btn: Button
+var _occ_popup: PopupPanel
+var _occ_list: VBoxContainer
+var _leave_btn: Button
+var _room_menu_btn: Button
+var _room_menu: PopupMenu
+var _occ_action_menu: PopupMenu
+var _occ_action_ctx := {}
+var _header_actions := true
+var _tools_row: HBoxContainer
 
 func _init() -> void:
 	name = "ChatPanel"
@@ -105,6 +128,31 @@ func _build() -> void:
 	back_button.connect("pressed", self, "emit_signal", ["back_requested"])
 	hh.add_child(back_button)
 	hh.add_child(_title)
+	_occ_btn = Button.new()
+	_occ_btn.text = "Ocupantes"
+	_occ_btn.visible = false
+	_occ_btn.flat = true
+	_occ_btn.focus_mode = Control.FOCUS_NONE
+	_occ_btn.connect("pressed", self, "_toggle_occupants")
+	hh.add_child(_occ_btn)
+	_room_menu_btn = Button.new()
+	_room_menu_btn.text = "⋯"
+	_room_menu_btn.visible = false
+	_room_menu_btn.flat = true
+	_room_menu_btn.focus_mode = Control.FOCUS_NONE
+	_room_menu_btn.hint_tooltip = "Acciones de la sala"
+	_room_menu_btn.connect("pressed", self, "_open_room_menu")
+	hh.add_child(_room_menu_btn)
+	_room_menu = PopupMenu.new()
+	_room_menu.connect("id_pressed", self, "_on_room_menu")
+	add_child(_room_menu)
+	_leave_btn = Button.new()
+	_leave_btn.text = "Salir"
+	_leave_btn.visible = false
+	_leave_btn.flat = true
+	_leave_btn.focus_mode = Control.FOCUS_NONE
+	_leave_btn.connect("pressed", self, "emit_signal", ["room_leave_requested"])
+	hh.add_child(_leave_btn)
 	header_slot = HBoxContainer.new()
 	hh.add_child(header_slot)
 	head.add_child(hh)
@@ -156,7 +204,7 @@ func _build() -> void:
 	v.add_child(stack)
 	# Pie: estado, chips y composer sobre BG1.
 	var foot = PanelContainer.new()
-	foot.add_stylebox_override("panel", XatTheme.box(Palette.BG1, 0, 12, 8))
+	foot.add_stylebox_override("panel", XatTheme.box(Palette.BG1, 0, 12, 10))
 	var f = VBoxContainer.new()
 	f.add_constant_override("separation", 6)
 	_state = RichTextLabel.new()
@@ -189,7 +237,8 @@ func _build() -> void:
 	_input.add_child(_hint)
 	h.add_child(_input)
 	var tools = HBoxContainer.new()
-	tools.add_constant_override("separation", 4)
+	_tools_row = tools
+	tools.add_constant_override("separation", 6)
 	tools.size_flags_vertical = Control.SIZE_SHRINK_END
 	_attach_btn = _tool_button("Adj", "Adjuntar un archivo")
 	_attach_btn.connect("pressed", self, "_open_file_dialog")
@@ -207,19 +256,49 @@ func _build() -> void:
 	h.add_child(tools)
 	var send = Button.new()
 	send.connect("draw", self, "_draw_send", [send])
-	send.rect_min_size = Vector2(44, 44)
+	send.rect_min_size = Vector2(52, 52)
 	send.size_flags_vertical = Control.SIZE_SHRINK_END
 	for st in ["normal", "hover", "pressed", "focus"]:
-		var s = XatTheme.box(Palette.USER if st != "hover" else Palette.USER.lightened(0.15), 22, 0, 0)
+		var s = XatTheme.box(Palette.USER if st != "hover" else Palette.USER.lightened(0.15), 26, 0, 0)
 		send.add_stylebox_override(st, s)
 	send.connect("pressed", self, "_on_send")
 	h.add_child(send)
-	f.add_child(h)
+	# Pequeño margen alrededor de la fila de composición (los botones no quedan
+	# pegados al borde inferior/lateral en pantallas de teléfono).
+	var hm = MarginContainer.new()
+	hm.add_constant_override("margin_left", 4)
+	hm.add_constant_override("margin_right", 4)
+	hm.add_constant_override("margin_bottom", 4)
+	hm.add_child(h)
+	f.add_child(hm)
 	foot.add_child(f)
 	v.add_child(foot)
 	add_child(v)
 	_fit_input()
 	_build_select()
+	_build_occupants()
+
+# Popup de ocupantes de la sala: cada fila inserta `@nick` en el composer.
+func _build_occupants() -> void:
+	_occ_popup = PopupPanel.new()
+	_occ_popup.rect_min_size = Vector2(220, 160)
+	var wrap = MarginContainer.new()
+	wrap.add_constant_override("margin_left", 10)
+	wrap.add_constant_override("margin_right", 10)
+	wrap.add_constant_override("margin_top", 10)
+	wrap.add_constant_override("margin_bottom", 10)
+	var sc = ScrollContainer.new()
+	sc.scroll_horizontal_enabled = false
+	_occ_list = VBoxContainer.new()
+	_occ_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_occ_list.add_constant_override("separation", 2)
+	sc.add_child(_occ_list)
+	wrap.add_child(sc)
+	_occ_popup.add_child(wrap)
+	add_child(_occ_popup)
+	_occ_action_menu = PopupMenu.new()
+	_occ_action_menu.connect("id_pressed", self, "_on_occ_action")
+	add_child(_occ_action_menu)
 
 # Barra flotante de selección (pulsación larga en táctil, o mantener el clic en
 # escritorio) con Copiar/Listo, y el detector de pulsación larga.
@@ -245,11 +324,17 @@ func _build_select() -> void:
 	copy.text = "Copiar"
 	copy.focus_mode = Control.FOCUS_NONE
 	copy.connect("pressed", self, "_on_copy_selection")
+	var allb = Button.new()
+	allb.text = "Todo"
+	allb.hint_tooltip = "Seleccionar todo el mensaje"
+	allb.focus_mode = Control.FOCUS_NONE
+	allb.connect("pressed", self, "_on_select_all")
 	var done = Button.new()
 	done.text = "Listo"
 	done.focus_mode = Control.FOCUS_NONE
 	done.connect("pressed", self, "_exit_selection")
 	row.add_child(copy)
+	row.add_child(allb)
 	row.add_child(done)
 	_sel_bar.add_child(row)
 	_sel_bar.visible = false
@@ -271,6 +356,34 @@ func _draw_send(p_btn: Button) -> void:
 func focus_composer() -> void:
 	_input.call_deferred("grab_focus")
 
+# En landscape la navegación y el título viven en el sidebar: cabecera compacta.
+func set_nav_visible(p_back: bool, p_title: bool) -> void:
+	back_button.visible = p_back
+	_title.visible = p_title
+
+# Los botones de acción de sala (Ocupantes/⋯/Salir) pueden vivir en el sidebar.
+func set_header_actions_visible(p_visible: bool) -> void:
+	_header_actions = p_visible
+	_apply_header_actions()
+
+func _apply_header_actions() -> void:
+	var room = _room != ""
+	if _occ_btn != null:
+		_occ_btn.visible = room and _header_actions
+	if _room_menu_btn != null:
+		_room_menu_btn.visible = room and _header_actions
+	if _leave_btn != null:
+		_leave_btn.visible = room and _header_actions
+
+# Disparadores para los botones equivalentes del sidebar.
+func toggle_occupants() -> void:
+	if _room != "":
+		_toggle_occupants()
+
+func popup_room_menu() -> void:
+	if _room != "":
+		_open_room_menu()
+
 # --- Adjuntos (composer) ---
 
 func _tool_button(p_text: String, p_tip: String) -> Button:
@@ -278,11 +391,12 @@ func _tool_button(p_text: String, p_tip: String) -> Button:
 	b.text = p_text
 	b.hint_tooltip = p_tip
 	b.focus_mode = Control.FOCUS_NONE
+	b.rect_min_size = Vector2(54, 46)
 	b.size_flags_vertical = Control.SIZE_SHRINK_END
 	for st in ["normal", "hover", "pressed", "focus"]:
 		var bg = Palette.BG2.lightened(0.12) if st == "hover" else Palette.BG2
-		b.add_stylebox_override(st, XatTheme.box(bg, 99, 10, 6))
-	b.add_font_override("font", XatTheme.font(Palette.FONT_MEDIUM, Palette.FONT_SIZE - 3))
+		b.add_stylebox_override(st, XatTheme.box(bg, 99, 16, 11))
+	b.add_font_override("font", XatTheme.font(Palette.FONT_MEDIUM, Palette.FONT_SIZE))
 	return b
 
 func _open_file_dialog() -> void:
@@ -381,6 +495,11 @@ func _input(p_event) -> void:
 		pressed = p_event.pressed
 		pos = p_event.position
 	elif p_event is InputEventScreenDrag:
+		# Mientras se ajusta una selección, el arrastre extiende/gobierna el rango.
+		if _sel_bubble != null and is_instance_valid(_sel_bubble):
+			_press_pos = p_event.position
+			_sel_bubble.drag_selection(p_event.position)
+			return
 		if _press and p_event.position.distance_to(_press_pos) > 14.0:
 			_press_moved = true
 			if _lp != null:
@@ -389,6 +508,9 @@ func _input(p_event) -> void:
 	else:
 		return
 	if not get_global_rect().has_point(pos):
+		# Si soltó fuera con una selección activa, cerrar el arrastre.
+		if not pressed and _sel_bubble != null and is_instance_valid(_sel_bubble):
+			_sel_bubble.end_selection_drag()
 		return
 	if pressed:
 		# Un toque sobre la barra no debe disparar otra selección.
@@ -403,6 +525,9 @@ func _input(p_event) -> void:
 		_press = false
 		if _lp != null:
 			_lp.stop()
+		# Fin del gesto: sellar el rango seleccionado (se conserva la barra).
+		if _sel_bubble != null and is_instance_valid(_sel_bubble):
+			_sel_bubble.end_selection_drag()
 
 # Scroll de rueda/trackpad con paso fijo. Devuelve true si consumió el evento.
 # El ScrollContainer por defecto mueve page/8 por muesca: con ventanas grandes
@@ -454,9 +579,13 @@ func _enter_selection(p_bubble) -> void:
 	if _sel_bubble != null and is_instance_valid(_sel_bubble):
 		_sel_bubble.end_selection()
 	_sel_bubble = p_bubble
-	_sel_bubble.begin_selection()
+	_sel_bubble.begin_selection_at(_press_pos)
 	if _sel_bar != null:
 		_sel_bar.visible = true
+
+func _on_select_all() -> void:
+	if _sel_bubble != null and is_instance_valid(_sel_bubble):
+		_sel_bubble.select_all()
 
 func _exit_selection() -> void:
 	if _sel_bubble != null and is_instance_valid(_sel_bubble):
@@ -511,6 +640,18 @@ func set_media_local(p_id: String, p_path: String) -> void:
 func set_peer(p_bare: String) -> void:
 	_exit_selection()
 	_peer = p_bare
+	_room = ""
+	_room_nick = ""
+	_occupants = []
+	_room_affiliation = ""
+	_room_role = ""
+	if _occ_btn != null:
+		_occ_btn.visible = false
+	if _leave_btn != null:
+		_leave_btn.visible = false
+	if _room_menu_btn != null:
+		_room_menu_btn.visible = false
+	_set_tools_visible(true)
 	_title.text = p_bare.split("@")[0]
 	_title.hint_tooltip = p_bare
 	_messages = []
@@ -519,6 +660,167 @@ func set_peer(p_bare: String) -> void:
 	_clear_tools()
 	_reset_view()
 	_rebuild()
+
+# Modo sala (XEP-0045): título = sala; se muestra la lista de ocupantes
+# (oprimible -> @mención) y se suprimen acciones, estados y adjuntos.
+# `p_affiliation`/`p_role` son los nuestros, para habilitar la moderación.
+func set_room(p_room: String, p_nick: String, p_occupants: Array = [], p_affiliation: String = "", p_role: String = "") -> void:
+	_exit_selection()
+	_peer = p_room
+	_room = p_room
+	_room_nick = p_nick
+	_occupants = p_occupants
+	_room_affiliation = p_affiliation
+	_room_role = p_role
+	_title.text = p_room.split("@")[0]
+	_title.hint_tooltip = p_room
+	_occ_btn.visible = true
+	_leave_btn.visible = true
+	_room_menu_btn.visible = true
+	_apply_header_actions()
+	_set_tools_visible(false)
+	_messages = []
+	_pending_actions = null
+	_clear_actions()
+	_clear_tools()
+	_reset_view()
+	_refresh_occupants()
+	_rebuild()
+
+# Actualiza sólo la lista de ocupantes y su botón (cambios de presencia en vivo).
+func update_occupants(p_occupants: Array) -> void:
+	_occupants = p_occupants
+	if _occ_btn != null and _room != "":
+		_refresh_occupants()
+
+# Cambia nuestra afiliación/rol (p.ej. si nos nombran moderadores).
+func set_room_caps(p_affiliation: String, p_role: String) -> void:
+	_room_affiliation = p_affiliation
+	_room_role = p_role
+	if _room != "" and _occ_popup != null and _occ_popup.visible:
+		_refresh_occupants()
+
+func set_room_subject(p_subject: String) -> void:
+	if _room != "":
+		_title.hint_tooltip = _room + (("\n" + p_subject) if p_subject != "" else "")
+
+func _set_tools_visible(p_visible: bool) -> void:
+	if _tools_row != null:
+		_tools_row.visible = p_visible
+
+func _refresh_occupants() -> void:
+	_occ_btn.text = "Ocupantes (%d)" % _occupants.size()
+	for c in _occ_list.get_children():
+		_occ_list.remove_child(c)
+		c.queue_free()
+	for occ in _occupants:
+		var nick = str(occ.get("nick", ""))
+		var jid = str(occ.get("jid", ""))
+		var row = HBoxContainer.new()
+		row.add_constant_override("separation", 2)
+		var b = Button.new()
+		b.text = nick + (" (yo)" if nick == _room_nick else "")
+		b.flat = true
+		b.align = Button.ALIGN_LEFT
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		b.focus_mode = Control.FOCUS_NONE
+		b.add_color_override("font_color", Bubble.color_for(nick))
+		b.connect("pressed", self, "_on_occupant_pick", [nick])
+		row.add_child(b)
+		# Moderación: sólo sobre otros y si tenemos permiso.
+		if nick != _room_nick and _can_moderate():
+			var mb = Button.new()
+			mb.text = "⋯"
+			mb.flat = true
+			mb.focus_mode = Control.FOCUS_NONE
+			mb.connect("pressed", self, "_open_occupant_menu", [nick, jid, occ])
+			row.add_child(mb)
+		_occ_list.add_child(row)
+
+func _can_admin() -> bool:
+	return _room_affiliation == "owner" or _room_affiliation == "admin"
+
+func _can_moderate() -> bool:
+	return _can_admin() or _room_role == "moderator"
+
+func _open_occupant_menu(p_nick: String, p_jid: String, p_occ: Dictionary) -> void:
+	_occ_action_ctx = {"nick": p_nick, "jid": p_jid}
+	_occ_action_menu.clear()
+	var aff = str(p_occ.get("affiliation", ""))
+	var role = str(p_occ.get("role", ""))
+	if _can_admin():
+		if aff != "member":
+			_occ_action_menu.add_item("Hacer miembro", 1)
+		if aff == "member":
+			_occ_action_menu.add_item("Quitar miembro", 2)
+		if aff != "admin":
+			_occ_action_menu.add_item("Hacer admin", 3)
+		if aff == "admin":
+			_occ_action_menu.add_item("Quitar admin", 4)
+		if role != "moderator":
+			_occ_action_menu.add_item("Hacer moderador", 5)
+		if role == "moderator":
+			_occ_action_menu.add_item("Quitar moderador", 6)
+		_occ_action_menu.add_separator()
+		_occ_action_menu.add_item("Expulsar", 7)
+		_occ_action_menu.add_item("Expulsar y banear", 8)
+	elif _can_moderate():
+		_occ_action_menu.add_item("Expulsar", 7)
+	_occ_action_menu.popup_centered()
+
+func _on_occ_action(p_id: int) -> void:
+	var nick = str(_occ_action_ctx.get("nick", ""))
+	var jid = str(_occ_action_ctx.get("jid", ""))
+	var action = {1: "member", 2: "unmember", 3: "admin", 4: "unadmin", 5: "moderator", 6: "unmoderator", 7: "kick", 8: "ban"}.get(p_id, "")
+	if action == "":
+		return
+	_occ_popup.hide()
+	emit_signal("occupant_action", _room, nick, jid, action)
+
+func _open_room_menu() -> void:
+	_room_menu.clear()
+	_room_menu.add_item("Invitar a contacto", 10)
+	_room_menu.add_item("Cambiar tema", 11)
+	if _can_admin():
+		_room_menu.add_separator()
+		_room_menu.add_item("Ajustes de sala", 20)
+	if _room_affiliation == "owner":
+		_room_menu.add_item("Destruir sala", 21)
+	_room_menu.popup_centered()
+
+func _on_room_menu(p_id: int) -> void:
+	match p_id:
+		10:
+			emit_signal("room_invite_requested")
+		11:
+			emit_signal("room_subject_requested")
+		20:
+			emit_signal("room_settings_requested")
+		21:
+			emit_signal("room_destroy_requested")
+
+func _toggle_occupants() -> void:
+	if _occ_popup.visible:
+		_occ_popup.hide()
+		return
+	_refresh_occupants()
+	_occ_popup.popup_centered()
+
+func _on_occupant_pick(p_nick: String) -> void:
+	_occ_popup.hide()
+	_insert_mention(p_nick)
+
+func _on_nick_clicked(p_nick: String) -> void:
+	_insert_mention(p_nick)
+
+# Inserta `@nick ` en la posición del cursor del composer y le da foco.
+func _insert_mention(p_nick: String) -> void:
+	if p_nick == "":
+		return
+	_input.insert_text_at_cursor("@" + p_nick + " ")
+	if not (OS.get_name() in ["Android", "iOS"]):
+		_input.grab_focus()
+	_fit_input()
 
 # Tras cambiar el zoom, conservar el punto de lectura: ancla el ÚLTIMO mensaje
 # visible (no el primero) a su misma posición en pantalla.
@@ -550,11 +852,26 @@ func deselect_all() -> void:
 			b.deselect()
 
 func set_history(p_rows: Array) -> void:
+	_fill_rows(p_rows)
+	_render_seq += 1
+	_rebuild()
+
+# Igual que `set_history`, pero construye las burbujas repartidas en varios
+# frames (RENDER_CHUNK por frame). El modelo queda listo al instante; la UI se
+# puede pintar ya aunque el render tarde. `p_unread_from` es el índice del primer
+# mensaje no leído (<0 = sin marcador).
+func set_history_deferred(p_rows: Array, p_unread_from: int = -1) -> void:
+	_fill_rows(p_rows)
+	_render_seq += 1
+	_unread_idx = p_unread_from if p_unread_from >= 0 and p_unread_from < _messages.size() else -1
+	_render_chunked(_render_seq)
+
+func _fill_rows(p_rows: Array) -> void:
 	_messages = []
 	_limit = MAX_BUBBLES
 	for r in p_rows:
 		_messages.append({
-			"from": _peer,
+			"from": _peer if r.get("sender", "") == "" else (_peer + "/" + str(r.get("sender", ""))),
 			"to": "",
 			"body": r.get("body", ""),
 			"timestamp": r.get("ts", ""),
@@ -563,8 +880,9 @@ func set_history(p_rows: Array) -> void:
 			"quick_responses": r.get("quick", []),
 			"commands": r.get("commands", []),
 			"attach": r.get("attach", {}),
+			"sender": r.get("sender", ""),
+			"muc": _room != "",
 		})
-	_rebuild()
 
 func _reset_view() -> void:
 	_limit = MAX_BUBBLES
@@ -602,11 +920,15 @@ func mark_delivered(p_id: String) -> void:
 			return
 
 func set_chat_state(p_text: String) -> void:
+	if _room != "":
+		return
 	_typing = p_text
 	_refresh_state()
 
 # "pensando…" mientras el agente procesa (shimmer); gana sobre el chat state.
 func set_thinking(p_on: bool) -> void:
+	if _room != "":
+		return
 	_thinking = p_on
 	_refresh_state()
 
@@ -657,6 +979,9 @@ func _drop_extras() -> void:
 
 # Acciones del mensaje -> card de aprobación inline bajo su burbuja.
 func set_actions(p_rec: Dictionary) -> void:
+	# En salas no hay cards de aprobación ni quick responses (construcciones 1:1).
+	if _room != "":
+		return
 	_pending_actions = p_rec
 	_clear_actions()
 	if p_rec.get("commands", []).empty() and p_rec.get("quick_responses", []).empty():
@@ -679,6 +1004,8 @@ func set_actions(p_rec: Dictionary) -> void:
 
 # Hook de aprobación: estado/expiración de la card activa (match por stanzaId).
 func apply_approval_hook(p_hook: Dictionary) -> void:
+	if _room != "":
+		return
 	var sid = str(p_hook.get("stanzaId", ""))
 	if _card != null and is_instance_valid(_card) and (sid == "" or _card.msg_id == "" or sid == _card.msg_id):
 		_card.set_hook(p_hook)
@@ -712,6 +1039,15 @@ func _on_decided(p_kind: String, p_value) -> void:
 
 func _rebuild(p_settle: bool = true) -> void:
 	_exit_selection()
+	var keep = _begin_render()
+	for i in range(_first, _messages.size()):
+		_make_bubble(i, false)
+	if p_settle:
+		_end_render(keep)
+
+# Deja la lista vacía para reconstruir. Devuelve la card activa a reanclar (o
+# null), que el llamador debe re-adjuntar en `_end_render`.
+func _begin_render():
 	var keep = _card if _card != null and is_instance_valid(_card) and _card.get_parent() != null else null
 	if keep != null:
 		keep.get_parent().remove_child(keep)
@@ -724,18 +1060,38 @@ func _rebuild(p_settle: bool = true) -> void:
 	_first = int(max(0, _messages.size() - _limit))
 	_last_day = ""
 	_break = false
-	for i in range(_first, _messages.size()):
-		_make_bubble(i, false)
 	_more.visible = _first > 0
+	return keep
+
+func _end_render(keep) -> void:
 	if keep != null:
 		var host = _bubble_for(keep.msg_id)
 		if host != null:
 			host.attach(keep)
-	if p_settle:
-		if _unread_idx >= 0 and _unread_node != null:
-			_to_marker()
-		else:
-			_to_bottom()
+	if _unread_idx >= 0 and _unread_node != null:
+		_to_marker()
+	else:
+		_to_bottom()
+
+# Construye las burbujas por tandas de RENDER_CHUNK, cediendo el frame entre
+# tandas. Si un render más nuevo arranca (otro contacto/MAM), `_render_seq`
+# cambia y este se aborta sin tocar nada más.
+func _render_chunked(p_seq: int) -> void:
+	_exit_selection()
+	var keep = _begin_render()
+	var i: int = _first
+	while i < _messages.size():
+		if p_seq != _render_seq:
+			return
+		var stop = int(min(i + RENDER_CHUNK, _messages.size()))
+		while i < stop:
+			_make_bubble(i, false)
+			i += 1
+		if i < _messages.size():
+			yield(get_tree(), "idle_frame")
+	if p_seq != _render_seq:
+		return
+	_end_render(keep)
 
 func _append_bubble(p_rec: Dictionary, p_new: bool) -> void:
 	_make_bubble(_messages.size() - 1, p_new)
@@ -792,9 +1148,26 @@ func _make_bubble(i: int, p_new: bool) -> void:
 	var gap = Palette.GAP if sep else (0 if i == _first else (Palette.GAP if same_prev else Palette.GROUP_GAP))
 	var b = Bubble.new()
 	b.connect("media_action", self, "_on_bubble_media_action")
+	b.connect("nick_clicked", self, "_on_nick_clicked")
 	b.set_record(rec, last, p_new, gap, p_new and dir == "in")
+	# Chip de remitente en salas: sólo el primer mensaje de cada grupo entrante.
+	if _room != "" and dir == "in":
+		var nick = _sender_of(rec)
+		var prev_same_sender = same_prev and i > _first and _sender_of(_messages[i - 1]) == nick
+		if nick != "" and not prev_same_sender:
+			b.set_sender(nick, Bubble.color_for(nick))
 	_list.add_child(b)
 	_bubbles.append(b)
+
+# Remitente de un mensaje de sala: campo `sender` (store) o el recurso del
+# `from` (vivo/MAM vienen como room/nick).
+func _sender_of(p_rec: Dictionary) -> String:
+	var s = str(p_rec.get("sender", ""))
+	if s != "":
+		return s
+	var frm = str(p_rec.get("from", ""))
+	var slash = frm.find("/")
+	return "" if slash < 0 else frm.substr(slash + 1)
 
 # Sigue al final sólo si el usuario ya estaba abajo.
 func _follow() -> void:

@@ -5,7 +5,18 @@ extends Reference
 
 const Palette = preload("res://addons/xat_xmpp/ui/palette.gd")
 
+const SCRIPT_PATH := "res://addons/xat_xmpp/ui/xat_theme.gd"
+const FONT_CACHE_KEY := "xat_font_cache_v1"
+
+# Fuente memoizada por (path, tamaño). Antes se creaba una DynamicFont nueva en
+# cada llamada (7 por burbuja, y una por fila de roster/card): cada rebind de
+# historial reasignaba decenas de fuentes. Compartir el recurso es seguro (los
+# overrides son por Control) y el FontZoom la reescala una sola vez.
 static func font(p_path: String, p_size: int = Palette.FONT_SIZE) -> DynamicFont:
+	var cache := _font_cache()
+	var key = p_path + "|" + str(p_size)
+	if cache.has(key):
+		return cache[key]
 	var f = DynamicFont.new()
 	f.font_data = load(p_path)
 	f.add_fallback(load(Palette.FONT_FALLBACK))
@@ -15,7 +26,14 @@ static func font(p_path: String, p_size: int = Palette.FONT_SIZE) -> DynamicFont
 	var fz = _font_zoom()
 	if fz != null:
 		fz.register(f, p_size)
+	cache[key] = f
 	return f
+
+static func _font_cache() -> Dictionary:
+	var script = load(SCRIPT_PATH)
+	if not script.has_meta(FONT_CACHE_KEY):
+		script.set_meta(FONT_CACHE_KEY, {})
+	return script.get_meta(FONT_CACHE_KEY)
 
 # Acceso suave al singleton global (null si no está instalado, p. ej. tests).
 static func _font_zoom():

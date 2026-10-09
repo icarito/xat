@@ -7,6 +7,8 @@
 app/.import/
 *.import
 .godot/
+# userdata escrito por error al correr con --path app
+app/godot/
 
 # Build/crash
 *crash*

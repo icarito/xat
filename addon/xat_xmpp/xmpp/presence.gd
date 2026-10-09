@@ -55,6 +55,15 @@ func remove(p_full: String) -> void:
 		if _order[bare].empty():
 			_order.erase(bare)
 
+# Descarta todos los recursos de un bare JID (p. ej. al cortarse la
+# suscripción: su presencia deja de ser válida).
+func remove_bare(p_bare: String) -> void:
+	if not _order.has(p_bare):
+		return
+	for full in _order[p_bare]:
+		_resources.erase(full)
+	_order.erase(p_bare)
+
 func is_online(p_bare: String) -> bool:
 	if not _order.has(p_bare):
 		return false

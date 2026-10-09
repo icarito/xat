@@ -6,6 +6,10 @@ extends Reference
 
 const Media = preload("res://addons/xat_xmpp/xmpp/media.gd")
 
+const SCRIPT_PATH := "res://addons/xat_xmpp/ui/media_util.gd"
+const THUMB_CACHE_KEY := "xat_thumb_cache_v1"
+const THUMB_CACHE_MAX := 64
+
 # Imagen desde disco (png/jpg/webp/bmp) o null. Detecta por bytes mágicos para
 # no imprimir errores del loader equivocado.
 static func load_texture(p_path: String):
@@ -31,7 +35,24 @@ static func load_texture(p_path: String):
 	return tex
 
 # Miniatura cuadrada máxima p_max (conserva aspecto) o null.
+# Memoizada por (path, p_max): decodificar + redimensionar una imagen es costoso
+# y las burbujas se reconstruyen al cambiar de chat. La textura es compartida
+# (no se duplica memoria de píxeles).
 static func load_thumbnail(p_path: String, p_max: int):
+	if p_path == "":
+		return null
+	var cache := _thumb_cache()
+	var key = p_path + "|" + str(p_max)
+	if cache.has(key):
+		return cache[key]
+	var tex = _build_thumbnail(p_path, p_max)
+	if tex != null:
+		if cache.size() >= THUMB_CACHE_MAX:
+			cache.erase(cache.keys()[0]) # FIFO simple; son pocas y chicas
+		cache[key] = tex
+	return tex
+
+static func _build_thumbnail(p_path: String, p_max: int):
 	var img = _load_image(p_path)
 	if img == null:
 		return null
@@ -45,6 +66,12 @@ static func load_thumbnail(p_path: String, p_max: int):
 	var tex = ImageTexture.new()
 	tex.create_from_image(img, 0)
 	return tex
+
+static func _thumb_cache() -> Dictionary:
+	var script = load(SCRIPT_PATH)
+	if not script.has_meta(THUMB_CACHE_KEY):
+		script.set_meta(THUMB_CACHE_KEY, {})
+	return script.get_meta(THUMB_CACHE_KEY)
 
 # Dimensiones (w,h) de la imagen, para reservar el espacio del thumbnail.
 static func image_size(p_path: String) -> Vector2:

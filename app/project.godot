@@ -53,3 +53,13 @@ quality/driver/fallback_to_gles2=true
 vram_compression/import_etc=true
 vram_compression/import_pvrtc=true
 environment/default_clear_color=Color( 0.09, 0.1, 0.12, 1 )
+
+[xat]
+
+push_service_android="fcm-push.hablar.fuentelibre.org"
+push_service_ios="apns-push.hablar.fuentelibre.org"
+push_service=""
+firebase_api_key="AIzaSyD13vKKBxS8o7Sl_WkjOz8CeairEZ9k3_I"
+firebase_app_id="1:346936265003:android:d4487ef306dafede2b1d6e"
+firebase_project_id="hablar-47b1b"
+firebase_sender_id="346936265003"
