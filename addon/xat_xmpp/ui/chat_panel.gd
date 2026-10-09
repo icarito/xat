@@ -9,11 +9,19 @@ signal message_submitted(bare, text)
 signal action_selected(bare, item)
 signal quick_selected(bare, value)
 signal chat_state_sent(bare, state)
+signal media_action(peer, rec, action) # abrir/descargar/reproducir media
+signal attach_picked(peer, path)       # archivo elegido para enviar
+signal attach_requested(peer)          # pedir el selector nativo (Android)
+signal camera_requested(peer)          # tomar foto
+signal voice_toggle(peer, start)       # empezar/terminar grabación
+signal voice_cancel(peer)              # descartar la grabación en curso
+signal text_copied(text)               # texto de una burbuja copiado al portapapeles
 
 const Palette = preload("res://addons/xat_xmpp/ui/palette.gd")
 const XatTheme = preload("res://addons/xat_xmpp/ui/xat_theme.gd")
 const Bubble = preload("res://addons/xat_xmpp/ui/bubble.gd")
 const LocalTime = preload("res://addons/xat_xmpp/ui/localtime.gd")
+const Media = preload("res://addons/xat_xmpp/xmpp/media.gd")
 const ToolCard = preload("res://addons/xat_xmpp/ui/tool_card.gd")
 const ApprovalCard = preload("res://addons/xat_xmpp/ui/approval_card.gd")
 const Shimmer = preload("res://addons/xat_xmpp/ui/fx/shimmer.gd")
@@ -57,6 +65,18 @@ var _content: Control
 var _jump: Button
 var _more: Button
 var _anim: Timer  # fuerza redibujo del shimmer (low_processor_mode lo congela)
+var _file_dialog: FileDialog
+var _attach_btn: Button
+var _cam_btn: Button
+var _mic_btn: Button
+var _mic_cancel: Button
+var _recording := false
+var _sel_bar: PanelContainer
+var _lp: Timer
+var _press := false
+var _press_pos := Vector2.ZERO
+var _press_moved := false
+var _sel_bubble = null
 
 func _init() -> void:
 	name = "ChatPanel"
@@ -167,6 +187,23 @@ func _build() -> void:
 	_hint.rect_position = Vector2(15, 10)
 	_input.add_child(_hint)
 	h.add_child(_input)
+	var tools = HBoxContainer.new()
+	tools.add_constant_override("separation", 4)
+	tools.size_flags_vertical = Control.SIZE_SHRINK_END
+	_attach_btn = _tool_button("Adj", "Adjuntar un archivo")
+	_attach_btn.connect("pressed", self, "_open_file_dialog")
+	_cam_btn = _tool_button("Foto", "Tomar una foto con la cámara")
+	_cam_btn.connect("pressed", self, "_on_camera")
+	_mic_btn = _tool_button("Voz", "Grabar un mensaje de voz")
+	_mic_btn.connect("pressed", self, "_on_mic")
+	_mic_cancel = _tool_button("X", "Cancelar la grabación")
+	_mic_cancel.visible = false
+	_mic_cancel.connect("pressed", self, "_on_mic_cancel")
+	tools.add_child(_attach_btn)
+	tools.add_child(_cam_btn)
+	tools.add_child(_mic_btn)
+	tools.add_child(_mic_cancel)
+	h.add_child(tools)
 	var send = Button.new()
 	send.connect("draw", self, "_draw_send", [send])
 	send.rect_min_size = Vector2(44, 44)
@@ -181,6 +218,46 @@ func _build() -> void:
 	v.add_child(foot)
 	add_child(v)
 	_fit_input()
+	_build_select()
+
+# Barra flotante de selección (pulsación larga en táctil, o mantener el clic en
+# escritorio) con Copiar/Listo, y el detector de pulsación larga.
+func _build_select() -> void:
+	_sel_bar = PanelContainer.new()
+	_sel_bar.anchor_left = 0.5
+	_sel_bar.anchor_right = 0.5
+	_sel_bar.anchor_top = 0.0
+	_sel_bar.anchor_bottom = 0.0
+	_sel_bar.margin_left = -96
+	_sel_bar.margin_right = 96
+	_sel_bar.margin_top = 52
+	_sel_bar.margin_bottom = 96
+	_sel_bar.mouse_filter = Control.MOUSE_FILTER_STOP
+	var sb = XatTheme.box(Palette.BG2, 12, 10, 8)
+	sb.shadow_color = Color(0, 0, 0, 0.35)
+	sb.shadow_size = 6
+	_sel_bar.add_stylebox_override("panel", sb)
+	var row = HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGN_CENTER
+	row.add_constant_override("separation", 8)
+	var copy = Button.new()
+	copy.text = "Copiar"
+	copy.focus_mode = Control.FOCUS_NONE
+	copy.connect("pressed", self, "_on_copy_selection")
+	var done = Button.new()
+	done.text = "Listo"
+	done.focus_mode = Control.FOCUS_NONE
+	done.connect("pressed", self, "_exit_selection")
+	row.add_child(copy)
+	row.add_child(done)
+	_sel_bar.add_child(row)
+	_sel_bar.visible = false
+	add_child(_sel_bar)
+	_lp = Timer.new()
+	_lp.one_shot = true
+	_lp.wait_time = 0.4
+	_lp.connect("timeout", self, "_on_long_press")
+	add_child(_lp)
 
 # Flecha hacia arriba dibujada (la fuente no trae ↑).
 func _draw_send(p_btn: Button) -> void:
@@ -193,7 +270,215 @@ func _draw_send(p_btn: Button) -> void:
 func focus_composer() -> void:
 	_input.call_deferred("grab_focus")
 
+# --- Adjuntos (composer) ---
+
+func _tool_button(p_text: String, p_tip: String) -> Button:
+	var b = Button.new()
+	b.text = p_text
+	b.hint_tooltip = p_tip
+	b.focus_mode = Control.FOCUS_NONE
+	b.size_flags_vertical = Control.SIZE_SHRINK_END
+	for st in ["normal", "hover", "pressed", "focus"]:
+		var bg = Palette.BG2.lightened(0.12) if st == "hover" else Palette.BG2
+		b.add_stylebox_override(st, XatTheme.box(bg, 99, 10, 6))
+	b.add_font_override("font", XatTheme.font(Palette.FONT_MEDIUM, Palette.FONT_SIZE - 3))
+	return b
+
+func _open_file_dialog() -> void:
+	if _peer == "":
+		return
+	# En Android se usa el selector nativo (Storage Access Framework) vía el
+	# singleton XatMedia: el FileDialog del motor no puede navegar el
+	# almacenamiento compartido (scoped storage).
+	if Engine.has_singleton("XatMedia"):
+		emit_signal("attach_requested", _peer)
+		return
+	if _file_dialog == null:
+		_file_dialog = FileDialog.new()
+		_file_dialog.mode = FileDialog.MODE_OPEN_FILE
+		_file_dialog.access = FileDialog.ACCESS_FILESYSTEM
+		_file_dialog.resizable = true
+		_file_dialog.rect_min_size = Vector2(560, 400)
+		_file_dialog.add_filter("*.png, *.jpg, *.jpeg, *.webp, *.gif, *.bmp, *.heic ; Imágenes")
+		_file_dialog.add_filter("*.ogg, *.oga, *.opus, *.mp3, *.m4a, *.wav, *.flac ; Audio")
+		_file_dialog.add_filter("*.* ; Todos los archivos")
+		_file_dialog.connect("file_selected", self, "_on_file_selected")
+		add_child(_file_dialog)
+	if OS.get_name() == "Android":
+		# En Android no hay picker nativo: se abre el diálogo del motor en la
+		# carpeta de imágenes (accesible vía MediaStore con el permiso de media).
+		var d = Directory.new()
+		for dir in [OS.SYSTEM_DIR_PICTURES, OS.SYSTEM_DIR_DCIM]:
+			var p = OS.get_system_dir(dir, true)
+			if p != "" and d.dir_exists(p):
+				_file_dialog.current_dir = p
+				break
+	_file_dialog.popup_centered_ratio(0.7)
+
+# Galería del teléfono (fallback cuando no hay cámara nativa).
+func open_gallery() -> void:
+	_open_file_dialog()
+
+func _on_file_selected(p_path: String) -> void:
+	if _peer != "" and p_path != "":
+		emit_signal("attach_picked", _peer, p_path)
+
+func _on_camera() -> void:
+	if _peer != "":
+		emit_signal("camera_requested", _peer)
+
+func _on_mic() -> void:
+	if _peer == "":
+		return
+	_recording = not _recording
+	emit_signal("voice_toggle", _peer, _recording)
+	set_recording(_recording, 0)
+
+func _on_mic_cancel() -> void:
+	if _peer == "":
+		return
+	_recording = false
+	set_recording(false, 0)
+	emit_signal("voice_cancel", _peer)
+
+# La app avisa del estado real de la grabación (por si el micro falla).
+func set_recording(p_on: bool, p_elapsed_ms: int) -> void:
+	_recording = p_on
+	if _mic_btn == null:
+		return
+	if p_on:
+		_mic_btn.text = "Enviar " + Media.format_duration_ms(p_elapsed_ms)
+		_mic_btn.add_color_override("font_color", Palette.ERROR)
+		if _mic_cancel != null:
+			_mic_cancel.visible = true
+	else:
+		_mic_btn.text = "Voz"
+		_mic_btn.add_color_override("font_color", Palette.TEXT)
+		if _mic_cancel != null:
+			_mic_cancel.visible = false
+
+func _on_bubble_media_action(p_rec: Dictionary, p_action: String) -> void:
+	emit_signal("media_action", _peer, p_rec, p_action)
+
+# --- Selección de texto ---
+
+# Pulsación larga (0.4 s sin moverse) sobre el texto de una burbuja -> modo
+# selección. En escritorio además se puede seleccionar arrastrando (el label ya
+# tiene selección habilitada).
+func _input(p_event) -> void:
+	if not visible or _peer == "":
+		return
+	if _file_dialog != null and _file_dialog.visible:
+		return
+	# Sólo táctil: en escritorio la selección por arrastre del propio label basta.
+	var pressed := false
+	var pos := Vector2.ZERO
+	if p_event is InputEventScreenTouch:
+		pressed = p_event.pressed
+		pos = p_event.position
+	elif p_event is InputEventScreenDrag:
+		if _press and p_event.position.distance_to(_press_pos) > 14.0:
+			_press_moved = true
+			if _lp != null:
+				_lp.stop()
+		return
+	else:
+		return
+	if not get_global_rect().has_point(pos):
+		return
+	if pressed:
+		# Un toque sobre la barra no debe disparar otra selección.
+		if _sel_bar != null and _sel_bar.visible and _sel_bar.get_global_rect().has_point(pos):
+			return
+		_press = true
+		_press_pos = pos
+		_press_moved = false
+		if _lp != null:
+			_lp.start()
+	else:
+		_press = false
+		if _lp != null:
+			_lp.stop()
+
+func _on_long_press() -> void:
+	if not _press or _press_moved:
+		return
+	var b = _bubble_at(_press_pos)
+	if b == null:
+		return
+	_enter_selection(b)
+
+func _bubble_at(p_pos: Vector2):
+	for i in range(_bubbles.size() - 1, -1, -1):
+		var b = _bubbles[i]
+		if not is_instance_valid(b) or not b.is_text_visible():
+			continue
+		if b.text_global_rect().has_point(p_pos):
+			return b
+	return null
+
+func _enter_selection(p_bubble) -> void:
+	if _sel_bubble == p_bubble:
+		return
+	if _sel_bubble != null and is_instance_valid(_sel_bubble):
+		_sel_bubble.end_selection()
+	_sel_bubble = p_bubble
+	_sel_bubble.begin_selection()
+	if _sel_bar != null:
+		_sel_bar.visible = true
+
+func _exit_selection() -> void:
+	if _sel_bubble != null and is_instance_valid(_sel_bubble):
+		_sel_bubble.end_selection()
+	_sel_bubble = null
+	if _sel_bar != null:
+		_sel_bar.visible = false
+
+func _on_copy_selection() -> void:
+	if _sel_bubble == null or not is_instance_valid(_sel_bubble):
+		_exit_selection()
+		return
+	var t = _sel_bubble.selected_text()
+	if t.strip_edges() == "":
+		t = str(_sel_bubble.rec.get("body", ""))
+	if t != "":
+		OS.set_clipboard(t)
+		emit_signal("text_copied", t)
+	_exit_selection()
+
+# Actualiza el adjunto de una fila por id (subida enviada/fallida).
+func update_media_state(p_id: String, p_state: String, p_url: String, p_error: String = "") -> void:
+	for i in range(_messages.size()):
+		if str(_messages[i].get("id", "")) == p_id:
+			var rec = _messages[i]
+			var attach = rec.get("attach", {})
+			if not (attach is Dictionary):
+				attach = {}
+			attach["state"] = p_state
+			attach["error"] = p_error
+			if p_url != "":
+				attach["url"] = p_url
+				rec["body"] = p_url
+			rec["attach"] = attach
+			if _bub(i) != null:
+				_bub(i).refresh()
+			return
+
+# Registra la ruta local de un adjunto por id de mensaje y redibuja.
+func set_media_local(p_id: String, p_path: String) -> void:
+	for i in range(_messages.size()):
+		if str(_messages[i].get("id", "")) == p_id:
+			var attach = _messages[i].get("attach", {})
+			if not (attach is Dictionary):
+				attach = {}
+			attach["local"] = p_path
+			_messages[i]["attach"] = attach
+			if _bub(i) != null:
+				_bub(i).refresh()
+			return
+
 func set_peer(p_bare: String) -> void:
+	_exit_selection()
 	_peer = p_bare
 	_title.text = p_bare.split("@")[0]
 	_title.hint_tooltip = p_bare
@@ -246,6 +531,7 @@ func set_history(p_rows: Array) -> void:
 			"id": r.get("request_id", ""),
 			"quick_responses": r.get("quick", []),
 			"commands": r.get("commands", []),
+			"attach": r.get("attach", {}),
 		})
 	_rebuild()
 
@@ -394,6 +680,7 @@ func _on_decided(p_kind: String, p_value) -> void:
 		emit_signal("quick_selected", _peer, str(p_value))
 
 func _rebuild(p_settle: bool = true) -> void:
+	_exit_selection()
 	var keep = _card if _card != null and is_instance_valid(_card) and _card.get_parent() != null else null
 	if keep != null:
 		keep.get_parent().remove_child(keep)
@@ -433,6 +720,8 @@ func _append_bubble(p_rec: Dictionary, p_new: bool) -> void:
 func _trim() -> void:
 	while _bubbles.size() > _limit:
 		var b = _bubbles.pop_front()
+		if b == _sel_bubble:
+			_exit_selection()
 		_first += 1
 		while _list.get_child_count() > 0 and _list.get_child(0) != b:
 			var c = _list.get_child(0)
@@ -471,6 +760,7 @@ func _make_bubble(i: int, p_new: bool) -> void:
 		_bubbles[i - 1 - _first].set_group_last(false)
 	var gap = Palette.GAP if sep else (0 if i == _first else (Palette.GAP if same_prev else Palette.GROUP_GAP))
 	var b = Bubble.new()
+	b.connect("media_action", self, "_on_bubble_media_action")
 	b.set_record(rec, last, p_new, gap, p_new and dir == "in")
 	_list.add_child(b)
 	_bubbles.append(b)
@@ -502,6 +792,9 @@ static func near_bottom(p_value: float, p_max: float, p_page: float, p_slack: fl
 	return p_max - p_page - p_value <= p_slack
 
 func _on_scrolled(p_value: float) -> void:
+	# Desplazar sale del modo selección (el texto ya no está donde se tocó).
+	if _sel_bubble != null:
+		_exit_selection()
 	var sb = _scroll.get_v_scrollbar()
 	_pinned = near_bottom(p_value, sb.max_value, sb.page)
 	if _pinned:

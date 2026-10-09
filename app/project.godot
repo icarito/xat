@@ -29,6 +29,8 @@ run/low_processor_mode_sleep_usec=8000
 [audio]
 
 driver="SDL2"
+enable_audio_input=true
+driver/enable_input=true
 
 [autoload]
 

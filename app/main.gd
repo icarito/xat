@@ -16,6 +16,11 @@ const AvatarBadge = preload("res://addons/xat_xmpp/ui/avatar_badge.gd")
 const Juice = preload("res://addons/xat_xmpp/ui/juice.gd")
 const P = preload("res://addons/xat_xmpp/ui/palette.gd")
 const StartupSplash = preload("res://addons/xat_xmpp/ui/startup_splash.gd")
+const Recorder = preload("res://addons/xat_xmpp/xmpp/recorder.gd")
+const CameraCapture = preload("res://addons/xat_xmpp/xmpp/camera.gd")
+const Media = preload("res://addons/xat_xmpp/xmpp/media.gd")
+const MediaUtil = preload("res://addons/xat_xmpp/ui/media_util.gd")
+const MediaLightbox = preload("res://addons/xat_xmpp/ui/media_lightbox.gd")
 
 # Por debajo de este ancho el panel "mente" se oculta (se abre con el orbe del header).
 const MIND_MIN_WIDTH := 1000
@@ -47,6 +52,15 @@ var _pending_cfg := {}
 var _pending_command := {}
 var _peer := ""
 var _stretch_base := Vector2.ZERO
+var _recorder
+var _lightbox
+var _audio: AudioStreamPlayer
+var _media_pending := {} # message_id -> acción pendiente tras descargar la media
+var _rec_timer: Timer
+var _rec_start_ms := 0
+var _playing_path := ""
+var _native_media = null          # singleton XatMedia (selector/cámara nativa)
+var _pending_media_peer := ""     # peer que espera el resultado del selector
 
 func _ready() -> void:
 	theme = XatTheme.build()
@@ -75,6 +89,9 @@ func _ready() -> void:
 	session.connect("avatar_changed", self, "_on_avatar_changed")
 	session.connect("agent_state_changed", self, "_on_agent_state")
 	session.connect("agent_hook", self, "_on_agent_hook")
+	session.connect("media_upload_state", self, "_on_media_upload_state")
+	session.connect("media_ready", self, "_on_media_ready")
+	session.connect("media_failed", self, "_on_media_failed")
 
 	_account = AccountPanel.new()
 	_account.anchor_right = 1.0
@@ -124,6 +141,31 @@ func _ready() -> void:
 	connect("resized", self, "_apply_mobile_stretch")
 	connect("resized", self, "_update_safe_area")
 	_chat.connect("back_requested", self, "_on_back")
+	_chat.connect("attach_picked", self, "_on_attach_picked")
+	_chat.connect("attach_requested", self, "_on_attach_requested")
+	_chat.connect("camera_requested", self, "_on_camera_requested")
+	_chat.connect("voice_toggle", self, "_on_voice_toggle")
+	_chat.connect("voice_cancel", self, "_on_voice_cancel")
+	_chat.connect("media_action", self, "_on_media_action")
+	_chat.connect("text_copied", self, "_on_text_copied")
+	_recorder = Recorder.new()
+	_recorder.name = "Recorder"
+	add_child(_recorder)
+	_audio = AudioStreamPlayer.new()
+	_audio.name = "MediaAudio"
+	_audio.connect("finished", self, "_on_audio_finished")
+	add_child(_audio)
+	_lightbox = MediaLightbox.new()
+	add_child(_lightbox)
+	_rec_timer = Timer.new()
+	_rec_timer.wait_time = 0.2
+	_rec_timer.connect("timeout", self, "_tick_recording")
+	add_child(_rec_timer)
+	_setup_native_media()
+	# En Android los permisos peligrosos (micrófono, media) se piden en runtime;
+	# Godot no los pide solo aunque estén declarados en el manifiesto.
+	if OS.get_name() == "Android":
+		OS.request_permissions()
 	# Móvil: el teclado virtual tapa el composer; se sigue su altura.
 	if OS.has_feature("mobile"):
 		_kb_timer = Timer.new()
@@ -218,7 +260,13 @@ func _on_peer_selected(p_bare: String) -> void:
 	if not (OS.get_name() in ["Android", "iOS"]):
 		_chat.focus_composer()
 	_chat.set_peer(p_bare)
-	_chat.set_history(session.get_recent_history(p_bare))
+	var hist = session.get_recent_history(p_bare)
+	_chat.set_history(hist)
+	# Miniaturas de imágenes ya guardadas en el historial.
+	for r in hist:
+		var att = r.get("attach", {})
+		if att is Dictionary and str(att.get("kind", "")) == "image" and str(att.get("local", "")) == "":
+			session.ensure_media(p_bare, {"id": r.get("request_id", ""), "attach": att, "direction": "in"})
 	var n = int(_unread.get(p_bare, 0))
 	if n > 0:
 		_chat.mark_unread_from(-n)
@@ -256,9 +304,223 @@ func _on_message_received(p_rec: Dictionary) -> void:
 		juice.haptic("receive")
 	if peer == _peer:
 		_chat.add_message(p_rec)
+		_maybe_fetch_media(peer, p_rec)
 	elif p_rec.get("direction", "in") != "out" and not p_rec.get("is_mam", false) and str(p_rec.get("body", "")) != "":
 		_unread[peer] = int(_unread.get(peer, 0)) + 1
 		_roster.set_unread(peer, _unread[peer])
+
+# Las imágenes se descargan solas para mostrar la miniatura; audio/archivos al
+# pedirlos (tocar el reproductor o el chip).
+func _maybe_fetch_media(peer: String, rec: Dictionary) -> void:
+	var attach = rec.get("attach", {})
+	if not (attach is Dictionary) or attach.empty():
+		return
+	# Los propios ya tienen copia local; no re-descargar el link recién subido.
+	if str(rec.get("direction", "in")) == "out":
+		return
+	if str(attach.get("kind", "")) != "image":
+		return
+	var local = str(attach.get("local", ""))
+	if local != "" and File.new().file_exists(local):
+		return
+	session.ensure_media(peer, rec)
+
+func _on_text_copied(_text: String) -> void:
+	juice.toast("Copiado")
+
+func _on_attach_picked(peer: String, path: String) -> void:
+	_send_attachment(peer, path, Media.mime_for_path(path), 0, "")
+
+# --- Selector/cámara nativos (Android, singleton XatMedia) ---
+
+func _setup_native_media() -> void:
+	if not Engine.has_singleton("XatMedia"):
+		return
+	_native_media = Engine.get_singleton("XatMedia")
+	_native_media.connect("media_picked", self, "_on_native_media_picked")
+	_native_media.connect("media_cancelled", self, "_on_native_media_cancelled")
+	_native_media.connect("media_error", self, "_on_native_media_error")
+
+func _on_attach_requested(peer: String) -> void:
+	if _native_media == null:
+		_chat.open_gallery()
+		return
+	_pending_media_peer = peer
+	_native_media.pickFile()
+
+func _on_native_media_picked(path: String) -> void:
+	var peer = _pending_media_peer
+	_pending_media_peer = ""
+	if peer == "" or path == "":
+		return
+	_send_attachment(peer, path, Media.mime_for_path(path), 0, "")
+
+func _on_native_media_cancelled() -> void:
+	_pending_media_peer = ""
+
+func _on_native_media_error(reason: String) -> void:
+	_pending_media_peer = ""
+	juice.play("alert")
+	var msg = "No se pudo obtener el archivo"
+	if reason == "sin-camara":
+		msg = "No hay app de cámara"
+	elif reason == "sin-imagen":
+		msg = "La cámara no devolvió imagen"
+	elif reason == "sin-espacio":
+		msg = "Sin espacio para guardar la foto"
+	juice.toast(msg, P.ERROR)
+
+func _on_camera_requested(peer: String) -> void:
+	# Android: cámara y selector nativos (singleton XatMedia). Godot 3 no trae
+	# API de webcam, así que se delega en la app de cámara del sistema.
+	if _native_media != null:
+		_pending_media_peer = peer
+		if _native_media.hasCamera():
+			_native_media.takePhoto()
+		else:
+			juice.toast("Sin cámara: elegí una foto de la galería")
+			_native_media.pickImage()
+		return
+	# Sin backend de cámara (p. ej. Android sin plugin), caer a la galería.
+	if CameraCapture.backend() == "":
+		juice.toast("Sin cámara: elegí una foto de la galería")
+		_chat.open_gallery()
+		return
+	var dest = "user://media/foto_%d.jpg" % OS.get_ticks_msec()
+	var d = Directory.new()
+	if not d.dir_exists("user://media/"):
+		d.make_dir_recursive("user://media/")
+	var reason = CameraCapture.capture(ProjectSettings.globalize_path(dest))
+	if reason != "":
+		juice.play("alert")
+		juice.toast("Cámara no disponible (%s)" % reason, P.ERROR)
+		return
+	_send_attachment(peer, dest, "image/jpeg", 0, "")
+
+func _on_voice_toggle(peer: String, start: bool) -> void:
+	if start:
+		if not _mic_permitted():
+			OS.request_permissions()
+			_chat.set_recording(false, 0)
+			juice.toast("Concedé el permiso de micrófono y reintentá", P.ERROR)
+			return
+		_rec_start_ms = OS.get_ticks_msec()
+		if _recorder.start():
+			_rec_timer.start()
+		else:
+			_chat.set_recording(false, 0)
+			juice.toast("No se pudo acceder al micrófono", P.ERROR)
+	else:
+		_rec_timer.stop()
+		_chat.set_recording(false, 0)
+		var r = _recorder.stop()
+		if not r.empty():
+			_send_attachment(peer, r["path"], "audio/wav", int(r["duration_ms"]), "")
+
+func _mic_permitted() -> bool:
+	if OS.get_name() != "Android":
+		return true
+	return OS.get_granted_permissions().has("android.permission.RECORD_AUDIO")
+
+func _on_voice_cancel(_peer: String) -> void:
+	_rec_timer.stop()
+	_chat.set_recording(false, 0)
+	_recorder.cancel()
+
+func _tick_recording() -> void:
+	var elapsed = OS.get_ticks_msec() - _rec_start_ms
+	_chat.set_recording(true, elapsed)
+	if elapsed > 5 * 60 * 1000:
+		_on_voice_toggle(_peer, false)
+
+func _send_attachment(peer: String, path: String, mime: String, duration_ms: int, caption: String) -> void:
+	var size = Media.file_size(path)
+	if size < 0:
+		juice.play("alert")
+		juice.toast("No se pudo leer el archivo", P.ERROR)
+		return
+	if size > Media.MAX_UPLOAD_SIZE:
+		juice.play("alert")
+		juice.toast("El archivo supera %s" % Media.format_size(Media.MAX_UPLOAD_SIZE), P.ERROR)
+		return
+	var rid = session.send_media_file(peer, path, mime, duration_ms, caption)
+	if rid == "":
+		juice.play("alert")
+		juice.toast("No se pudo enviar el adjunto", P.ERROR)
+		return
+	_chat.add_message({
+		"from": session.bare(),
+		"to": peer,
+		"body": caption if caption != "" else path.get_file(),
+		"direction": "out",
+		"timestamp": _now_iso(),
+		"id": rid,
+		"attach": {
+			"url": "", "kind": Media.kind_for_mime(mime), "mime": mime,
+			"name": path.get_file(), "size": size,
+			"duration_ms": duration_ms, "state": "uploading", "local": path,
+		},
+	})
+	_roster.touch(peer, _now_iso())
+
+func _on_media_upload_state(bare: String, request_id: String, state: String, url: String) -> void:
+	if bare == _peer:
+		_chat.update_media_state(request_id, state, url)
+	if state == "sent":
+		juice.play("send")
+
+func _on_media_ready(bare: String, message_id: String, path: String, kind: String) -> void:
+	if bare != _peer:
+		return
+	_chat.set_media_local(message_id, path)
+	var action = _media_pending.get(message_id, "")
+	if action != "":
+		_media_pending.erase(message_id)
+		_perform_media(action, path, kind)
+
+func _on_media_failed(bare: String, message_id: String, reason: String) -> void:
+	_media_pending.erase(message_id)
+	var desc = Media.describe_error(reason)
+	if bare == _peer:
+		_chat.update_media_state(message_id, "failed", "", desc)
+	juice.toast(desc, P.ERROR)
+	juice.play("alert")
+
+func _on_media_action(peer: String, rec: Dictionary, action: String) -> void:
+	var attach = rec.get("attach", {})
+	if not (attach is Dictionary) or attach.empty():
+		return
+	var local = str(attach.get("local", ""))
+	var kind = str(attach.get("kind", "file"))
+	if local != "" and File.new().file_exists(local):
+		_perform_media(action, local, kind)
+		return
+	var mid = str(rec.get("id", ""))
+	if mid != "":
+		_media_pending[mid] = action
+		session.ensure_media(peer, rec)
+
+func _perform_media(action: String, path: String, kind: String) -> void:
+	if action == "open":
+		if kind == "image":
+			_lightbox.open(path)
+		else:
+			OS.shell_open(ProjectSettings.globalize_path(path))
+	elif action == "play":
+		if _playing_path == path and _audio.playing:
+			_audio.stop()
+			_playing_path = ""
+			return
+		var stream = MediaUtil.load_audio(path)
+		if stream == null:
+			OS.shell_open(ProjectSettings.globalize_path(path))
+		else:
+			_audio.stream = stream
+			_audio.play()
+			_playing_path = path
+
+func _on_audio_finished() -> void:
+	_playing_path = ""
 
 func _on_message_corrected(p_rec: Dictionary) -> void:
 	if _bare(p_rec.get("from", "")) == _peer:
@@ -274,6 +536,11 @@ func _on_chat_state(p_bare: String, p_state: String) -> void:
 func _on_history_fetched(p_bare: String, p_rows: Array, _p_complete: bool) -> void:
 	if p_bare == _peer and not p_rows.empty():
 		_chat.set_history(p_rows)
+		# Descargar las miniaturas de imágenes históricas.
+		for r in p_rows:
+			var att = r.get("attach", {})
+			if att is Dictionary and str(att.get("kind", "")) == "image" and str(att.get("local", "")) == "":
+				session.ensure_media(p_bare, {"id": r.get("request_id", ""), "attach": att, "direction": "in"})
 
 func _on_action_selected(p_bare: String, p_item) -> void:
 	_celebrate()

@@ -25,14 +25,16 @@ export JAVA_HOME="${JAVA_HOME_17:-/usr/lib/jvm/java-17-openjdk}"
 export GRADLE_USER_HOME="$WORK/gradle-home"
 export SCONS_CACHE="${SCONS_CACHE-$HOME/.cache/scons-godot3}"
 
-# Mismos módulos apagados que tools/build.sh (xat no los usa).
+# Mismos módulos apagados que tools/build.sh (xat no los usa), salvo stb_vorbis
+# y minimp3 que reproducen audio adjunto (OGG Vorbis / MP3).
 NO_MODULES="bullet csg gridmap enet upnp webrtc websocket webxr mobile_vr gdnative visual_script theora webm
-	vorbis opus ogg stb_vorbis minimp3 gltf jsonrpc camera opensimplex raycast box3d decal imgui"
+	vorbis opus ogg gltf jsonrpc camera opensimplex raycast box3d decal imgui"
 
 # shellcheck disable=SC2046
 (cd "$GODOT" && scons -j"${JOBS:-8}" platform=android target=release_debug tools=no android_arch=arm64v8 \
 	production=yes lto=none progress=no \
-	custom_modules="$FORK","$FORK/modules" $(for m in $NO_MODULES; do printf 'module_%s_enabled=no ' "$m"; done))
+	custom_modules="$FORK","$FORK/modules" module_xmpp_enabled=yes \
+	$(for m in $NO_MODULES; do printf 'module_%s_enabled=no ' "$m"; done))
 
 (cd "$GODOT/platform/android/java" && ./gradlew --no-daemon copyDebugBinaryToBin)
 

@@ -63,6 +63,16 @@ func _init():
 	check(s.has_request_id("e@h", "rid-1"), "has_request_id true")
 	check(not s.has_request_id("e@h", "rid-2"), "has_request_id false")
 
+	# Adjuntos: metadata JSON por fila + reemplazo de estado de subida.
+	s.record_message({"bare_jid": "h@h", "body": "https://up.x/f.jpg", "direction": "out", "ts": "2026-07-07T00:00:00Z", "request_id": "att-1", "attach": {"url": "https://up.x/f.jpg", "mime": "image/jpeg", "kind": "image", "state": "uploading"}})
+	var hr = s.find_by_request_id("h@h", "att-1")
+	check(hr != null and hr["attach"]["kind"] == "image" and hr["attach"]["state"] == "uploading", "attachment round-trip")
+	check(s.get_attachment("h@h", "att-1")["mime"] == "image/jpeg", "get_attachment")
+	check(s.set_attachment("h@h", "att-1", {"url": "https://up.x/f.jpg", "kind": "image", "state": "sent", "local": "/tmp/f.jpg"}), "set_attachment")
+	check(s.get_attachment("h@h", "att-1")["state"] == "sent", "set_attachment persiste")
+	check(s.get_recent("h@h", 10).back()["attach"]["state"] == "sent", "get_recent decodifica attach")
+	check(s.get_attachment("h@h", "no-existe").empty(), "get_attachment ausente")
+
 	# open() limpia filas sin cuerpo heredadas.
 	var tmp = "user://store_test_tmp.db"
 	var s2 = Store.new()

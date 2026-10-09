@@ -31,3 +31,8 @@ const HOOKS_APPROVAL := "urn:openclaw:hooks:approval:0"
 const HOOKS_PROGRESS := "urn:openclaw:hooks:progress:0"
 const PUBSUB := "http://jabber.org/protocol/pubsub"
 const PEP := "http://jabber.org/protocol/pubsub#event"
+# Adjuntos: XEP-0066 (OOB) para el link y XEP-0363 (HTTP Upload) para subirlo.
+const OOB := "jabber:x:oob"
+const HTTP_UPLOAD := "urn:xmpp:http:upload:0"
+# Variante legacy de disco#items (algunos servidores la usan para el upload).
+const DISCO_ITEMS_META := "http://jabber.org/protocol/disco#items"

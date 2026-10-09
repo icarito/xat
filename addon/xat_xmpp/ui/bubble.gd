@@ -2,15 +2,22 @@ extends VBoxContainer
 
 # Burbuja de chat: fila con la burbuja alineada a un lado, hora/estado debajo
 # (sólo en la última del grupo). Sin _process; la entrada usa un Tween.
+# Si el mensaje trae `attach`, en vez del link crudo se dibuja la media
+# (miniatura, reproductor de audio o chip de archivo).
+
+signal media_action(rec, action) # action: "open" | "play"
 
 const LocalTime = preload("res://addons/xat_xmpp/ui/localtime.gd")
 const Palette = preload("res://addons/xat_xmpp/ui/palette.gd")
 const Markdown = preload("res://addons/xat_xmpp/xmpp/markdown.gd")
+const Media = preload("res://addons/xat_xmpp/xmpp/media.gd")
+const MediaUtil = preload("res://addons/xat_xmpp/ui/media_util.gd")
 const XatTheme = preload("res://addons/xat_xmpp/ui/xat_theme.gd")
 const EmojiInline = preload("res://addons/xat_xmpp/ui/emoji_inline.gd")
 
 const MAX_FRAC := 0.7
 const SLIDE := 14.0
+const THUMB_MAX := 240
 
 var rec := {}
 var _last := false
@@ -30,6 +37,10 @@ var _reveal_tw = null # Tween pendiente si la burbuja aún no está en el árbol
 var _col: VBoxContainer
 var _row: HBoxContainer
 var _pad: Control
+var _inner: VBoxContainer
+var _media_host: VBoxContainer
+var _thumb_path := ""
+var _thumb_tex = null
 
 func _init() -> void:
 	mouse_filter = Control.MOUSE_FILTER_PASS
@@ -52,15 +63,27 @@ func _init() -> void:
 	_label.fit_content_height = true
 	_label.scroll_active = false
 	_label.mouse_filter = Control.MOUSE_FILTER_PASS
-	# En táctil el arrastre debe desplazar el chat, no seleccionar texto.
-	_label.selection_enabled = not OS.has_touchscreen_ui_hint()
+	# En táctil el arrastre debe desplazar el chat; la selección se activa con
+	# una pulsación larga (chat_panel llama a begin_selection). Sin selección el
+	# label no consume el arrastre (IGNORE) y el ScrollContainer se mueve.
+	_label.selection_enabled = true
+	if OS.has_touchscreen_ui_hint():
+		_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_label.add_color_override("default_color", Palette.TEXT)
 	_label.add_font_override("normal_font", _font)
 	_label.add_font_override("bold_font", XatTheme.font(Palette.FONT_BOLD))
 	_label.add_font_override("italics_font", _font)
 	_label.add_font_override("bold_italics_font", XatTheme.font(Palette.FONT_BOLD))
 	_label.add_font_override("mono_font", XatTheme.font(Palette.FONT_MONO, Palette.FONT_SIZE - 1))
-	_panel.add_child(_label)
+	_inner = VBoxContainer.new()
+	_inner.mouse_filter = Control.MOUSE_FILTER_PASS
+	_inner.add_constant_override("separation", 6)
+	_media_host = VBoxContainer.new()
+	_media_host.mouse_filter = Control.MOUSE_FILTER_PASS
+	_media_host.add_constant_override("separation", 4)
+	_inner.add_child(_media_host)
+	_inner.add_child(_label)
+	_panel.add_child(_inner)
 	_meta = Label.new()
 	_meta.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_meta.add_color_override("font_color", Palette.TEXT_DIM)
@@ -140,17 +163,173 @@ func set_group_last(p_last: bool) -> void:
 func deselect() -> void:
 	_label.deselect()
 
-# Re-renderiza cuerpo, marcas y estilo (corrección, entrega).
+# --- Selección de texto (escritorio: arrastre; táctil: pulsación larga) ---
+
+func text_global_rect() -> Rect2:
+	return _label.get_global_rect()
+
+func is_text_visible() -> bool:
+	return _label.visible
+
+# El panel llama a esto al detectar una pulsación larga: el label pasa a
+# consumir el arrastre y selecciona todo el mensaje (se puede ajustar).
+func begin_selection() -> void:
+	_label.mouse_filter = Control.MOUSE_FILTER_STOP
+	_label.select_all()
+
+func end_selection() -> void:
+	_label.deselect()
+	_label.mouse_filter = Control.MOUSE_FILTER_IGNORE if OS.has_touchscreen_ui_hint() else Control.MOUSE_FILTER_PASS
+
+func selected_text() -> String:
+	return _label.get_selected_text()
+
+# Re-renderiza cuerpo, marcas y estilo (corrección, entrega, media).
 func refresh() -> void:
 	# Un motor anterior sigue mostrando Unicode normal. No sustituir por imágenes
 	# si no sabe devolver su secuencia original al seleccionar/copiar.
 	_emoji = EmojiInline.new(int(_font.get_height())) if _label.has_method("add_inline_image") else null
-	var bb = Markdown.to_bbcode(str(rec.get("body", "")), _emoji)
-	_label.bbcode_text = bb
+	var attach = rec.get("attach", {})
+	if attach is Dictionary and not (attach as Dictionary).empty():
+		var url = str(attach.get("url", ""))
+		_render_media(attach)
+		var caption = Media.caption_of(str(rec.get("body", "")), url)
+		_label.bbcode_text = Markdown.to_bbcode(caption, _emoji)
+		_label.visible = caption != ""
+	else:
+		_clear_media()
+		_label.visible = true
+		_label.bbcode_text = Markdown.to_bbcode(str(rec.get("body", "")), _emoji)
 	_fit_w = -1.0
 	_fit()
 	_style()
 	_update_meta()
+
+# --- Media del adjunto ---
+
+func _clear_media() -> void:
+	if _media_host == null:
+		return
+	for c in _media_host.get_children():
+		_media_host.remove_child(c)
+		c.queue_free()
+
+func _render_media(attach: Dictionary) -> void:
+	_clear_media()
+	var state = str(attach.get("state", ""))
+	var name = Media.short_name(str(attach.get("name", "adjunto")))
+	var size = int(attach.get("size", 0))
+	if state == "uploading":
+		_media_host.add_child(_media_label("Subiendo %s…" % name, Palette.TEXT_DIM))
+		return
+	if state == "failed":
+		var reason = str(attach.get("error", ""))
+		if reason == "":
+			reason = "No se pudo enviar" if rec.get("direction", "in") == "out" else "No se pudo descargar"
+		_media_host.add_child(_media_label(reason, Palette.ERROR))
+		return
+	var local = str(attach.get("local", ""))
+	var has_local = local != "" and File.new().file_exists(local)
+	match str(attach.get("kind", "file")):
+		"image":
+			_add_image(local if has_local else "", name)
+		"audio":
+			_add_audio(local if has_local else "", name, size, int(attach.get("duration_ms", 0)))
+		_:
+			_add_file(has_local, name, size)
+
+func _add_image(p_local: String, p_name: String) -> void:
+	if p_local == "":
+		var b = _media_button(p_name + "  ·  tocar para ver", Palette.BG2)
+		b.connect("pressed", self, "_emit_media", ["open"])
+		_media_host.add_child(b)
+		return
+	var tex = null
+	if p_local == _thumb_path and _thumb_tex != null:
+		tex = _thumb_tex
+	else:
+		tex = MediaUtil.load_thumbnail(p_local, THUMB_MAX)
+		if tex != null:
+			_thumb_path = p_local
+			_thumb_tex = tex
+	if tex == null:
+		_media_host.add_child(_media_label(p_name, Palette.TEXT))
+		return
+	var tr = TextureRect.new()
+	tr.texture = tex
+	tr.expand = true
+	tr.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	tr.rect_min_size = _thumb_size(tex)
+	tr.mouse_filter = Control.MOUSE_FILTER_STOP
+	tr.hint_tooltip = "Tocar para ampliar"
+	tr.connect("gui_input", self, "_on_image_input")
+	_media_host.add_child(tr)
+
+func _add_audio(p_local: String, p_name: String, p_size: int, p_duration_ms: int) -> void:
+	var row = HBoxContainer.new()
+	row.add_constant_override("separation", 8)
+	var play = Button.new()
+	play.text = "▶"
+	play.focus_mode = Control.FOCUS_NONE
+	play.rect_min_size = Vector2(38, 38)
+	play.connect("pressed", self, "_emit_media", ["play"])
+	row.add_child(play)
+	var info := p_name
+	if p_duration_ms > 0:
+		info = Media.format_duration_ms(p_duration_ms) + " · " + p_name
+	if p_size > 0:
+		info += " · " + Media.format_size(p_size)
+	elif p_local == "":
+		info += " · tocar para oír"
+	var l = _media_label(info, Palette.TEXT)
+	l.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	row.add_child(l)
+	_media_host.add_child(row)
+
+func _add_file(p_has_local: bool, p_name: String, p_size: int) -> void:
+	var txt = p_name
+	if p_size > 0:
+		txt += " (" + Media.format_size(p_size) + ")"
+	if not p_has_local:
+		txt += " · descargar"
+	var b = _media_button(txt, Palette.BG2)
+	b.connect("pressed", self, "_emit_media", ["open"])
+	_media_host.add_child(b)
+
+func _media_label(p_text: String, p_color: Color) -> Label:
+	var l = Label.new()
+	l.text = p_text
+	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	l.add_color_override("font_color", p_color)
+	l.add_font_override("font", XatTheme.font(Palette.FONT_REGULAR, Palette.FONT_SIZE - 1))
+	l.clip_text = true
+	return l
+
+func _media_button(p_text: String, p_bg: Color) -> Button:
+	var b = Button.new()
+	b.text = p_text
+	b.focus_mode = Control.FOCUS_NONE
+	b.align = Button.ALIGN_LEFT
+	for st in ["normal", "hover", "pressed", "focus"]:
+		b.add_stylebox_override(st, XatTheme.box(p_bg.lightened(0.1) if st == "hover" else p_bg, Palette.RADIUS_SMALL, 8, 6))
+	b.add_font_override("font", XatTheme.font(Palette.FONT_REGULAR, Palette.FONT_SIZE - 2))
+	return b
+
+func _thumb_size(p_tex: Texture) -> Vector2:
+	var w = float(p_tex.get_width())
+	var h = float(p_tex.get_height())
+	if w <= 0.0 or h <= 0.0:
+		return Vector2(120, 120)
+	var scale = min(1.0, float(THUMB_MAX) / max(w, h))
+	return Vector2(max(60.0, w * scale), max(60.0, h * scale))
+
+func _on_image_input(p_ev: InputEvent) -> void:
+	if p_ev is InputEventMouseButton and p_ev.pressed and p_ev.button_index == BUTTON_LEFT:
+		accept_event()
+		_emit_media("open")
+
+func _emit_media(p_action: String) -> void:
+	emit_signal("media_action", rec, p_action)
 
 # Cuelga un nodo (card de aprobación) justo bajo la burbuja.
 func attach(p_node: Control) -> void:
@@ -204,14 +383,20 @@ func _fit() -> void:
 	var max_w = rect_size.x * MAX_FRAC - 24.0
 	if max_w <= 40.0:
 		return
+	var body = str(rec.get("body", ""))
+	var attach = rec.get("attach", {})
+	if attach is Dictionary and not (attach as Dictionary).empty():
+		body = Media.caption_of(body, str(attach.get("url", "")))
 	var w := 0.0
 	# El zoom cambia métricas y tamaño de imágenes, además de los glifos Slug.
 	if _emoji != null and _emoji.size != int(_font.get_height()):
 		_emoji = EmojiInline.new(int(_font.get_height()))
-		_label.bbcode_text = Markdown.to_bbcode(str(rec.get("body", "")), _emoji)
-	for line in str(rec.get("body", "")).split("\n"):
+		_label.bbcode_text = Markdown.to_bbcode(body, _emoji)
+	for line in body.split("\n"):
 		var line_w = _emoji.line_width(line, _font) if _emoji != null else _font.get_string_size(line).x
 		w = max(w, line_w * 1.06)
+	if body == "":
+		return
 	w = clamp(w + 2.0, 24.0, max_w)
 	if abs(w - _fit_w) > 0.5:
 		_fit_w = w

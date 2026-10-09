@@ -23,6 +23,10 @@ signal agent_state_changed(bare_jid, state)
 signal auth_failed()
 signal avatar_changed(bare_jid, texture)
 signal agent_hook(bare_jid, hook)
+# Adjuntos (XEP-0363 + OOB): estado de subida y disponibilidad local del media.
+signal media_upload_state(bare_jid, request_id, state, url)
+signal media_ready(bare_jid, message_id, path, kind)
+signal media_failed(bare_jid, message_id, reason)
 
 enum State { DISCONNECTED, CONNECTING, CONNECTED, RECONNECTING }
 
@@ -46,12 +50,15 @@ const Caps = preload("res://addons/xat_xmpp/xmpp/caps.gd")
 const Pep = preload("res://addons/xat_xmpp/xmpp/pep.gd")
 const AgentState = preload("res://addons/xat_xmpp/xmpp/agent_state.gd")
 const Avatar = preload("res://addons/xat_xmpp/xmpp/avatar.gd")
+const Media = preload("res://addons/xat_xmpp/xmpp/media.gd")
+const HttpTransfer = preload("res://addons/xat_xmpp/xmpp/http_transfer.gd")
 
 const OMEMO_PLACEHOLDER := "🔒 Mensaje cifrado con OMEMO: xat todavía no puede leerlo."
 const RESOURCE_BASE := "xat"
 const RESOURCE_PATH := "user://xat_resource"
 const PING_INTERVAL := 180.0
 const HISTORY_DB := "user://history.db"
+const MEDIA_DIR := "user://media/"
 
 var state = State.DISCONNECTED
 var presence_model = Presence.new()
@@ -76,6 +83,14 @@ var _ping_outstanding := 0
 var _pending_mam := {} # queryid -> bare_jid
 var _auth_failed := false
 var last_sent_id := "" # id del último send_message (para matchear recibos 0184)
+
+# --- Adjuntos ---
+var _upload_host := ""           # componente XEP-0363 descubierto ("" = no hay)
+var _upload_host_known := false  # ya se intentó descubrir (no repetir por envío)
+var _upload_ctx := {}            # iq id del slot -> contexto de subida
+var _disco_ctx := {}             # iq id de disco -> {kind, candidates, index, domain}
+var _upload_queue := []          # contextos esperando a que se resuelva el host
+var _media_dl := {}              # message_id -> path (descargas en curso)
 
 func _ready() -> void:
 	store = Store.new()
@@ -154,6 +169,276 @@ func send_message(p_to_bare: String, p_body: String) -> int:
 func send_chat_state(p_to_bare: String, p_state: String) -> int:
 	return _transport.send(Message.build_chat_state(p_to_bare, p_state).to_xml())
 
+# --- Adjuntos (XEP-0363 + XEP-0066) ---
+
+# Sube un archivo local y lo envía como adjunto. Devuelve el request_id de la
+# fila optimista (id del mensaje); "" si no se pudo empezar.
+func send_media_file(p_to_bare: String, p_path: String, p_mime: String = "", p_duration_ms: int = 0, p_caption: String = "") -> String:
+	if not is_connected_to_server():
+		return ""
+	var f = File.new()
+	if not f.file_exists(p_path) or f.open(p_path, File.READ) != OK:
+		return ""
+	var size = f.get_len()
+	f.close()
+	if size <= 0 or size > Media.MAX_UPLOAD_SIZE:
+		return ""
+	var mime = p_mime if p_mime != "" else Media.mime_for_path(p_path)
+	var request_id = _new_id("a")
+	var ctx = {
+		"to": p_to_bare,
+		"path": p_path,
+		"mime": mime,
+		"kind": Media.kind_for_mime(mime),
+		"size": size,
+		"duration_ms": int(p_duration_ms),
+		"filename": Media.sanitize_filename(p_path.get_file(), "adjunto"),
+		"request_id": request_id,
+		"caption": p_caption.strip_edges(),
+		"get_url": "",
+	}
+	# Fila optimista: se ve en el chat con estado "subiendo" y se reemplaza el
+	# cuerpo por la URL cuando termina.
+	if store != null and store.available():
+		var placeholder = ctx["caption"] if ctx["caption"] != "" else ctx["filename"]
+		store.record_message({"bare_jid": p_to_bare, "body": placeholder, "direction": "out", "ts": _now_iso(), "request_id": request_id, "attach": _attach_of(ctx, "uploading", "")})
+	emit_signal("media_upload_state", p_to_bare, request_id, "uploading", "")
+	if not _upload_host_known:
+		_upload_queue.append(ctx)
+		_start_upload_discovery()
+	elif _upload_host == "":
+		_fail_upload(ctx, "sin-servicio")
+	else:
+		_request_slot(ctx)
+	return request_id
+
+# Devuelve la ruta local del adjunto de `p_rec`; si no está, arranca la
+# descarga y devuelve "". La UI escucha `media_ready`.
+func ensure_media(p_bare: String, p_rec: Dictionary) -> String:
+	var attach = p_rec.get("attach", {})
+	if not (attach is Dictionary) or attach.empty():
+		return ""
+	var url = str(attach.get("url", ""))
+	if url == "":
+		return ""
+	var path = media_cache_path(url)
+	var f = File.new()
+	if f.file_exists(path):
+		return path
+	var mid = str(p_rec.get("id", ""))
+	if mid == "" or _media_dl.has(mid):
+		return ""
+	_ensure_media_dir()
+	_media_dl[mid] = path
+	var t = HttpTransfer.new()
+	t.name = "Dl_" + mid
+	t.configure_download(mid, url, path)
+	t.connect("finished", self, "_on_download_finished", [p_bare, p_rec, attach])
+	add_child(t)
+	t.start()
+	return ""
+
+func media_cache_path(p_url: String) -> String:
+	return MEDIA_DIR + str(p_url.hash()) + "_" + Media.filename_from_url(p_url, "media")
+
+func _ensure_media_dir() -> void:
+	var d = Directory.new()
+	if not d.dir_exists(MEDIA_DIR):
+		d.make_dir_recursive(MEDIA_DIR)
+
+func _attach_of(p_ctx: Dictionary, p_state: String, p_url: String) -> Dictionary:
+	return {
+		"url": p_url,
+		"mime": p_ctx["mime"],
+		"kind": p_ctx["kind"],
+		"name": p_ctx["filename"],
+		"size": p_ctx["size"],
+		"duration_ms": p_ctx["duration_ms"],
+		"state": p_state,
+		"local": p_ctx["path"],
+	}
+
+func _request_slot(p_ctx: Dictionary) -> void:
+	var iq_id = _new_id("slot")
+	_upload_ctx[iq_id] = p_ctx
+	_transport.send(Media.build_slot_request(iq_id, _upload_host, p_ctx["filename"], p_ctx["size"], p_ctx["mime"]).to_xml())
+
+func _start_upload_discovery() -> void:
+	if _upload_host_known:
+		return
+	var at = _bare.find("@")
+	if at < 0:
+		_resolve_no_host()
+		return
+	var domain = _bare.substr(at + 1)
+	var iq_id = _new_id("disc")
+	_disco_ctx[iq_id] = {"kind": "items", "domain": domain, "candidates": [], "index": 0}
+	_transport.send(Media.build_disco_items(iq_id, domain).to_xml())
+
+func _on_disco_result(p_stanza) -> void:
+	var iq_id = p_stanza.get_attr("id", "")
+	var st = _disco_ctx.get(iq_id, null)
+	if st == null:
+		return
+	_disco_ctx.erase(iq_id)
+	if st["kind"] == "items":
+		var candidates = []
+		for j in Media.parse_disco_items(p_stanza):
+			if j != st["domain"] and not candidates.has(j):
+				candidates.append(j)
+		# El componente suele vivir en `upload.<dominio>` aunque no salga en items.
+		var guess = "upload." + st["domain"]
+		# Sólo probar la conjetura si el dominio no tiene items (evita ruido).
+		if candidates.empty() and not candidates.has(guess):
+			candidates.append(guess)
+		if candidates.empty():
+			_resolve_no_host()
+		else:
+			_disco_probe(candidates, 0)
+	elif st["kind"] == "info":
+		if Media.disco_has_upload(p_stanza):
+			_resolve_host(st["candidates"][st["index"]])
+		else:
+			_disco_probe(st["candidates"], int(st["index"]) + 1)
+
+func _on_disco_error(p_stanza) -> void:
+	var st = _disco_ctx.get(p_stanza.get_attr("id", ""), null)
+	if st == null:
+		return
+	_disco_ctx.erase(p_stanza.get_attr("id", ""))
+	if st["kind"] == "info":
+		_disco_probe(st["candidates"], int(st["index"]) + 1)
+	else:
+		_resolve_no_host()
+
+func _disco_probe(p_candidates: Array, p_index: int) -> void:
+	if p_index >= p_candidates.size():
+		_resolve_no_host()
+		return
+	var iq_id = _new_id("disc")
+	_disco_ctx[iq_id] = {"kind": "info", "domain": "", "candidates": p_candidates, "index": p_index}
+	_transport.send(Media.build_disco_info(iq_id, p_candidates[p_index]).to_xml())
+
+func _resolve_host(p_host: String) -> void:
+	_upload_host = p_host
+	_upload_host_known = true
+	var queue = _upload_queue
+	_upload_queue = []
+	for ctx in queue:
+		_request_slot(ctx)
+
+func _resolve_no_host() -> void:
+	_upload_host = ""
+	_upload_host_known = true
+	var queue = _upload_queue
+	_upload_queue = []
+	for ctx in queue:
+		_fail_upload(ctx, "sin-servicio")
+
+# Al perder la conexión se olvida el componente descubierto y se fallan los
+# envíos pendientes (no podrán completarse en esta sesión).
+func _reset_upload_state() -> void:
+	_upload_host = ""
+	_upload_host_known = false
+	_disco_ctx.clear()
+	_upload_ctx.clear()
+	var queue = _upload_queue
+	_upload_queue = []
+	for ctx in queue:
+		_fail_upload(ctx, "red-0")
+
+func _on_slot_result(p_stanza) -> void:
+	var iq_id = p_stanza.get_attr("id", "")
+	var ctx = _upload_ctx.get(iq_id, null)
+	if ctx == null:
+		return
+	_upload_ctx.erase(iq_id)
+	var slot = Media.parse_slot_result(p_stanza)
+	if not slot["ok"]:
+		_fail_upload(ctx, slot.get("error", "slot"))
+		return
+	ctx["get_url"] = slot["get_url"]
+	print("xat-media: slot put=%s" % slot["put_url"])
+	var f = File.new()
+	if f.open(ctx["path"], File.READ) != OK:
+		_fail_upload(ctx, "archivo")
+		return
+	var bytes = f.get_buffer(ctx["size"])
+	f.close()
+	var t = HttpTransfer.new()
+	t.name = "Up_" + ctx["request_id"]
+	t.configure_upload(ctx["request_id"], slot["put_url"], Media.headers_array(slot["headers"]), bytes, ctx["mime"])
+	t.connect("finished", self, "_on_upload_finished", [ctx])
+	add_child(t)
+	t.start()
+
+func _on_slot_error(p_stanza) -> void:
+	var ctx = _upload_ctx.get(p_stanza.get_attr("id", ""), null)
+	if ctx == null:
+		return
+	_upload_ctx.erase(p_stanza.get_attr("id", ""))
+	_fail_upload(ctx, "slot-error")
+
+func _on_upload_finished(id: String, ok: bool, _code: int, _payload, error: String, ctx: Dictionary) -> void:
+	print("xat-media: upload ok=%s err=%s" % [ok, error])
+	if not ok:
+		_fail_upload(ctx, error)
+		return
+	var url = str(ctx["get_url"])
+	var stanza = Message.build_media(ctx["to"], url, ctx["caption"], ctx["request_id"], _new_id("o"), true)
+	var rc = _transport.send(stanza.to_xml())
+	if rc == 0:
+		last_sent_id = ctx["request_id"]
+	var attach = _attach_of(ctx, "sent", url)
+	if store != null and store.available():
+		store.update_by_request_id(ctx["to"], ctx["request_id"], url)
+		store.set_attachment(ctx["to"], ctx["request_id"], attach)
+	emit_signal("media_upload_state", ctx["to"], ctx["request_id"], "sent", url)
+	emit_signal("media_ready", ctx["to"], ctx["request_id"], ctx["path"], ctx["kind"])
+
+func _fail_upload(p_ctx: Dictionary, p_reason: String) -> void:
+	if store != null and store.available():
+		store.set_attachment(p_ctx["to"], p_ctx["request_id"], _attach_of(p_ctx, "failed", ""))
+	emit_signal("media_upload_state", p_ctx["to"], p_ctx["request_id"], "failed", "")
+	emit_signal("media_failed", p_ctx["to"], p_ctx["request_id"], p_reason)
+
+func _on_download_finished(id: String, ok: bool, _code: int, payload, error: String, p_bare: String, p_rec: Dictionary, p_attach: Dictionary) -> void:
+	_media_dl.erase(id)
+	print("xat-media: download ok=%s path=%s err=%s" % [ok, str(payload), error])
+	if not ok:
+		emit_signal("media_failed", p_bare, id, error)
+		return
+	var path = str(payload)
+	var attach = p_attach.duplicate()
+	attach["local"] = path
+	var rid = str(p_rec.get("request_id", p_rec.get("id", "")))
+	if store != null and store.available() and rid != "":
+		store.set_attachment(p_bare, rid, attach)
+	emit_signal("media_ready", p_bare, id, path, str(attach.get("kind", "")))
+
+# Detecta un adjunto en un mensaje: OOB explícito o link con extensión conocida
+# en el cuerpo. Deja `rec["attach"]`.
+func _apply_media(rec: Dictionary) -> void:
+	var url = str(rec.get("oob_url", ""))
+	if url == "":
+		var cand = Media.url_of(str(rec.get("body", "")))
+		if cand != "" and Media.MIME_BY_EXT.has(Media.extension_of(cand)):
+			url = cand
+	if url == "":
+		return
+	if str(rec.get("body", "")) == "":
+		rec["body"] = url
+	var mime = Media.mime_for_path(url)
+	rec["attach"] = {
+		"url": url,
+		"mime": mime,
+		"kind": Media.kind_for_mime(mime),
+		"name": Media.filename_from_url(url, "adjunto"),
+		"size": 0,
+		"state": "remote",
+	}
+	print("xat-media: entrante url=%s kind=%s" % [url, rec["attach"]["kind"]])
+
 func send_presence(p_show: String = "", p_status: String = "") -> int:
 	var p = Stanza.new("presence")
 	if p_show != "":
@@ -224,6 +509,9 @@ func _on_connected(bound_jid: String) -> void:
 
 func _on_disconnected(error: int) -> void:
 	_ping_timer.stop()
+	# El componente de upload se redescubre en la próxima conexión; los envíos
+	# en curso ya no pueden completarse.
+	_reset_upload_state()
 	# Credenciales malas: reintentar sólo arriesga un bloqueo del servidor.
 	if _auth_failed:
 		_reconnect_timer.stop()
@@ -266,6 +554,8 @@ func _on_message(p_stanza) -> void:
 	if rec["body"] == "" and (p_stanza.get_child("encrypted", "urn:xmpp:omemo:2") != null or p_stanza.get_child("encrypted", "eu.siacs.conversations.axolotl") != null):
 		rec["body"] = OMEMO_PLACEHOLDER
 		rec["encrypted"] = true
+	# Adjuntos: OOB explícito o link con extensión conocida en el cuerpo.
+	_apply_media(rec)
 	if rec["is_mam"]:
 		_handle_mam_result(rec)
 		return
@@ -307,7 +597,7 @@ func _on_message(p_stanza) -> void:
 		if rec["body"] == "" and (rec["commands"] as Array).empty() and (rec["quick_responses"] as Array).empty():
 			return
 		if store != null and store.available() and not _has_recent_outgoing(_bare_of(rec["to"]), rec["body"]):
-			store.record_message({"bare_jid": _bare_of(rec["to"]), "body": rec["body"], "direction": "out", "ts": _timestamp(rec), "request_id": rec["id"]})
+			store.record_message({"bare_jid": _bare_of(rec["to"]), "body": rec["body"], "direction": "out", "ts": _timestamp(rec), "request_id": rec["id"], "attach": rec.get("attach", {})})
 		rec["direction"] = "out"
 		emit_signal("message_received", rec)
 		return
@@ -326,6 +616,7 @@ func _on_message(p_stanza) -> void:
 			"request_id": rec["id"],
 			"quick": rec["quick_responses"],
 			"commands": rec["commands"],
+			"attach": rec.get("attach", {}),
 		})
 	if not (rec["commands"] as Array).empty() or not (rec["quick_responses"] as Array).empty():
 		emit_signal("actions_received", _bare_of(rec["from"]), rec)
@@ -418,6 +709,7 @@ func _handle_mam_result(rec: Dictionary) -> void:
 			"request_id": rec["replace_id"] if rec["replace_id"] != "" else rec["id"],
 			"quick": rec["quick_responses"],
 			"commands": rec["commands"],
+			"attach": rec.get("attach", {}),
 		})
 	emit_signal("message_received", rec)
 
@@ -474,9 +766,19 @@ func _on_iq(p_stanza) -> void:
 			_on_command_response(p_stanza)
 		if p_stanza.get_child("pubsub", NS.PUBSUB) != null:
 			_on_avatar_data(p_stanza)
+		var iq_id = p_stanza.get_attr("id", "")
+		if _disco_ctx.has(iq_id):
+			_on_disco_result(p_stanza)
+		if _upload_ctx.has(iq_id):
+			_on_slot_result(p_stanza)
 		_ping_outstanding = 0
 	elif iq_type == "error":
 		emit_signal("error_received", {})
+		var eid = p_stanza.get_attr("id", "")
+		if _disco_ctx.has(eid):
+			_on_disco_error(p_stanza)
+		if _upload_ctx.has(eid):
+			_on_slot_error(p_stanza)
 		_on_mam_error(p_stanza)
 		if p_stanza.get_child("command", NS.COMMANDS) != null:
 			_on_command_response(p_stanza)

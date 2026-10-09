@@ -81,6 +81,19 @@ func _init():
 	var fixrec = Message.parse(fix)
 	check(fixrec["body"] == "v3" and fixrec["replace_id"] == "orig1", "builder corrección")
 
+	# Adjunto OOB (0066): url + desc en el <x>; el body trae el link.
+	var oob = Message.parse('<message from="a@h" type="chat"><body>pie\nhttps://up.x/f.jpg</body>' \
+		+ '<x xmlns="jabber:x:oob"><url>https://up.x/f.jpg</url><desc>pie</desc></x></message>')
+	check(oob["oob_url"] == "https://up.x/f.jpg" and oob["oob_desc"] == "pie", "oob parse")
+	check(oob["body"] == "pie\nhttps://up.x/f.jpg", "oob body intacto")
+
+	# Builder de media: link en el body y en OOB; con pie, el body lleva pie+link.
+	var media = Message.parse(Message.build_media("agente@h", "https://up.x/v.ogg", "", "s2", "o2", true))
+	check(media["oob_url"] == "https://up.x/v.ogg" and media["body"] == "https://up.x/v.ogg", "builder media url")
+	check(media["receipt_request"] and media["origin_id"] == "o2", "builder media extras")
+	var media2 = Message.parse(Message.build_media("agente@h", "https://up.x/v.ogg", "hola", "s3"))
+	check(media2["oob_url"] == "https://up.x/v.ogg" and media2["body"] == "hola\nhttps://up.x/v.ogg" and media2["oob_desc"] == "hola", "builder media pie")
+
 	if _fail == 0:
 		print("MESSAGE_CHECK_OK")
 	quit()

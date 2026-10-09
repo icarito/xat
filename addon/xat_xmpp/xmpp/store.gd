@@ -18,6 +18,7 @@ const _SCHEMA := [
 	+ "quick_responses TEXT," \
 	+ "commands TEXT," \
 	+ "request_id TEXT," \
+	+ "attachment TEXT," \
 	+ "was_encrypted INTEGER NOT NULL DEFAULT 0," \
 	+ "UNIQUE(bare_jid, mam_id))",
 	"CREATE INDEX IF NOT EXISTS idx_messages_jid_ts ON messages(bare_jid, timestamp)",
@@ -45,6 +46,7 @@ func open(p_path: String) -> int:
 		var e = _db.exec(stmt)
 		if e != 0:
 			return e
+	_migrate()
 	# Limpieza: MAM archiva chat-states, recibos y marcadores sin cuerpo. Versiones
 	# anteriores los guardaron y se veían como burbujas vacías. Sólo se borran si
 	# además no traen acciones (nunca hay filas legítimas sin cuerpo y sin acciones).
@@ -58,12 +60,26 @@ func close() -> void:
 	if _db != null:
 		_db.close()
 
+# Migración de bases creadas por versiones anteriores: agrega columnas nuevas
+# que el CREATE TABLE IF NOT EXISTS no puede añadir a una tabla existente.
+func _migrate() -> void:
+	var cols := _column_names()
+	if not cols.has("attachment"):
+		_db.exec("ALTER TABLE messages ADD COLUMN attachment TEXT")
+
+func _column_names() -> Array:
+	var out := []
+	var rows = _db.query("PRAGMA table_info(messages)", [])
+	for r in rows:
+		out.append(str(r.get("name", "")))
+	return out
+
 # Inserta (o actualiza metadatos de) un registro. Devuelve false si ya existía
 # una fila con el mismo (bare_jid, mam_id) (dedupe de MAM).
 func record_message(p_rec: Dictionary) -> bool:
 	if not _available:
 		return false
-	var q = _db.prepare("INSERT OR IGNORE INTO messages(bare_jid,body,direction,timestamp,mam_id,quick_responses,commands,request_id) VALUES(?,?,?,?,?,?,?,?)")
+	var q = _db.prepare("INSERT OR IGNORE INTO messages(bare_jid,body,direction,timestamp,mam_id,quick_responses,commands,request_id,attachment) VALUES(?,?,?,?,?,?,?,?,?)")
 	if q == null:
 		return false
 	q.bind_text(1, str(p_rec.get("bare_jid", "")))
@@ -82,6 +98,11 @@ func record_message(p_rec: Dictionary) -> bool:
 		q.bind_null(8)
 	else:
 		q.bind_text(8, request_id)
+	var attach = p_rec.get("attach", null)
+	if attach == null or (attach is Dictionary and (attach as Dictionary).empty()):
+		q.bind_null(9)
+	else:
+		q.bind_text(9, _json(attach))
 	q.step()
 	q.finalize()
 	var inserted = _db.changes() > 0
@@ -102,6 +123,9 @@ func _update_metadata(p_rec: Dictionary, p_request_id: String) -> void:
 	if p_rec.has("commands") and not (p_rec["commands"] as Array).empty():
 		sets.append("commands = COALESCE(commands, ?)")
 		values.append(_json(p_rec["commands"]))
+	if p_rec.has("attach") and p_rec["attach"] is Dictionary and not (p_rec["attach"] as Dictionary).empty():
+		sets.append("attachment = COALESCE(attachment, ?)")
+		values.append(_json(p_rec["attach"]))
 	if sets.empty():
 		return
 	var q = _db.prepare("UPDATE messages SET " + ", ".join(sets) + " WHERE bare_jid = ? AND mam_id IS ?")
@@ -156,6 +180,28 @@ func find_by_request_id(p_bare_jid: String, p_request_id: String):
 	if rows.empty():
 		return null
 	return _decode_row(rows[0])
+
+# Adjunto (dict) de una fila, o {} si no tiene.
+func get_attachment(p_bare_jid: String, p_request_id: String) -> Dictionary:
+	var row = find_by_request_id(p_bare_jid, p_request_id)
+	if row == null:
+		return {}
+	var a = row.get("attach", {})
+	return a if a is Dictionary else {}
+
+# Reemplaza el dict de adjunto (estado de subida/descarga, ruta local, etc.).
+func set_attachment(p_bare_jid: String, p_request_id: String, p_attach: Dictionary) -> bool:
+	if not _available or p_request_id == "":
+		return false
+	var q = _db.prepare("UPDATE messages SET attachment = ? WHERE bare_jid = ? AND request_id = ?")
+	if q == null:
+		return false
+	q.bind_text(1, _json(p_attach))
+	q.bind_text(2, p_bare_jid)
+	q.bind_text(3, p_request_id)
+	q.step()
+	q.finalize()
+	return _db.changes() > 0
 
 # Adjunta un mam_id a una fila viva (sin mam_id) que matchee request_id o,
 # si no, por cuerpo+dirección dentro de una ventana de 120 s.
@@ -219,6 +265,7 @@ func _decode_row(r: Dictionary) -> Dictionary:
 		"quick": _unjson(r.get("quick_responses", "")),
 		"commands": _unjson(r.get("commands", "")),
 		"request_id": r.get("request_id", ""),
+		"attach": _unjson_obj(r.get("attachment", "")),
 	}
 
 func _json(p_value) -> String:
@@ -229,3 +276,9 @@ func _unjson(p_text) -> Array:
 		return []
 	var parsed = parse_json(str(p_text))
 	return parsed if parsed is Array else []
+
+func _unjson_obj(p_text) -> Dictionary:
+	if p_text == null or str(p_text) == "":
+		return {}
+	var parsed = parse_json(str(p_text))
+	return parsed if parsed is Dictionary else {}

@@ -5,6 +5,7 @@ extends Node
 # ante eventos con significado.
 
 const Palette = preload("res://addons/xat_xmpp/ui/palette.gd")
+const XatTheme = preload("res://addons/xat_xmpp/ui/xat_theme.gd")
 const POOL := 4
 const THROTTLE_MS := 80
 
@@ -96,6 +97,43 @@ func play(sfx: String):
 	p.volume_db = settings["volume_db"]
 	p.play()
 
+# Aviso transitorio arriba de la ventana (errores de media, cámara, etc.).
+func toast(p_text: String, p_color: Color = Palette.TEXT) -> void:
+	if _layer == null or p_text == "":
+		return
+	var pc = PanelContainer.new()
+	pc.anchor_left = 0.0
+	pc.anchor_right = 1.0
+	pc.margin_left = 48
+	pc.margin_right = -48
+	pc.margin_top = 16
+	pc.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var sb = StyleBoxFlat.new()
+	sb.bg_color = Color(0, 0, 0, 0.82)
+	sb.set_corner_radius_all(12)
+	sb.set_border_width_all(1)
+	sb.border_color = Color(p_color.r, p_color.g, p_color.b, 0.5)
+	sb.content_margin_left = 14
+	sb.content_margin_right = 14
+	sb.content_margin_top = 9
+	sb.content_margin_bottom = 9
+	pc.add_stylebox_override("panel", sb)
+	var l = Label.new()
+	l.text = p_text
+	l.align = Label.ALIGN_CENTER
+	l.autowrap = true
+	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	l.add_color_override("font_color", p_color)
+	l.add_font_override("font", XatTheme.font(Palette.FONT_REGULAR, Palette.FONT_SIZE - 1))
+	pc.add_child(l)
+	_layer.add_child(pc)
+	var t = Tween.new()
+	_layer.add_child(t)
+	t.interpolate_property(pc, "modulate:a", 1.0, 0.0, 0.6, Tween.TRANS_SINE, Tween.EASE_IN, 2.4)
+	t.connect("tween_all_completed", pc, "queue_free")
+	t.connect("tween_all_completed", t, "queue_free")
+	t.start()
+
 # --- movimiento ---
 
 func burst(at_global_pos: Vector2, color: Color = Palette.AGENT_EDGE, amount := 14):
@@ -164,7 +202,8 @@ func haptic(kind := "tick") -> void:
 		return
 	for pulse in HAPTICS[kind]:
 		if mobile:
-			OS.vibrate_handheld(int(pulse[2]))
+			# En Godot 3 la vibración está en Input, no en OS.
+			Input.vibrate_handheld(int(pulse[2]))
 		for dev in pads:
 			Input.start_joy_vibration(dev, pulse[0], pulse[1], pulse[2] / 1000.0)
 		yield(get_tree().create_timer((pulse[2] + HAPTIC_GAP) / 1000.0), "timeout")

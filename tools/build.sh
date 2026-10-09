@@ -23,8 +23,10 @@ export SCONS_CACHE_LIMIT="${SCONS_CACHE_LIMIT:-30000}"
 
 # Módulos que xat no usa: se apagan para acortar build y superficie.
 # mbedtls (TLS) y el stack de red se conservan: los usa modules/xmpp.
+# stb_vorbis (AudioStreamOGGVorbis) y minimp3 (AudioStreamMP3) SÍ se usan:
+# reproducen audio adjunto. `vorbis`/`opus` son dummies de Godot 3.
 NO_MODULES="bullet csg gridmap enet upnp webrtc websocket webxr mobile_vr gdnative visual_script theora webm
-	vorbis opus ogg stb_vorbis minimp3 gltf jsonrpc camera opensimplex raycast box3d decal imgui"
+	vorbis opus ogg gltf jsonrpc camera opensimplex raycast box3d decal imgui"
 
 SUFFIX="${SUFFIX:-xat}"
 BIN_NAME="godot.frt.opt.debug.x86_64.${SUFFIX}"
@@ -32,7 +34,8 @@ BIN_NAME="godot.frt.opt.debug.x86_64.${SUFFIX}"
 # shellcheck disable=SC2046
 (cd "$GODOT" && scons -j"${JOBS:-8}" platform=frt arch=x86_64 target=release_debug tools=no \
 	frt_desktop_gl=yes production=yes lto=none use_static_cpp=no progress=no extra_suffix="$SUFFIX" \
-	custom_modules="$FORK","$FORK/modules" $(for m in $NO_MODULES; do printf 'module_%s_enabled=no ' "$m"; done))
+	custom_modules="$FORK","$FORK/modules" module_xmpp_enabled=yes \
+	$(for m in $NO_MODULES; do printf 'module_%s_enabled=no ' "$m"; done))
 
 mkdir -p "$XAT/bin"
 # Se arma en .new y se reemplaza con mv (rename atómico): funciona aunque la

@@ -34,6 +34,8 @@ static func parse(p_message) -> Dictionary:
 		"is_mam": false,
 		"mam_id": "",
 		"mam_queryid": "",
+		"oob_url": "",
+		"oob_desc": "",
 		"commands": [],
 		"quick_responses": [],
 	}
@@ -99,6 +101,13 @@ static func parse(p_message) -> Dictionary:
 			out["origin_id"] = child.get_attr("id", "")
 		elif ns == NS.SID and child.name == "stanza-id":
 			out["stanza_id"] = child.get_attr("id", "")
+		elif ns == NS.OOB and child.name == "x":
+			var oob_url = child.get_child("url")
+			if oob_url != null:
+				out["oob_url"] = oob_url.get_text().strip_edges()
+			var oob_desc = child.get_child("desc")
+			if oob_desc != null:
+				out["oob_desc"] = oob_desc.get_text()
 
 	out["commands"] = parse_inline_commands(stanza)
 	out["quick_responses"] = parse_quick_responses(stanza)
@@ -195,4 +204,24 @@ static func build_correction(p_to: String, p_body: String, p_target_id: String, 
 	rep.set_attr("xmlns", NS.CORRECT)
 	rep.set_attr("id", p_target_id)
 	m.add_child_stanza(rep)
+	return m
+
+# Adjunto (XEP-0363 + XEP-0066): el link va en el body (para clientes sin OOB)
+# y en <x xmlns='jabber:x:oob'><url/></x>. Un pie de foto opcional encabeza el
+# body; el link siempre queda en una línea propia para poder quitarlo al
+# renderizar la media.
+static func build_media(p_to: String, p_url: String, p_caption: String = "", p_id: String = "", p_origin_id: String = "", p_request_receipt: bool = true):
+	var caption = p_caption.strip_edges()
+	var body_text = p_url if caption == "" else caption + "\n" + p_url
+	var m = build_chat(p_to, body_text, p_id, p_origin_id, p_request_receipt)
+	var x = Stanza.new("x")
+	x.set_attr("xmlns", NS.OOB)
+	var url = Stanza.new("url")
+	url.append_text(p_url)
+	x.add_child_stanza(url)
+	if caption != "":
+		var desc = Stanza.new("desc")
+		desc.append_text(caption)
+		x.add_child_stanza(desc)
+	m.add_child_stanza(x)
 	return m
