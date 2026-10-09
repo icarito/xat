@@ -214,6 +214,10 @@ static func describe_error(p_code: String) -> String:
 		return "El servidor no ofrece subida de archivos"
 	if p_code == "slot-error":
 		return "El servidor rechazó la subida"
+	if p_code == "file-too-large":
+		return "El archivo supera el límite del servidor"
+	if p_code == "http-413":
+		return "El archivo supera el límite del servidor"
 	if p_code == "archivo":
 		return "No se pudo leer el archivo"
 	if p_code == "no-soportado":
@@ -281,6 +285,28 @@ static func disco_has_upload(p_stanza) -> bool:
 		if v == NS.HTTP_UPLOAD or v == "urn:xmpp:http:upload":
 			return true
 	return false
+
+# Límite de subida anunciado por el componente (XEP-0363 max-file-size). 0 si
+# no lo publica.
+static func disco_max_file_size(p_stanza) -> int:
+	var q = p_stanza.get_child("query", NS.DISCO_INFO)
+	if q == null:
+		return 0
+	for x in q.get_children("x"):
+		var form_type = ""
+		var max_size = ""
+		for field in x.get_children("field"):
+			var var_name = field.get_attr("var", "")
+			var value = field.get_child("value")
+			var v = value.get_text() if value != null else ""
+			if var_name == "FORM_TYPE":
+				form_type = v
+			elif var_name == "max-file-size":
+				max_size = v
+		if (form_type == NS.HTTP_UPLOAD or form_type == "urn:xmpp:http:upload") and max_size != "":
+			return int(max_size)
+	return 0
+
 
 # --- XEP-0363: pedido de slot ---
 

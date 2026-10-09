@@ -62,9 +62,11 @@ func _init():
 
 	# Errores legibles y nombres cortos.
 	check(Media.describe_error("sin-servicio").find("subida") >= 0, "describe sin-servicio")
-	check(Media.describe_error("http-413").find("413") >= 0, "describe http")
+	check(Media.describe_error("http-500").find("500") >= 0, "describe http")
+	check(Media.describe_error("http-413").find("límite") >= 0, "describe 413 grande")
 	check(Media.describe_error("red-7").find("conexión") >= 0, "describe red")
 	check(Media.describe_error("cualquiera") == "No se pudo transferir el adjunto", "describe genérico")
+	check(Media.describe_error("file-too-large").find("límite") >= 0, "describe file-too-large")
 	check(Media.short_name("corto.png") == "corto.png", "short_name corto")
 	var largo = Media.short_name("una_foto_con_nombre_larguisimo_1234567890.png", 24)
 	check(largo.length() <= 24 and largo.ends_with(".png") and largo.find("…") >= 0, "short_name recorta")
@@ -78,6 +80,10 @@ func _init():
 	# XEP-0363: disco#info feature.
 	check(Media.disco_has_upload(Stanza.parse('<iq type="result"><query xmlns="http://jabber.org/protocol/disco#info"><feature var="urn:xmpp:http:upload:0"/></query></iq>')), "disco has upload")
 	check(not Media.disco_has_upload(Stanza.parse('<iq type="result"><query xmlns="http://jabber.org/protocol/disco#info"><feature var="urn:xmpp:ping"/></query></iq>')), "disco sin upload")
+
+	# XEP-0363: max-file-size del componente.
+	check(Media.disco_max_file_size(Stanza.parse('<iq type="result"><query xmlns="http://jabber.org/protocol/disco#info"><feature var="urn:xmpp:http:upload:0"/><x xmlns="jabber:x:data" type="result"><field type="hidden" var="FORM_TYPE"><value>urn:xmpp:http:upload:0</value></field><field type="text-single" var="max-file-size"><value>10485760</value></field></x></query></iq>')) == 10485760, "disco max-file-size")
+	check(Media.disco_max_file_size(Stanza.parse('<iq type="result"><query xmlns="http://jabber.org/protocol/disco#info"><feature var="urn:xmpp:http:upload:0"/></query></iq>')) == 0, "disco sin max-file-size")
 
 	# XEP-0363: pedido de slot.
 	var req = Media.build_slot_request("s1", "upload.x", "foto.jpg", 1234, "image/jpeg")

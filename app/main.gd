@@ -430,8 +430,23 @@ func _on_voice_cancel(_peer: String) -> void:
 func _tick_recording() -> void:
 	var elapsed = OS.get_ticks_msec() - _rec_start_ms
 	_chat.set_recording(true, elapsed)
-	if elapsed > 5 * 60 * 1000:
+	if elapsed >= _max_record_ms():
+		juice.toast("Nota de voz al límite del servidor", P.ERROR)
 		_on_voice_toggle(_peer, false)
+
+# Duración máxima de grabación para que el WAV PCM (estéreo 16 bits 44.1 kHz,
+# 176400 B/s) no supere el max-file-size del servidor (XEP-0363). Sin dato se
+# asume 10 MB, el límite típico.
+func _max_record_ms() -> int:
+	var limit = session.upload_max_bytes()
+	if limit <= 0:
+		limit = 10485760
+	var secs = int(float(limit) * 0.9 / 176400.0)
+	if secs < 5:
+		secs = 5
+	elif secs > 300:
+		secs = 300
+	return secs * 1000
 
 func _send_attachment(peer: String, path: String, mime: String, duration_ms: int, caption: String) -> void:
 	var size = Media.file_size(path)
@@ -504,6 +519,8 @@ func _perform_media(action: String, path: String, kind: String) -> void:
 	if action == "open":
 		if kind == "image":
 			_lightbox.open(path)
+		elif OS.get_name() in ["Android", "iOS"]:
+			juice.toast("No se puede abrir este tipo de archivo acá", P.ERROR)
 		else:
 			OS.shell_open(ProjectSettings.globalize_path(path))
 	elif action == "play":
@@ -513,7 +530,7 @@ func _perform_media(action: String, path: String, kind: String) -> void:
 			return
 		var stream = MediaUtil.load_audio(path)
 		if stream == null:
-			OS.shell_open(ProjectSettings.globalize_path(path))
+			juice.toast("Formato de audio no soportado (%s)" % Media.extension_of(path).to_upper(), P.ERROR)
 		else:
 			_audio.stream = stream
 			_audio.play()
@@ -676,10 +693,11 @@ func _on_mind_back() -> void:
 # Atrás del sistema (Android): cierra la mente o vuelve al roster según el panel.
 func _notification(p_what: int) -> void:
 	if p_what == NOTIFICATION_WM_GO_BACK_REQUEST:
-		var single = _single_pane()
-		if _mind_pinned:
+		if _lightbox.visible:
+			_lightbox.close()
+		elif _mind_pinned:
 			_on_mind_back()
-		elif single and _chat.visible:
+		elif _single_pane() and _chat.visible:
 			_on_back()
 
 # En móvil la base de stretch del proyecto es portrait (420x880): al girar a

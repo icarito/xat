@@ -87,6 +87,7 @@ var last_sent_id := "" # id del último send_message (para matchear recibos 0184
 # --- Adjuntos ---
 var _upload_host := ""           # componente XEP-0363 descubierto ("" = no hay)
 var _upload_host_known := false  # ya se intentó descubrir (no repetir por envío)
+var _upload_max_bytes := 0       # max-file-size publicado por el componente (0 = sin dato)
 var _upload_ctx := {}            # iq id del slot -> contexto de subida
 var _disco_ctx := {}             # iq id de disco -> {kind, candidates, index, domain}
 var _upload_queue := []          # contextos esperando a que se resuelva el host
@@ -297,6 +298,7 @@ func _on_disco_result(p_stanza) -> void:
 			_disco_probe(candidates, 0)
 	elif st["kind"] == "info":
 		if Media.disco_has_upload(p_stanza):
+			_upload_max_bytes = Media.disco_max_file_size(p_stanza)
 			_resolve_host(st["candidates"][st["index"]])
 		else:
 			_disco_probe(st["candidates"], int(st["index"]) + 1)
@@ -327,6 +329,10 @@ func _resolve_host(p_host: String) -> void:
 	for ctx in queue:
 		_request_slot(ctx)
 
+# Límite de subida anunciado por el servidor (bytes), 0 si no lo publicó.
+func upload_max_bytes() -> int:
+	return _upload_max_bytes
+
 func _resolve_no_host() -> void:
 	_upload_host = ""
 	_upload_host_known = true
@@ -340,6 +346,7 @@ func _resolve_no_host() -> void:
 func _reset_upload_state() -> void:
 	_upload_host = ""
 	_upload_host_known = false
+	_upload_max_bytes = 0
 	_disco_ctx.clear()
 	_upload_ctx.clear()
 	var queue = _upload_queue
@@ -377,7 +384,11 @@ func _on_slot_error(p_stanza) -> void:
 	if ctx == null:
 		return
 	_upload_ctx.erase(p_stanza.get_attr("id", ""))
-	_fail_upload(ctx, "slot-error")
+	var reason = "slot-error"
+	if p_stanza.get_child("file-too-large", NS.HTTP_UPLOAD) != null or p_stanza.get_child("file-too-large", "urn:xmpp:http:upload") != null:
+		reason = "file-too-large"
+	print("xat-media: slot error -> %s" % p_stanza.to_xml())
+	_fail_upload(ctx, reason)
 
 func _on_upload_finished(id: String, ok: bool, _code: int, _payload, error: String, ctx: Dictionary) -> void:
 	print("xat-media: upload ok=%s err=%s" % [ok, error])
