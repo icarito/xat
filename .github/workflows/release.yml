@@ -575,35 +575,48 @@ jobs:
           echo "iphone.zip de $BOX3D_RELEASE instalado en $TPL_DIR (editor $TPL_VERSION)"
           echo "TPL_DIR=$TPL_DIR" >> "$GITHUB_ENV"
 
-      - name: Patch iOS template ($os_deployment_target)
+      - name: Patch iOS template (pbxproj placeholders)
         run: |
           set -eu
-          # El template del fork (3.6.4-rc) usa el placeholder $os_deployment_target,
-          # que el editor stock 3.6.2 NO conoce: quedaría literal en el pbxproj y
-          # xcodebuild lo rechaza ("project is damaged / parse error"). Se sustituye
-          # por el setting completo, igual que hace el motor del fork. Idempotente.
+          # El template del fork (3.6.4-rc) usa placeholders que el editor stock
+          # 3.6.2 no sustituye y quedarían literales en project.pbxproj, que
+          # xcodebuild rechaza ("project is damaged / parse error"):
+          #   - $os_deployment_target: lo añadió el fork tras 3.6.2.
+          #   - $additional_pbx_*/$pbx_embeded_frameworks: huecos de assets
+          #     "adicionales" (plugins/frameworks extra). xat no tiene ninguno,
+          #     así que van vacíos; el xcframework de Godot está hardcodeado.
+          # Idempotente.
           TPL_DIR="$TPL_DIR" python3 - <<'PY'
           import os, shutil, zipfile
           template = os.path.join(os.environ["TPL_DIR"], "iphone.zip")
           member = "godot_ios.xcodeproj/project.pbxproj"
-          target = "IPHONEOS_DEPLOYMENT_TARGET = 15.0;"
+          replacements = {
+              "$os_deployment_target": "IPHONEOS_DEPLOYMENT_TARGET = 15.0;",
+              "$additional_pbx_files": "",
+              "$additional_pbx_frameworks_build": "",
+              "$additional_pbx_frameworks_refs": "",
+              "$additional_pbx_resources_build": "",
+              "$additional_pbx_resources_refs": "",
+              "$pbx_embeded_frameworks": "",
+          }
           with zipfile.ZipFile(template) as src:
               if member not in src.namelist():
                   raise SystemExit("iphone.zip no tiene " + member)
               pbxproj = src.read(member).decode("utf-8")
-              if "$os_deployment_target" not in pbxproj:
-                  print("Nada que parchear: el pbxproj ya no tiene $os_deployment_target")
+              changed = {t: pbxproj.count(t) for t in replacements}
+              if not any(changed.values()):
+                  print("Nada que parchear: el pbxproj ya está limpio")
                   raise SystemExit(0)
-              pbxproj = pbxproj.replace("$os_deployment_target", target)
+              for token, value in replacements.items():
+                  pbxproj = pbxproj.replace(token, value)
               patched = template + ".patched"
               with zipfile.ZipFile(patched, "w") as dst:
                   for info in src.infolist():
                       data = pbxproj.encode("utf-8") if info.filename == member else src.read(info)
                       dst.writestr(info, data, compress_type=info.compress_type)
           shutil.move(patched, template)
-          print("pbxproj parcheado: $os_deployment_target -> " + target)
+          print("pbxproj parcheado:", changed)
           PY
-          unzip -p "$TPL_DIR/iphone.zip" godot_ios.xcodeproj/project.pbxproj | grep -c "IPHONEOS_DEPLOYMENT_TARGET = 15.0;"
 
       - name: Write preset patch helper
         run: |
@@ -732,6 +745,10 @@ jobs:
           # con xcodebuild usando el export_options.plist que genera el motor.
           # rc != 0 de Godot es benigno: importa que quede el .xcodeproj.
           "$GODOT_BIN" --no-window --path app --export "iOS" "$OUT" || true
+          if [ -d "$BASE.xcodeproj" ]; then
+            echo "=== placeholders sin sustituir en project.pbxproj ==="
+            grep -nE '\$[a-z_]+' "$BASE.xcodeproj/project.pbxproj" || echo "ninguno"
+          fi
           if [ ! -s "$OUT" ] && [ -d "$BASE.xcodeproj" ]; then
             ARCH="$BASE.xcarchive"
             echo "=== xcodebuild archive ==="
