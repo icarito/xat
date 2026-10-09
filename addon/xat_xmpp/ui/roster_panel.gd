@@ -10,6 +10,7 @@ const P = preload("res://addons/xat_xmpp/ui/palette.gd")
 const AgentOrb = preload("res://addons/xat_xmpp/ui/agent_orb.gd")
 const XatTheme = preload("res://addons/xat_xmpp/ui/xat_theme.gd")
 const AvatarBadge = preload("res://addons/xat_xmpp/ui/avatar_badge.gd")
+const XatXmpp = preload("res://addons/xat_xmpp/xat_xmpp.gd")
 
 var _peers := []
 var _online := {}
@@ -55,6 +56,13 @@ func _init() -> void:
 	foot.add_child(_motion_btn)
 	_haptic_btn = _toggle("≋", "haptics_enabled", "Vibración (móvil / gamepad)")
 	foot.add_child(_haptic_btn)
+	var about_btn = Button.new()
+	about_btn.text = "ⓘ"
+	about_btn.hint_tooltip = "Privacidad y soporte"
+	about_btn.rect_min_size = Vector2(44, 32)
+	about_btn.focus_mode = Control.FOCUS_NONE
+	about_btn.connect("pressed", self, "_on_about")
+	foot.add_child(about_btn)
 	_box = VBoxContainer.new()
 	_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_box.mouse_filter = Control.MOUSE_FILTER_IGNORE # deja pasar el arrastre táctil entre filas
@@ -86,6 +94,9 @@ func _toggle(p_text: String, p_key: String, p_tip: String) -> Button:
 func _on_setting(p_on: bool, p_key: String) -> void:
 	if _juice != null:
 		_juice.set_setting(p_key, p_on)
+
+func _on_about() -> void:
+	OS.shell_open(XatXmpp.PRIVACY_URL)
 
 func set_peers(p_bares: Array) -> void:
 	_peers = p_bares

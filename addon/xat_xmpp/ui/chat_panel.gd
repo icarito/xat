@@ -29,6 +29,7 @@ const Shimmer = preload("res://addons/xat_xmpp/ui/fx/shimmer.gd")
 const MAX_LINES := 6
 const MAX_BUBBLES := 200  # más viejas se liberan (el modelo _messages queda completo)
 const NEAR_PX := 80.0
+const WHEEL_STEP := 72.0  # px por muesca de rueda/pan; el ScrollContainer usa page/8 (brusco en pantallas grandes)
 const WEEKDAYS := ["dom", "lun", "mar", "mié", "jue", "vie", "sáb"]
 const MONTHS := ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
 
@@ -370,6 +371,9 @@ func _input(p_event) -> void:
 		return
 	if _file_dialog != null and _file_dialog.visible:
 		return
+	# Rueda/trackpad: paso propio y suave (ver _handle_wheel).
+	if _handle_wheel(p_event):
+		return
 	# Sólo táctil: en escritorio la selección por arrastre del propio label basta.
 	var pressed := false
 	var pos := Vector2.ZERO
@@ -399,6 +403,33 @@ func _input(p_event) -> void:
 		_press = false
 		if _lp != null:
 			_lp.stop()
+
+# Scroll de rueda/trackpad con paso fijo. Devuelve true si consumió el evento.
+# El ScrollContainer por defecto mueve page/8 por muesca: con ventanas grandes
+# son saltos enormes. Acá movemos unos pocos píxeles y respetamos el factor
+# (ruedas de alta resolución mandan factor chico → queda suave).
+func _handle_wheel(p_event) -> bool:
+	if _scroll == null:
+		return false
+	var dy := 0.0
+	if p_event is InputEventMouseButton:
+		if not p_event.pressed:
+			return false
+		if p_event.button_index == BUTTON_WHEEL_UP:
+			dy = -WHEEL_STEP * p_event.factor
+		elif p_event.button_index == BUTTON_WHEEL_DOWN:
+			dy = WHEEL_STEP * p_event.factor
+		else:
+			return false
+	elif p_event is InputEventPanGesture:
+		dy = WHEEL_STEP * p_event.delta.y
+	else:
+		return false
+	if not get_global_rect().has_point(p_event.position):
+		return false
+	get_tree().set_input_as_handled()
+	_scroll.scroll_vertical = _scroll.scroll_vertical + int(dy)
+	return true
 
 func _on_long_press() -> void:
 	if not _press or _press_moved:

@@ -22,6 +22,7 @@ _global_script_class_icons={
 
 config/name="xat"
 config/description="Cliente XMPP para agentes OpenClaw"
+config/icon="res://icon.png"
 run/main_scene="res://main.tscn"
 run/low_processor_mode=true
 run/low_processor_mode_sleep_usec=8000

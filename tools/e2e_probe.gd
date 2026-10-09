@@ -36,6 +36,7 @@ var _receipts := 0
 var _presences := 0
 var _sent := false
 var _final := ""
+var _msg_id := "e2e-msg"
 
 func _idle(_delta: float) -> bool:
 	if not _started:
@@ -60,6 +61,9 @@ func _start() -> void:
 	if _cafile == "":
 		_cafile = "/etc/ssl/certs/ca-certificates.crt"
 	_peer = OS.get_environment("XAT_E2E_PEER")
+	# Id único por corrida: el gateway deduplica por id de stanza y descartaría
+	# como "duplicate dispatch" un id fijo repetido entre corridas.
+	_msg_id = "e2e-%d" % OS.get_ticks_msec()
 	var secs = int(OS.get_environment("XAT_E2E_SECONDS"))
 	if secs > 0:
 		_budget_ms = secs * 1000
@@ -117,7 +121,7 @@ func _send_test_message() -> void:
 	var m = Stanza.new("message")
 	m.set_attr("to", _peer)
 	m.set_attr("type", "chat")
-	m.set_attr("id", "e2e-msg")
+	m.set_attr("id", _msg_id)
 	var body = Stanza.new("body")
 	body.append_text("xat e2e probe")
 	m.add_child_stanza(body)

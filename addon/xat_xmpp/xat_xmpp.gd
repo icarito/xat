@@ -7,5 +7,10 @@ class_name XatXmpp
 
 const VERSION := "0.1.0-plan"
 
+const APP_NAME := "xat"
+const PRIVACY_URL := "https://hablar.fuentelibre.org/privacidad/"
+const SUPPORT_URL := "https://hablar.fuentelibre.org/soporte/"
+const SOURCE_URL := "https://github.com/icarito/xat"
+
 const Jid := preload("res://addons/xat_xmpp/xmpp/jid.gd")
 const Stanza := preload("res://addons/xat_xmpp/xmpp/stanza.gd")

@@ -98,7 +98,9 @@ headless y templates Android/iOS/macOS con el módulo. Para habilitar el CI de x
    `android_release_xmpp.apk`, `android_debug_xmpp.apk`, `iphone_xmpp.zip` y
    `osx_xmpp.zip`.
 2. Verificar esos assets y mantener `.github/box3d_release` apuntando a esa
-   release; `v0.5.5-xmpp` aún no se verificó/publicó.
+   release. `v0.5.5-xmpp` ya está publicado y verificado con `iphone_xmpp.zip`,
+   `osx_xmpp.zip` y el headless `_xmpp` (existe también `v0.5.6-xmpp` con los
+   mismos assets).
 3. Configurar los secretos de firma indicados arriba.
 
 ## Riesgos conocidos / pendientes

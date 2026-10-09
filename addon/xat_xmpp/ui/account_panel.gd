@@ -5,6 +5,8 @@ extends PanelContainer
 
 signal connect_requested(cfg)
 
+const XatXmpp = preload("res://addons/xat_xmpp/xat_xmpp.gd")
+
 var _jid: LineEdit
 var _pass: LineEdit
 var _host: LineEdit
@@ -42,6 +44,7 @@ func _make_form() -> VBoxContainer:
 	_status = Label.new()
 	_status.autowrap = true
 	v.add_child(_status)
+	v.add_child(_legal_links())
 	return v
 
 func _title() -> Label:
@@ -49,6 +52,26 @@ func _title() -> Label:
 	l.text = "xat — conectar"
 	l.align = Label.ALIGN_CENTER
 	return l
+
+func _legal_links() -> HBoxContainer:
+	var h = HBoxContainer.new()
+	h.alignment = BoxContainer.ALIGN_CENTER
+	h.add_child(_link("Política de privacidad", XatXmpp.PRIVACY_URL))
+	var sep = Label.new()
+	sep.text = "  ·  "
+	h.add_child(sep)
+	h.add_child(_link("Soporte", XatXmpp.SUPPORT_URL))
+	return h
+
+func _link(p_text: String, p_url: String) -> LinkButton:
+	var b = LinkButton.new()
+	b.text = p_text
+	b.focus_mode = Control.FOCUS_NONE
+	b.connect("pressed", self, "_open_url", [p_url])
+	return b
+
+func _open_url(p_url: String) -> void:
+	OS.shell_open(p_url)
 
 func _row(p_parent: VBoxContainer, p_label: String, p_default: String) -> LineEdit:
 	var h = HBoxContainer.new()

@@ -777,6 +777,32 @@ jobs:
           fi
           echo "IPA OK: $OUT ($(du -h "$OUT" | cut -f1))"
 
+      - name: Verify iOS App Store compliance (manifest + export compliance)
+        run: |
+          set -eu
+          IPA="$GITHUB_WORKSPACE/dist/xat-${VERSION_SLUG}.ipa"
+          test -s "$IPA"
+          rm -rf "$RUNNER_TEMP/ipa_check"
+          unzip -o -q "$IPA" -d "$RUNNER_TEMP/ipa_check"
+          APP=$(find "$RUNNER_TEMP/ipa_check/Payload" -maxdepth 1 -name '*.app' -print -quit)
+          test -n "$APP" || { echo "::error::El IPA no tiene Payload/*.app"; exit 1; }
+          echo "App bundle: $APP"
+          MANIFEST="$APP/PrivacyInfo.xcprivacy"
+          test -f "$MANIFEST" || { echo "::error::Falta PrivacyInfo.xcprivacy en la raíz del bundle"; exit 1; }
+          if grep -qE '\$[a-z_]+' "$MANIFEST"; then
+            echo "::error::PrivacyInfo.xcprivacy conserva placeholders sin sustituir"; cat "$MANIFEST"; exit 1
+          fi
+          grep -q "NSPrivacyAccessedAPICategoryUserDefaults" "$MANIFEST" || {
+            echo "::error::PrivacyInfo.xcprivacy no declara NSPrivacyAccessedAPICategoryUserDefaults"; exit 1
+          }
+          ENT=$(/usr/libexec/PlistBuddy -c 'Print :ITSAppUsesNonExemptEncryption' "$APP/Info.plist" 2>/dev/null || true)
+          echo "ITSAppUsesNonExemptEncryption=$ENT"
+          [ "$ENT" = "false" ] || { echo "::error::ITSAppUsesNonExemptEncryption debe ser false (solo TLS estándar)"; exit 1; }
+          if /usr/libexec/PlistBuddy -c 'Print :UIBackgroundModes' "$APP/Info.plist" >/dev/null 2>&1; then
+            echo "::error::UIBackgroundModes presente sin justificar en App Review"; exit 1
+          fi
+          echo "OK: PrivacyInfo.xcprivacy y Info.plist listos para App Store"
+
       - name: Upload iOS artifact
         uses: actions/upload-artifact@v7
         with:
