@@ -32,15 +32,20 @@ func _init() -> void:
 	dim.anchor_bottom = 1.0
 	dim.mouse_filter = Control.MOUSE_FILTER_STOP
 	add_child(dim)
-	var center = CenterContainer.new()
-	center.anchor_right = 1.0
-	center.anchor_bottom = 1.0
-	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(center)
+	var margin = MarginContainer.new()
+	margin.anchor_right = 1.0
+	margin.anchor_bottom = 1.0
+	margin.add_constant_override("margin_left", 16)
+	margin.add_constant_override("margin_right", 16)
+	margin.add_constant_override("margin_top", 16)
+	margin.add_constant_override("margin_bottom", 16)
+	margin.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(margin)
 	_card = PanelContainer.new()
-	_card.rect_min_size = Vector2(540, 0)
+	_card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_card.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_card.add_stylebox_override("panel", XatTheme.with_border(XatTheme.box(P.BG1, 14, 22, 20), P.LINE))
-	center.add_child(_card)
+	margin.add_child(_card)
 	var box = VBoxContainer.new()
 	box.add_constant_override("separation", 12)
 	_card.add_child(box)
@@ -55,7 +60,8 @@ func _init() -> void:
 	_notes = RichTextLabel.new()
 	_notes.bbcode_enabled = true
 	_notes.fit_content_height = false
-	_notes.rect_min_size = Vector2(0, 190)
+	_notes.rect_min_size = Vector2(0, 120)
+	_notes.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_notes.scroll_active = true
 	_notes.add_color_override("default_color", P.TEXT)
 	box.add_child(_notes)
@@ -69,20 +75,22 @@ func _init() -> void:
 	_bar.visible = false
 	_bar.rect_min_size = Vector2(0, 8)
 	box.add_child(_bar)
-	var row = HBoxContainer.new()
-	row.add_constant_override("separation", 8)
-	row.alignment = BoxContainer.ALIGN_END
-	box.add_child(row)
-	_check_btn = _button("Buscar de nuevo", P.BG2)
-	_check_btn.connect("pressed", self, "_on_check")
-	row.add_child(_check_btn)
-	_open_btn = _button("Abrir en navegador", P.BG2)
-	_open_btn.connect("pressed", self, "_on_open")
-	row.add_child(_open_btn)
+	# Botones apilados (caben en portrait): primario, secundario y una fila final.
 	_dl_btn = _button("Descargar e instalar", P.USER)
 	_dl_btn.connect("pressed", self, "_on_download")
-	row.add_child(_dl_btn)
+	box.add_child(_dl_btn)
+	_open_btn = _button("Abrir en el navegador", P.BG2)
+	_open_btn.connect("pressed", self, "_on_open")
+	box.add_child(_open_btn)
+	var row = HBoxContainer.new()
+	row.add_constant_override("separation", 8)
+	box.add_child(row)
+	_check_btn = _button("Buscar de nuevo", P.BG2)
+	_check_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_check_btn.connect("pressed", self, "_on_check")
+	row.add_child(_check_btn)
 	var close = _button("Cerrar", P.BG2)
+	close.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	close.connect("pressed", self, "close")
 	row.add_child(close)
 

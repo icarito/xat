@@ -872,7 +872,7 @@ func _on_attach_requested(peer: String) -> void:
 		_chat.open_gallery()
 		return
 	_pending_media_peer = peer
-	_native_media.pickFile()
+	_native_media.call("pickFile")
 
 func _on_native_media_picked(path: String) -> void:
 	if _pending_avatar:
@@ -906,11 +906,11 @@ func _on_camera_requested(peer: String) -> void:
 	# API de webcam, así que se delega en la app de cámara del sistema.
 	if _native_media != null:
 		_pending_media_peer = peer
-		if _native_media.hasCamera():
-			_native_media.takePhoto()
+		if bool(_native_media.call("hasCamera")):
+			_native_media.call("takePhoto")
 		else:
 			juice.toast("Sin cámara: elegí una foto de la galería")
-			_native_media.pickImage()
+			_native_media.call("pickImage")
 		return
 	# Sin backend de cámara (p. ej. Android sin plugin), caer a la galería.
 	if CameraCapture.backend() == "":
@@ -1222,10 +1222,7 @@ func _on_avatar_requested() -> void:
 	if _native_media != null:
 		_pending_avatar = true
 		# Sólo imágenes (el picker de archivos genérico dejaba elegir cualquier cosa).
-		if _native_media.has_method("pickImage"):
-			_native_media.pickImage()
-		else:
-			_native_media.pickFile()
+		_native_media.call("pickImage")
 		return
 	if FilePicker.has_native():
 		if _avatar_picker == null:
@@ -1300,7 +1297,6 @@ func _on_clipboard_pasted(p_path: String) -> void:
 # reconectar.
 func _register_push() -> void:
 	var service = _push_service_for_os()
-	print("xat: push register os=%s service=%s native=%s" % [OS.get_name(), service, _notifier != null and _notifier.native_available()])
 	if service == "":
 		return
 	# Android: Firebase debe inicializarse con la config de la app (del
@@ -1309,7 +1305,6 @@ func _register_push() -> void:
 		_notifier.configure_firebase(_psetting("xat/firebase_api_key"), _psetting("xat/firebase_app_id"),
 				_psetting("xat/firebase_project_id"), _psetting("xat/firebase_sender_id"))
 	var token = _notifier.device_token()
-	print("xat: push token_len=%d" % token.length())
 	if token == "":
 		# El token (APNs/FCM) llega asíncrono, DESPUÉS de pedir permiso: en la
 		# primera conexión normalmente todavía no está. Reintentar hasta que
@@ -1334,6 +1329,11 @@ func _start_push_retry() -> void:
 
 func _on_push_retry() -> void:
 	_push_retry_ticks += 1
+	# Reconfigurar Firebase en cada intento: al conectar el singleton nativo puede
+	# no estar listo todavía y configure_firebase se habría perdido.
+	if OS.get_name() == "Android" and _notifier != null:
+		_notifier.configure_firebase(_psetting("xat/firebase_api_key"), _psetting("xat/firebase_app_id"),
+				_psetting("xat/firebase_project_id"), _psetting("xat/firebase_sender_id"))
 	var token = _notifier.device_token() if _notifier != null else ""
 	if token != "":
 		_push_retry.stop()
@@ -1556,6 +1556,14 @@ func _on_icon_toggle(p_on: bool, p_b, p_key: String) -> void:
 		juice.set_setting(p_key, p_on)
 	# Color = estado: encendido se destaca, apagado queda tenue.
 	p_b.set_icon_color(P.USER if p_on else P.TEXT_DIM)
+	_toast_setting(p_key, p_on)
+
+func _toast_setting(p_key: String, p_on: bool) -> void:
+	if juice == null:
+		return
+	var n = {"sound_enabled": "Sonido", "haptics_enabled": "Vibración", "motion_enabled": "Animación"}.get(p_key, "")
+	if n != "":
+		juice.toast("%s %s" % [n, "activado" if p_on else "desactivado"])
 
 func _init_sidebar_settings() -> void:
 	if juice == null:

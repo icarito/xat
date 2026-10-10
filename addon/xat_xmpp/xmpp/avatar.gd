@@ -99,11 +99,39 @@ static func sha1_hex(p_bytes: PoolByteArray) -> String:
 		s += "%02x" % b
 	return s
 
+# Decodifica una imagen desde bytes por firma (png/jpg/bmp/webp). `Image.load`
+# con ruta absoluta falla en Android, así que se leen los bytes y se decodifica.
+static func image_from_buffer(buf: PoolByteArray) -> Image:
+	if buf.size() < 2:
+		return null
+	var img := Image.new()
+	var ok := false
+	if buf.size() >= 4 and buf[0] == 0x89 and buf[1] == 0x50 and buf[2] == 0x4E and buf[3] == 0x47:
+		ok = img.load_png_from_buffer(buf) == OK
+	elif buf.size() >= 3 and buf[0] == 0xFF and buf[1] == 0xD8 and buf[2] == 0xFF:
+		ok = img.load_jpg_from_buffer(buf) == OK
+	elif buf.size() >= 2 and buf[0] == 0x42 and buf[1] == 0x4D:
+		ok = img.load_bmp_from_buffer(buf) == OK
+	elif buf.size() > 16 and buf[0] == 0x52 and buf[1] == 0x49 and buf[2] == 0x46 and buf[3] == 0x46:
+		ok = img.load_webp_from_buffer(buf) == OK
+	if not ok or img.is_empty():
+		return null
+	return img
+
+# Imagen desde disco (o null si no se pudo leer/decodificar).
+static func load_image(p_path: String) -> Image:
+	var f := File.new()
+	if not f.file_exists(p_path) or f.open(p_path, File.READ) != OK:
+		return null
+	var buf = f.get_buffer(f.get_len())
+	f.close()
+	return image_from_buffer(buf)
+
 # Procesa una imagen de disco a un avatar cuadrado de lado <= p_side y devuelve
 # {bytes, mime, width, height, id}; {} si no se pudo leer.
 static func process(p_path: String, p_side: int = 96) -> Dictionary:
-	var img := Image.new()
-	if img.load(p_path) != OK:
+	var img = load_image(p_path)
+	if img == null:
 		return {}
 	# Recorte cuadrado centrado (los avatares son cuadrados).
 	var w = img.get_width()
@@ -130,8 +158,8 @@ static func process(p_path: String, p_side: int = 96) -> Dictionary:
 # (esquina superior izquierda + tamaño); se ajusta a cuadrado y se limita a los
 # bordes. Devuelve lo mismo que process().
 static func process_rect(p_path: String, p_rect: Rect2, p_side: int = 96) -> Dictionary:
-	var img := Image.new()
-	if img.load(p_path) != OK:
+	var img = load_image(p_path)
+	if img == null:
 		return {}
 	var w = img.get_width()
 	var h = img.get_height()

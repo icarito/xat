@@ -31,9 +31,21 @@ var _native = null
 var _native_ready := false
 
 func _ready() -> void:
+	_resolve_native()
+
+# Resuelve el singleton nativo de forma perezosa: el plugin Java puede
+# registrarse DESPUÉS del _ready del nodo (el registro ocurre en la inicialización
+# del plugin, no en el arranque de GDScript). Antes se cacheaba una sola vez en
+# _ready y quedaba en false para siempre.
+func _resolve_native() -> bool:
+	if _native_ready:
+		return true
 	if Engine.has_singleton("XatNotify"):
 		_native = Engine.get_singleton("XatNotify")
-		_native_ready = _native != null and _native.has_method("notify")
+		# No se usa has_method: los JNISingleton exponen los métodos sólo vía
+		# call() (su method_map no alimenta has_method/get_method_list).
+		_native_ready = _native != null
+	return _native_ready
 
 func _notification(p_what: int) -> void:
 	match p_what:
@@ -43,7 +55,7 @@ func _notification(p_what: int) -> void:
 			_foreground = true
 
 func native_available() -> bool:
-	return _native_ready
+	return _resolve_native()
 
 func is_background() -> bool:
 	return not _foreground
@@ -55,29 +67,32 @@ func set_connected() -> void:
 
 # Pide permiso de notificaciones (Android 13+/iOS). No-op sin plugin.
 func request_permission() -> bool:
-	if _native_ready and _native.has_method("request_permission"):
-		return bool(_native.request_permission())
+	if _resolve_native():
+		return bool(_native.call("request_permission"))
 	return false
 
 # Token de push del dispositivo (FCM/APNs) para XEP-0357, o "" si el plugin
 # nativo no lo expone todavía. Es asíncrono en el SO: puede estar vacío en el
 # primer arranque y rellenarse después; se re-registra al reconectar.
 func device_token() -> String:
-	if _native_ready and _native.has_method("get_device_token"):
-		return str(_native.get_device_token())
+	if _resolve_native():
+		return str(_native.call("get_device_token"))
 	return ""
 
 # Android: inicializa Firebase con los valores del google-services.json de la
 # app. Necesario antes de `device_token()` (FCM exige FirebaseApp inicializado).
 func configure_firebase(p_api_key: String, p_app_id: String, p_project_id: String, p_sender_id: String) -> void:
-	if _native_ready and _native.has_method("configure"):
-		_native.configure(p_api_key, p_app_id, p_project_id, p_sender_id)
+	# Se usa call() directo: los JNISingleton exponen los métodos vía call() pero
+	# NO en has_method()/get_method_list() (el JNISingleton no override esos), así
+	# que has_method() da false aunque el método exista y funcione.
+	if _resolve_native():
+		_native.call("configure", p_api_key, p_app_id, p_project_id, p_sender_id)
 
 # Decide y, si corresponde, muestra la notificación del sistema. Devuelve true
 # si se notificó. `p_name` es el nombre visible del contacto (o "" para usar el
 # bare JID). `p_rec` es el registro de mensaje de la sesión.
 func notify_message(p_peer: String, p_name: String, p_rec: Dictionary) -> bool:
-	if not _native_ready or _foreground:
+	if not _resolve_native() or _foreground:
 		return false
 	if str(p_rec.get("direction", "in")) == "out" or bool(p_rec.get("is_mam", false)) or bool(p_rec.get("stale", false)):
 		return false
@@ -96,14 +111,14 @@ func notify_message(p_peer: String, p_name: String, p_rec: Dictionary) -> bool:
 		_notified[mid] = true
 		_prune()
 	var title = p_name if p_name != "" else p_peer
-	_native.notify(title, _truncate(body), p_peer, mid)
+	_native.call("notify", title, _truncate(body), p_peer, mid)
 	return true
 
 # Silencia/retira los avisos de una conversación (p. ej. al abrir el chat o al
 # resolverse por una corrección). No-op sin plugin.
 func clear(p_peer: String) -> void:
-	if _native_ready and _native.has_method("clear"):
-		_native.clear(p_peer)
+	if _resolve_native():
+		_native.call("clear", p_peer)
 
 # Mensajes de progreso/estado que ensucian la bandeja (no son contenido del
 # usuario). Portado de `isXmppNotificationNoise`.

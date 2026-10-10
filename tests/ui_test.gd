@@ -51,11 +51,11 @@ func _init():
 	check(m._roster.has_signal("add_contact_requested"), "roster expone add_contact_requested")
 	m._add_contact._jid.text = "no-es-jid"
 	m._add_contact._validate("")
-	check(m._add_contact.get_ok().disabled, "diálogo: JID inválido deshabilita añadir")
+	check(m._add_contact._ok_btn.disabled, "diálogo: JID inválido deshabilita añadir")
 	m._add_contact._jid.text = "nuevo@h"
 	m._add_contact._name.text = "Nuevo"
 	m._add_contact._validate("")
-	check(not m._add_contact.get_ok().disabled, "diálogo: JID válido habilita añadir")
+	check(not m._add_contact._ok_btn.disabled, "diálogo: JID válido habilita añadir")
 
 	# Solicitudes de suscripción: banda con aceptar/rechazar.
 	m._roster.add_request("pide@h", "hola")
@@ -255,12 +255,12 @@ func _init():
 	m._join_room._name.text = "general"
 	check(m._join_room._full() == "general@conference.h", "sala: JID = nombre + dominio")
 	m._join_room._validate()
-	check(not m._join_room.get_ok().disabled, "sala: nombre válido")
+	check(not m._join_room._ok_btn.disabled, "sala: nombre válido")
 	m._join_room._name.text = "general@otro.dominio"
 	check(m._join_room._full() == "general@otro.dominio", "sala: JID completo respetado")
 	m._join_room._name.text = "con espacio"
 	m._join_room._validate()
-	check(m._join_room.get_ok().disabled, "sala: rechaza espacios")
+	check(m._join_room._ok_btn.disabled, "sala: rechaza espacios")
 
 	# Push (XEP-0357): el servicio se elige por SO, con fallback común.
 	ProjectSettings.set_setting("xat/push_service", "")

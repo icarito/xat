@@ -22,7 +22,7 @@ var _drag := false
 func _init() -> void:
 	name = "AvatarCropDialog"
 	window_title = "Recortar foto"
-	rect_min_size = Vector2(560, 560)
+	rect_min_size = Vector2(380, 560)
 	var margin = MarginContainer.new()
 	margin.add_constant_override("margin_left", 18)
 	margin.add_constant_override("margin_right", 18)
@@ -38,7 +38,8 @@ func _init() -> void:
 	title.add_color_override("font_color", P.TEXT_DIM)
 	box.add_child(title)
 	_view = Control.new()
-	_view.rect_min_size = Vector2(500, 420)
+	_view.rect_min_size = Vector2(0, 360)
+	_view.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_view.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	_view.connect("draw", self, "_draw_dim")
 	_view.connect("resized", self, "_layout")
@@ -62,11 +63,12 @@ func _init() -> void:
 func open(p_path: String) -> void:
 	_path = p_path
 	_drag = false
-	var img = Image.new()
-	if img.load(p_path) != OK:
+	# Image.load con ruta absoluta falla en Android: se decodifica por bytes.
+	var img = Avatar.load_image(p_path)
+	if img == null:
 		_img_size = Vector2.ZERO
 		get_ok().disabled = true
-		popup_centered(Vector2(560, 560))
+		popup_centered(Vector2(380, 560))
 		return
 	_img_size = Vector2(img.get_width(), img.get_height())
 	# Copia reducida sólo para mostrar; el recorte se calcula sobre el tamaño real.
@@ -77,8 +79,9 @@ func open(p_path: String) -> void:
 	tx.create_from_image(img, 0)
 	_tex.texture = tx
 	get_ok().disabled = _img_size == Vector2.ZERO
-	popup_centered(Vector2(560, 560))
-	_layout()
+	popup_centered(Vector2(380, 560))
+	# La vista todavía no está dimensionada: recalcular en el próximo frame.
+	call_deferred("_layout")
 
 # Escala "contain" + centrado: la misma cuenta que Avatar.map_view_rect.
 func _disp() -> Dictionary:
@@ -121,6 +124,8 @@ func _move_by(p_delta: Vector2) -> void:
 	_view.update()
 
 func _draw_dim() -> void:
+	if _sel.rect_size.x <= 1.0 or _sel.rect_size.y <= 1.0:
+		return
 	var r = Rect2(_sel.rect_position, _sel.rect_size)
 	var v = _view.rect_size
 	var dim = Color(0, 0, 0, 0.55)

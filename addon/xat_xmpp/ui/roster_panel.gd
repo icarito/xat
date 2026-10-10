@@ -404,6 +404,10 @@ func _on_icon_toggle(p_on: bool, p_b, p_key: String) -> void:
 	if _juice != null:
 		_juice.set_setting(p_key, p_on)
 	p_b.set_icon_color(P.USER if p_on else P.TEXT_DIM)
+	if _juice != null:
+		var n = {"sound_enabled": "Sonido", "haptics_enabled": "Vibración"}.get(p_key, "")
+		if n != "":
+			_juice.toast("%s %s" % [n, "activado" if p_on else "desactivado"])
 
 func _on_about() -> void:
 	OS.shell_open(XatXmpp.PRIVACY_URL)

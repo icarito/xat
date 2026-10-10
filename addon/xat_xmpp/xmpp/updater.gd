@@ -123,17 +123,13 @@ func _on_dl_done(result: int, code: int, _headers, _body: PoolByteArray) -> void
 # --- Instalación (Android nativo) ---
 
 func can_install() -> bool:
-	if not Engine.has_singleton("XatMedia"):
-		return false
-	var m = Engine.get_singleton("XatMedia")
-	return m.has_method("install_apk")
+	# Los JNISingleton exponen métodos sólo vía call(); has_method da false.
+	return Engine.has_singleton("XatMedia")
 
 func install(p_path: String) -> bool:
 	if p_path == "" or not Engine.has_singleton("XatMedia"):
 		return false
 	var m = Engine.get_singleton("XatMedia")
-	if not m.has_method("install_apk"):
-		return false
 	return bool(m.call("install_apk", p_path))
 
 # Semver simple: ¿a es más nueva que b? (compara partes numéricas).
