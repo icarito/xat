@@ -24,6 +24,8 @@ var _effect: AudioEffectRecord = null
 var _player: AudioStreamPlayer = null
 var _start_ms := 0
 var _path := ""
+var _bus_idx := -1
+var _analyzer_idx := -1
 
 func _ready() -> void:
 	_setup_bus()
@@ -45,6 +47,32 @@ func _setup_bus() -> void:
 		AudioServer.add_bus_effect(idx, _effect)
 	else:
 		_effect = AudioServer.get_bus_effect(idx, 0) as AudioEffectRecord
+	_bus_idx = idx
+	# Analizador de espectro para la forma de onda en vivo: sólo mide la señal
+	# (no altera lo grabado). Se reutiliza si ya existe en la bus.
+	_analyzer_idx = -1
+	for i in range(AudioServer.get_bus_effect_count(idx)):
+		if AudioServer.get_bus_effect(idx, i) is AudioEffectSpectrumAnalyzer:
+			_analyzer_idx = i
+	if _analyzer_idx < 0:
+		var an = AudioEffectSpectrumAnalyzer.new()
+		an.fft_size = AudioEffectSpectrumAnalyzer.FFT_SIZE_512
+		AudioServer.add_bus_effect(idx, an)
+		_analyzer_idx = AudioServer.get_bus_effect_count(idx) - 1
+
+# Amplitud 0..1 del micrófono (banda de voz) para la onda en vivo; -1 si no hay
+# dato. No se inventa onda (regla de honestidad de docs/ui.md).
+func level() -> float:
+	if not is_recording or _analyzer_idx < 0:
+		return -1.0
+	var inst = AudioServer.get_bus_effect_instance(_bus_idx, _analyzer_idx)
+	if inst == null or not (inst is AudioEffectSpectrumAnalyzerInstance):
+		return -1.0
+	var m = inst.get_magnitude_for_frequency_range(200.0, 2400.0)
+	var mag = max(m.x, m.y)
+	if mag <= 0.0:
+		return 0.0
+	return clamp(sqrt(mag) * 2.0, 0.0, 1.0)
 
 func available() -> bool:
 	return _effect != null and AudioServer.get_bus_index(BUS) >= 0

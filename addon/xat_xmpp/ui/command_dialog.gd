@@ -12,8 +12,17 @@ var _inputs := [] # Control o null (hidden)
 func _init() -> void:
 	name = "CommandDialog"
 	window_title = "Comando"
+	# Los formularios de config de sala MUC (y de comandos) pueden traer muchos
+	# campos: el contenido va en un ScrollContainer para que no se salga del
+	# diálogo.
+	var scroll = ScrollContainer.new()
+	scroll.rect_min_size = Vector2(520, 420)
+	scroll.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	add_child(scroll)
 	_box = VBoxContainer.new()
-	add_child(_box)
+	_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(_box)
 	connect("confirmed", self, "_on_confirmed")
 
 func open_form(p_title: String, p_form: Dictionary) -> void:

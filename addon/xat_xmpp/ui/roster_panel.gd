@@ -9,6 +9,7 @@ signal add_contact_requested()
 signal join_room_requested()
 signal subscription_accept(bare)
 signal subscription_deny(bare)
+signal avatar_requested()
 signal room_invite_accept(room)
 signal room_invite_ignore(room)
 
@@ -95,6 +96,13 @@ func _init() -> void:
 	root.add_child(foot)
 	_sound_btn = _toggle("♪", "sound_enabled", "Sonido")
 	foot.add_child(_sound_btn)
+	var avatar_btn = Button.new()
+	avatar_btn.text = "☺"
+	avatar_btn.hint_tooltip = "Cambiar foto de perfil"
+	avatar_btn.rect_min_size = Vector2(44, 32)
+	avatar_btn.focus_mode = Control.FOCUS_NONE
+	avatar_btn.connect("pressed", self, "_on_avatar")
+	foot.add_child(avatar_btn)
 	_motion_btn = _toggle("✦", "motion_enabled", "Animación")
 	foot.add_child(_motion_btn)
 	_haptic_btn = _toggle("≋", "haptics_enabled", "Vibración (móvil / gamepad)")
@@ -326,6 +334,9 @@ func _on_setting(p_on: bool, p_key: String) -> void:
 
 func _on_about() -> void:
 	OS.shell_open(XatXmpp.PRIVACY_URL)
+
+func _on_avatar() -> void:
+	emit_signal("avatar_requested")
 
 func set_peers(p_bares: Array) -> void:
 	_peers = p_bares

@@ -793,6 +793,29 @@ func disable_push() -> int:
 func push_registered() -> bool:
 	return _push_enabled
 
+# --- Avatar propio (XEP-0084) ---
+
+# Publica una imagen como avatar del usuario (PEP): datos a
+# `urn:xmpp:avatar:data` + metadata a `urn:xmpp:avatar:metadata`, con el sha1
+# como id. Actualiza la caché local para que se vea al instante.
+func publish_avatar(p_path: String) -> int:
+	if not is_connected_to_server():
+		return -1
+	var a = Avatar.process(p_path)
+	if a.empty():
+		return -2
+	var item_id = str(a["id"])
+	var b64 = Marshalls.raw_to_base64(a["bytes"])
+	var rc = _transport.send(Avatar.build_publish_data(_new_id("av"), item_id, b64).to_xml())
+	_transport.send(Avatar.build_publish_metadata(_new_id("avm"), item_id, a["bytes"].size(), str(a["mime"]), int(a["width"]), int(a["height"])).to_xml())
+	var cache = Avatar.cache_path(item_id, str(a["mime"]))
+	Avatar.save(cache, a["bytes"])
+	var tex = Avatar.load_texture(cache)
+	if tex != null:
+		avatars[bare()] = tex
+		emit_signal("avatar_changed", bare(), tex)
+	return rc
+
 func load_history(p_bare_jid: String, p_max: int = 50) -> int:
 	if not is_connected_to_server():
 		return -1

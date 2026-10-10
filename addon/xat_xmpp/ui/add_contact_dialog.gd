@@ -7,6 +7,8 @@ extends AcceptDialog
 signal submitted(jid, name)
 
 const Jid = preload("res://addons/xat_xmpp/xmpp/jid.gd")
+const P = preload("res://addons/xat_xmpp/ui/palette.gd")
+const XatTheme = preload("res://addons/xat_xmpp/ui/xat_theme.gd")
 
 var _jid: LineEdit
 var _name: LineEdit
@@ -15,13 +17,30 @@ var _error: Label
 func _init() -> void:
 	name = "AddContactDialog"
 	window_title = "Añadir contacto"
+	rect_min_size = Vector2(560, 340)
+	var margin = MarginContainer.new()
+	margin.add_constant_override("margin_left", 24)
+	margin.add_constant_override("margin_right", 24)
+	margin.add_constant_override("margin_top", 22)
+	margin.add_constant_override("margin_bottom", 20)
+	add_child(margin)
 	var box = VBoxContainer.new()
-	box.add_constant_override("separation", 8)
-	add_child(box)
-	_jid = _row(box, "JID", "persona@hablar.fuentelibre.org")
-	_name = _row(box, "Nombre", "")
+	box.add_constant_override("separation", 12)
+	margin.add_child(box)
+	var title = Label.new()
+	title.text = "Añadir contacto"
+	title.add_font_override("font", XatTheme.font(P.FONT_BOLD, P.FONT_SIZE + 4))
+	box.add_child(title)
+	var desc = Label.new()
+	desc.text = "Agregá a alguien por su JID. El nombre es opcional."
+	desc.autowrap = true
+	desc.rect_min_size = Vector2(412, 0)
+	desc.add_color_override("font_color", P.TEXT_DIM)
+	box.add_child(desc)
+	_jid = _field(box, "JID", "persona@hablar.fuentelibre.org")
+	_name = _field(box, "Nombre (opcional)", "Cómo querés llamarlo")
 	_error = Label.new()
-	_error.add_color_override("font_color", Color("ff5c7a"))
+	_error.add_color_override("font_color", P.ERROR)
 	box.add_child(_error)
 	connect("confirmed", self, "_on_confirmed")
 	get_ok().text = "Añadir"
@@ -29,17 +48,18 @@ func _init() -> void:
 		e.connect("text_changed", self, "_validate")
 	_validate("")
 
-func _row(p_parent: VBoxContainer, p_label: String, p_placeholder: String) -> LineEdit:
-	var h = HBoxContainer.new()
+# Etiqueta chica encima de un campo grande.
+func _field(p_parent: VBoxContainer, p_label: String, p_placeholder: String) -> LineEdit:
 	var l = Label.new()
 	l.text = p_label
-	l.rect_min_size = Vector2(90, 0)
-	h.add_child(l)
+	l.add_color_override("font_color", P.TEXT_DIM)
+	p_parent.add_child(l)
 	var e = LineEdit.new()
 	e.placeholder_text = p_placeholder
 	e.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	h.add_child(e)
-	p_parent.add_child(h)
+	e.rect_min_size = Vector2(0, 46)
+	e.add_font_override("font", XatTheme.font(P.FONT_MEDIUM, P.FONT_SIZE + 2))
+	p_parent.add_child(e)
 	return e
 
 func open() -> void:
@@ -47,7 +67,7 @@ func open() -> void:
 	_name.text = ""
 	_error.text = ""
 	_validate("")
-	popup_centered()
+	popup_centered(Vector2(560, 340))
 	_jid.grab_focus()
 
 func _validate(_text: String) -> void:
@@ -58,6 +78,8 @@ func _validate(_text: String) -> void:
 		_error.text = ""
 	elif not valid:
 		_error.text = "JID inválido (usá usuario@dominio)."
+	else:
+		_error.text = ""
 
 func _is_valid(p_jid: String) -> bool:
 	if p_jid == "":

@@ -205,7 +205,14 @@ func _init():
 	check(cols[2]["values"] == ["a", "c"], "ajustes: list-multi conserva selección")
 
 	# Sidebar (landscape): existe con botones grandes; en desktop no se muestra.
-	check(m._sidebar != null and m._sb_roster.rect_min_size.y >= 50, "sidebar: botones grandes")
+	check(m._sidebar != null and m._sb_add.rect_min_size.y >= 40, "sidebar: acciones presentes")
+	check(m._sb_add != null and m._sb_room != null and m._sb_leave != null, "sidebar: acciones de vista")
+	check(m._sb_sound != null and m._sb_about != null, "sidebar: ajustes")
+	# El roster oculta sus botones propios cuando el sidebar manda.
+	m._roster.set_chrome_visible(false)
+	check(not m._roster._add_btn.visible and not m._roster._foot.visible, "roster: chrome oculto en landscape")
+	m._roster.set_chrome_visible(true)
+	check(m._roster._add_btn.visible, "roster: chrome visible en portrait")
 	check(m._landscape_columns() == 1, "sidebar: desktop sin columnas")
 
 	# Roster multicolumna (landscape) con scroll lateral.
@@ -229,6 +236,29 @@ func _init():
 	check(bub.selected_text().find("seleccionable") >= 0, "bubble: selección de texto")
 	bub.end_selection()
 	m._chat.set_peer("a@h")
+
+	# Ventana de burbujas: con límite chico, agregar tras reconstruir no desincroniza.
+	m._chat.set_peer("w@h")
+	for i in range(30):
+		m._chat.add_message({"from": "w@h", "body": "m%d" % i, "direction": "in", "timestamp": "2026-02-01T10:%02d:00Z" % i, "id": "w%d" % i, "commands": [], "quick_responses": []})
+	m._chat._limit = 10
+	m._chat._rebuild()
+	m._chat.add_message({"from": "w@h", "body": "nuevo", "direction": "in", "timestamp": "2026-02-01T11:00:00Z", "id": "wn", "commands": [], "quick_responses": []})
+	check(m._chat._bubbles.size() == m._chat._messages.size() - m._chat._first, "ventana de burbujas alineada")
+	check(m._chat._bubbles.size() <= 10, "ventana recortada")
+	m._chat.set_peer("a@h")
+
+	# Diálogo de sala: el nombre se completa con el dominio; no pide nick; valida.
+	m._join_room.open("conference.h")
+	m._join_room._name.text = "general"
+	check(m._join_room._full() == "general@conference.h", "sala: JID = nombre + dominio")
+	m._join_room._validate()
+	check(not m._join_room.get_ok().disabled, "sala: nombre válido")
+	m._join_room._name.text = "general@otro.dominio"
+	check(m._join_room._full() == "general@otro.dominio", "sala: JID completo respetado")
+	m._join_room._name.text = "con espacio"
+	m._join_room._validate()
+	check(m._join_room.get_ok().disabled, "sala: rechaza espacios")
 
 	# Push (XEP-0357): el servicio se elige por SO, con fallback común.
 	ProjectSettings.set_setting("xat/push_service", "")

@@ -11,6 +11,7 @@ const JoinRoomDialog = preload("res://addons/xat_xmpp/ui/join_room_dialog.gd")
 const InviteDialog = preload("res://addons/xat_xmpp/ui/invite_dialog.gd")
 const TextPromptDialog = preload("res://addons/xat_xmpp/ui/text_prompt_dialog.gd")
 const ChatPanel = preload("res://addons/xat_xmpp/ui/chat_panel.gd")
+const IconButton = preload("res://addons/xat_xmpp/ui/icon_button.gd")
 const CommandDialog = preload("res://addons/xat_xmpp/ui/command_dialog.gd")
 const Credentials = preload("res://addons/xat_xmpp/xmpp/credentials.gd")
 const XatTheme = preload("res://addons/xat_xmpp/ui/xat_theme.gd")
@@ -27,6 +28,8 @@ const MediaUtil = preload("res://addons/xat_xmpp/ui/media_util.gd")
 const MediaLightbox = preload("res://addons/xat_xmpp/ui/media_lightbox.gd")
 const Notifier = preload("res://addons/xat_xmpp/ui/notifier.gd")
 const Push = preload("res://addons/xat_xmpp/xmpp/push.gd")
+const FilePicker = preload("res://addons/xat_xmpp/ui/file_picker.gd")
+const ClipboardImage = preload("res://addons/xat_xmpp/ui/clipboard_image.gd")
 const XatXmpp = preload("res://addons/xat_xmpp/xat_xmpp.gd")
 
 # Por debajo de este ancho el panel "mente" se oculta (se abre con el orbe del header).
@@ -60,17 +63,15 @@ var _room_settings
 var _prompt_ctx := {}
 var _sidebar
 var _sidebar_title
-var _sb_roster
-var _sb_chat
-var _sb_mind
+var _sidebar_identity
 var _sb_add
 var _sb_room
 var _sb_occ
 var _sb_act
 var _sb_leave
 var _sb_sound
-var _sb_motion
 var _sb_haptic
+var _sb_profile
 var _sb_about
 var _credentials
 var _startup_splash
@@ -88,6 +89,10 @@ var _rec_start_ms := 0
 var _playing_path := ""
 var _native_media = null          # singleton XatMedia (selector/cámara nativa)
 var _pending_media_peer := ""     # peer que espera el resultado del selector
+var _pending_avatar := false      # el selector está eligiendo la foto de perfil
+var _avatar_picker               # FilePicker nativo para la foto de perfil
+var _avatar_file_dialog          # fallback FileDialog para la foto de perfil
+var _clipboard                   # ClipboardImage (pegar imagen en escritorio)
 var _notifier
 
 func _ready() -> void:
@@ -160,12 +165,14 @@ func _ready() -> void:
 	_roster.connect("add_contact_requested", self, "_on_add_contact_requested")
 	_roster.connect("subscription_accept", self, "_on_subscription_accept")
 	_roster.connect("subscription_deny", self, "_on_subscription_deny")
+	_roster.connect("avatar_requested", self, "_on_avatar_requested")
 	_roster.connect("join_room_requested", self, "_on_join_room_requested")
 	_roster.connect("room_invite_accept", self, "_on_room_invite_accept")
 	_roster.connect("room_invite_ignore", self, "_on_room_invite_ignore")
 	_roster.set_juice(juice)
 	_chat = ChatPanel.new()
 	_split.add_child(_chat)
+	_chat.set_juice(juice)
 	_chat.connect("message_submitted", self, "_on_message_submitted")
 	_chat.connect("action_selected", self, "_on_action_selected")
 	_chat.connect("quick_selected", self, "_on_quick_selected")
@@ -216,6 +223,11 @@ func _ready() -> void:
 	_rec_timer.connect("timeout", self, "_tick_recording")
 	add_child(_rec_timer)
 	_setup_native_media()
+	if ClipboardImage.available():
+		_clipboard = ClipboardImage.new()
+		_clipboard.name = "ClipboardImage"
+		add_child(_clipboard)
+		_clipboard.connect("pasted", self, "_on_clipboard_pasted")
 	# En Android los permisos peligrosos (micrófono, media) se piden en runtime;
 	# Godot no los pide solo aunque estén declarados en el manifiesto.
 	if OS.get_name() == "Android":
@@ -275,7 +287,10 @@ func _dev_seed() -> void:
 	_header_avatar.visible = true
 	_header_avatar.bare = peers[0]
 	_mind.set_agent(peers[0])
-	_show_roster = true
+	_chat.set_peer(peers[0])
+	for i in range(8):
+		_chat.add_message({"from": peers[0], "body": "mensaje de prueba %d con algo de texto" % i, "direction": "in" if i % 2 == 0 else "out", "timestamp": "2026-03-01T10:%02d:00Z" % i, "id": "d%d" % i, "commands": [], "quick_responses": []})
+	_show_roster = false
 	_update_mind_visibility()
 
 func _autoconnect() -> void:
@@ -425,10 +440,11 @@ func _on_join_room_requested() -> void:
 	if session.state != SessionScript.State.CONNECTED:
 		juice.toast("Conectate antes de unirte a una sala", P.ERROR)
 		return
-	_join_room.open(session.muc_conference(), session.bare().split("@")[0])
+	_join_room.open(session.muc_conference())
 
-func _on_join_room_submitted(p_room: String, p_nick: String) -> void:
-	var rc = session.join_room(p_room, p_nick)
+func _on_join_room_submitted(p_room: String) -> void:
+	# El nick en la sala es el del usuario (no se pregunta).
+	var rc = session.join_room(p_room, session.bare().split("@")[0])
 	if rc != 0:
 		juice.play("alert")
 		juice.toast("No se pudo unir a la sala", P.ERROR)
@@ -710,6 +726,11 @@ func _on_attach_requested(peer: String) -> void:
 	_native_media.pickFile()
 
 func _on_native_media_picked(path: String) -> void:
+	if _pending_avatar:
+		_pending_avatar = false
+		if path != "":
+			_apply_avatar(path)
+		return
 	var peer = _pending_media_peer
 	_pending_media_peer = ""
 	if peer == "" or path == "":
@@ -790,7 +811,7 @@ func _on_voice_cancel(_peer: String) -> void:
 
 func _tick_recording() -> void:
 	var elapsed = OS.get_ticks_msec() - _rec_start_ms
-	_chat.set_recording(true, elapsed)
+	_chat.set_recording(true, elapsed, _recorder.level())
 	if elapsed >= _max_record_ms():
 		juice.toast("Nota de voz al límite del servidor", P.ERROR)
 		_on_voice_toggle(_peer, false)
@@ -975,6 +996,69 @@ func _on_subscription_deny(p_bare: String) -> void:
 	session.deny_subscription(p_bare)
 	juice.toast("Solicitud de %s rechazada" % p_bare)
 
+# --- Foto de perfil (XEP-0084) ---
+
+func _on_avatar_requested() -> void:
+	if session.state != SessionScript.State.CONNECTED:
+		juice.toast("Conectate para cambiar la foto", P.ERROR)
+		return
+	if _native_media != null:
+		_pending_avatar = true
+		_native_media.pickFile()
+		return
+	if FilePicker.has_native():
+		if _avatar_picker == null:
+			_avatar_picker = FilePicker.new()
+			_avatar_picker.name = "AvatarPicker"
+			add_child(_avatar_picker)
+			_avatar_picker.connect("picked", self, "_on_avatar_picked")
+		_avatar_picker.open("Elegir foto de perfil", ["Imágenes | *.png *.jpg *.jpeg *.webp *.bmp *.heic"])
+		return
+	if _avatar_file_dialog == null:
+		_avatar_file_dialog = FileDialog.new()
+		_avatar_file_dialog.mode = FileDialog.MODE_OPEN_FILE
+		_avatar_file_dialog.access = FileDialog.ACCESS_FILESYSTEM
+		_avatar_file_dialog.resizable = true
+		_avatar_file_dialog.rect_min_size = Vector2(560, 400)
+		_avatar_file_dialog.add_filter("*.png, *.jpg, *.jpeg, *.webp, *.bmp, *.heic ; Imágenes")
+		_avatar_file_dialog.connect("file_selected", self, "_on_avatar_filedialog")
+		add_child(_avatar_file_dialog)
+	_avatar_file_dialog.popup_centered_ratio(0.7)
+
+func _on_avatar_filedialog(p_path: String) -> void:
+	_apply_avatar(p_path)
+
+func _on_avatar_picked(p_path: String) -> void:
+	_apply_avatar(p_path)
+
+func _apply_avatar(p_path: String) -> void:
+	if p_path == "":
+		return
+	var rc = session.publish_avatar(p_path)
+	if rc == 0:
+		juice.toast("Foto de perfil actualizada")
+		juice.haptic("success")
+	else:
+		juice.play("alert")
+		juice.toast("No se pudo actualizar la foto", P.ERROR)
+
+# Pegar una imagen del portapapeles (escritorio) como adjunto. Ctrl+Shift+V.
+func _on_paste_image() -> void:
+	if _peer == "":
+		return
+	if _clipboard == null:
+		juice.toast("Requiere wl-clipboard (Wayland) o xclip (X11)", P.ERROR)
+		return
+	_clipboard.request()
+
+func _on_clipboard_pasted(p_path: String) -> void:
+	if p_path == "":
+		juice.toast("No hay imagen en el portapapeles")
+		return
+	if _peer == "":
+		return
+	_send_attachment(_peer, p_path, "image/png", 0, "")
+
 # XEP-0357: registra el token de push del dispositivo con el servicio del
 # servidor (para avisos con la app cerrada). El servicio se elige por SO
 # (`xat/push_service_android` = FCM, `xat/push_service_ios` = APNs; con
@@ -1093,133 +1177,127 @@ func _build_sidebar() -> void:
 	_sidebar_title = Label.new()
 	_sidebar_title.text = "—"
 	_sidebar_title.align = Label.ALIGN_CENTER
-	_sidebar_title.autowrap = true
+	_sidebar_title.rect_min_size = Vector2(0, 20)
 	_sidebar_title.clip_text = true
 	_sidebar_title.add_color_override("font_color", P.TEXT)
 	_sidebar_title.add_font_override("font", XatTheme.font(P.FONT_MEDIUM, P.FONT_SIZE))
 	tm.add_child(_sidebar_title)
-	# Navegación (botones grandes).
-	_sb_roster = _sidebar_button("Contactos", "Contactos y salas")
-	_sb_roster.connect("pressed", self, "_on_sidebar_roster")
-	sv.add_child(_sb_roster)
-	_sb_chat = _sidebar_button("Chat", "Conversación abierta")
-	_sb_chat.connect("pressed", self, "_on_sidebar_chat")
-	sv.add_child(_sb_chat)
-	_sb_mind = _sidebar_button("Agente", "Panel del agente")
-	_sb_mind.visible = false
-	_sb_mind.connect("pressed", self, "_on_sidebar_mind")
-	sv.add_child(_sb_mind)
-	# Acciones de la vista activa.
+	# Arriba: acceso al perfil/cuenta y a "acerca de".
+	var top = HBoxContainer.new()
+	top.alignment = BoxContainer.ALIGN_CENTER
+	top.add_constant_override("separation", 6)
+	sv.add_child(top)
+	_sb_profile = _sidebar_icon_action("person", "Perfil y cuenta")
+	_sb_profile.connect("pressed", self, "_on_sidebar_profile")
+	top.add_child(_sb_profile)
+	_sb_about = _sidebar_icon_action("info", "Acerca de · privacidad")
+	_sb_about.connect("pressed", self, "_on_sidebar_about")
+	top.add_child(_sb_about)
+	# Identidad del peer/sala (avatar + orbe del agente) que en landscape se mueve
+	# acá desde la cabecera del chat, para no perder una franja de alto.
+	_sidebar_identity = HBoxContainer.new()
+	_sidebar_identity.alignment = BoxContainer.ALIGN_CENTER
+	_sidebar_identity.add_constant_override("separation", 4)
+	sv.add_child(_sidebar_identity)
+	# Sin pestañas de navegación: se cambia de conversación eligiendo un JID/sala
+	# en el roster. El sidebar sólo tiene acciones y ajustes.
 	sv.add_child(_sidebar_sep())
-	_sb_add = _sidebar_action("Añadir", "Añadir contacto por JID")
+	_sb_add = _sidebar_action("add", "Añadir contacto por JID")
 	_sb_add.connect("pressed", self, "_on_sidebar_add")
 	sv.add_child(_sb_add)
-	_sb_room = _sidebar_action("Sala", "Unirse a una sala (MUC)")
+	_sb_room = _sidebar_action("room", "Unirse a una sala (MUC)")
 	_sb_room.connect("pressed", self, "_on_sidebar_room")
 	sv.add_child(_sb_room)
-	_sb_occ = _sidebar_action("Ocupantes", "Ver ocupantes de la sala")
+	_sb_occ = _sidebar_action("occupants", "Ver ocupantes de la sala")
 	_sb_occ.connect("pressed", self, "_on_sidebar_occ")
 	sv.add_child(_sb_occ)
-	_sb_act = _sidebar_action("Acciones", "Acciones de la sala")
+	_sb_act = _sidebar_action("actions", "Acciones de la sala")
 	_sb_act.connect("pressed", self, "_on_sidebar_act")
 	sv.add_child(_sb_act)
-	_sb_leave = _sidebar_action("Salir", "Salir de la sala")
+	_sb_leave = _sidebar_action("leave", "Salir de la sala")
 	_sb_leave.connect("pressed", self, "_on_sidebar_leave")
 	sv.add_child(_sb_leave)
-	# Ajustes (sonido/animación/vibración/acerca) en grilla 2×2.
+	# Ajustes: sonido y vibración como toggles que se colorean según su estado.
 	var spacer = Control.new()
 	spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	sv.add_child(spacer)
 	sv.add_child(_sidebar_sep())
-	var grid = GridContainer.new()
-	grid.columns = 2
-	grid.add_constant_override("hseparation", 6)
-	grid.add_constant_override("vseparation", 6)
-	sv.add_child(grid)
-	_sb_sound = _sidebar_toggle("♪", "Sonido")
-	_sb_sound.connect("toggled", self, "_on_sidebar_setting", ["sound_enabled"])
-	grid.add_child(_sb_sound)
-	_sb_motion = _sidebar_toggle("✦", "Animación")
-	_sb_motion.connect("toggled", self, "_on_sidebar_setting", ["motion_enabled"])
-	grid.add_child(_sb_motion)
-	_sb_haptic = _sidebar_toggle("≋", "Vibración")
-	_sb_haptic.connect("toggled", self, "_on_sidebar_setting", ["haptics_enabled"])
-	grid.add_child(_sb_haptic)
-	_sb_about = _sidebar_toggle("ⓘ", "Privacidad y soporte")
-	_sb_about.connect("pressed", self, "_on_sidebar_about")
-	grid.add_child(_sb_about)
+	var toggles = HBoxContainer.new()
+	toggles.alignment = BoxContainer.ALIGN_CENTER
+	toggles.add_constant_override("separation", 6)
+	sv.add_child(toggles)
+	_sb_sound = _sidebar_icon_toggle("sound", "Sonido", "sound_enabled")
+	toggles.add_child(_sb_sound)
+	_sb_haptic = _sidebar_icon_toggle("vibrate", "Vibración", "haptics_enabled")
+	toggles.add_child(_sb_haptic)
 	_init_sidebar_settings()
 	_split.add_child(_sidebar)
 
 func _sidebar_sep() -> HSeparator:
 	return HSeparator.new()
 
-func _sidebar_button(p_text: String, p_tip: String) -> Button:
+func _sidebar_action(p_icon: String, p_tip: String) -> Button:
 	var b = Button.new()
-	b.text = p_text
-	b.hint_tooltip = p_tip
-	b.toggle_mode = true
-	b.focus_mode = Control.FOCUS_NONE
-	b.rect_min_size = Vector2(84, 60)
-	b.add_font_override("font", XatTheme.font(P.FONT_MEDIUM, P.FONT_SIZE + 1))
-	for st in ["normal", "hover", "pressed", "focus"]:
-		var bg = P.BG2.lightened(0.12) if st == "hover" else P.BG2
-		b.add_stylebox_override(st, XatTheme.box(bg, 12, 6, 8))
-	return b
-
-func _sidebar_action(p_text: String, p_tip: String) -> Button:
-	var b = Button.new()
-	b.text = p_text
+	b.icon = load("res://icons/%s.png" % p_icon)
 	b.hint_tooltip = p_tip
 	b.focus_mode = Control.FOCUS_NONE
-	b.rect_min_size = Vector2(84, 46)
-	b.add_font_override("font", XatTheme.font(P.FONT_MEDIUM, P.FONT_SIZE))
+	b.rect_min_size = Vector2(84, 48)
 	for st in ["normal", "hover", "pressed", "focus"]:
 		var bg = P.BG2.lightened(0.12) if st == "hover" else P.BG2.darkened(0.1)
 		b.add_stylebox_override(st, XatTheme.box(bg, 10, 4, 6))
 	return b
 
-func _sidebar_toggle(p_text: String, p_tip: String) -> Button:
-	var b = Button.new()
-	b.text = p_text
-	b.hint_tooltip = p_tip
-	b.toggle_mode = true
-	b.focus_mode = Control.FOCUS_NONE
-	b.rect_min_size = Vector2(40, 40)
-	for st in ["normal", "hover", "pressed", "focus"]:
-		var bg = P.BG2.lightened(0.12) if st == "hover" else P.BG2
-		b.add_stylebox_override(st, XatTheme.box(bg, 10, 4, 4))
+func _sidebar_icon_action(p_glyph: String, p_tip: String) -> IconButton:
+	var b = IconButton.new()
+	b.setup(p_glyph, 44, P.TEXT_DIM, p_tip)
+	for st in ["normal", "focus"]:
+		b.add_stylebox_override(st, XatTheme.box(P.BG2, 10, 4, 4))
+	b.add_stylebox_override("hover", XatTheme.box(P.BG2.lightened(0.12), 10, 4, 4))
+	b.add_stylebox_override("pressed", XatTheme.box(P.BG2.darkened(0.15), 10, 4, 4))
+	b.connect("mouse_entered", self, "_on_icon_hover", [b, true])
+	b.connect("mouse_exited", self, "_on_icon_hover", [b, false])
 	return b
+
+func _sidebar_icon_toggle(p_glyph: String, p_tip: String, p_key: String) -> IconButton:
+	var b = IconButton.new()
+	b.setup(p_glyph, 46, P.TEXT_DIM, p_tip)
+	b.toggle_mode = true
+	# Fondo tenue cuando está encendido + glifo en acento: se distingue del apagado.
+	b.add_stylebox_override("normal", XatTheme.box(P.BG2, 10, 4, 4))
+	b.add_stylebox_override("focus", XatTheme.box(P.BG2, 10, 4, 4))
+	b.add_stylebox_override("hover", XatTheme.box(P.BG2.lightened(0.12), 10, 4, 4))
+	b.add_stylebox_override("pressed", XatTheme.box(P.USER.darkened(0.55), 10, 4, 4))
+	var on = juice == null or bool(juice.settings.get(p_key, true))
+	b.pressed = on
+	b.set_icon_color(P.USER if on else P.TEXT_DIM)
+	b.connect("toggled", self, "_on_icon_toggle", [b, p_key])
+	return b
+
+func _on_icon_hover(p_b, p_enter: bool) -> void:
+	if p_b.toggle_mode and p_b.pressed:
+		return
+	p_b.set_icon_color(P.TEXT if p_enter else P.TEXT_DIM)
+
+func _on_icon_toggle(p_on: bool, p_b, p_key: String) -> void:
+	if juice != null:
+		juice.set_setting(p_key, p_on)
+	# Color = estado: encendido se destaca, apagado queda tenue.
+	p_b.set_icon_color(P.USER if p_on else P.TEXT_DIM)
 
 func _init_sidebar_settings() -> void:
 	if juice == null:
 		return
-	_sb_sound.pressed = bool(juice.settings.get("sound_enabled", true))
-	_sb_motion.pressed = bool(juice.settings.get("motion_enabled", true))
-	_sb_haptic.pressed = bool(juice.settings.get("haptics_enabled", true))
+	for pair in [[_sb_sound, "sound_enabled"], [_sb_haptic, "haptics_enabled"]]:
+		var on = bool(juice.settings.get(pair[1], true))
+		pair[0].pressed = on
+		pair[0].set_icon_color(P.USER if on else P.TEXT_DIM)
 
-func _on_sidebar_setting(p_on: bool, p_key: String) -> void:
-	if juice != null:
-		juice.set_setting(p_key, p_on)
+func _on_sidebar_profile() -> void:
+	if _account != null:
+		_account.visible = true
 
 func _on_sidebar_about() -> void:
 	OS.shell_open(XatXmpp.PRIVACY_URL)
-
-func _on_sidebar_roster() -> void:
-	_show_roster = true
-	_update_mind_visibility()
-
-func _on_sidebar_chat() -> void:
-	if _peer == "":
-		return
-	_show_roster = false
-	_update_mind_visibility()
-
-func _on_sidebar_mind() -> void:
-	if _peer == "" or not session.agent_model.has_agent(_peer):
-		return
-	_mind_pinned = not _mind_pinned
-	_update_mind_visibility()
 
 func _on_sidebar_add() -> void:
 	_on_add_contact_requested()
@@ -1236,23 +1314,15 @@ func _on_sidebar_act() -> void:
 func _on_sidebar_leave() -> void:
 	_on_room_leave_requested()
 
-# Refresca el sidebar: título = peer/sala; navegación y acciones de la vista.
+# Refresca el sidebar: título = peer/sala; acciones de roster vs. de sala.
 func _refresh_sidebar() -> void:
 	if _sidebar == null or not _sidebar.visible:
 		return
 	var roster = _peer == "" or _show_roster
-	var is_agent = _peer != "" and session.agent_model.has_agent(_peer)
 	var in_room = _peer != "" and session.is_room(_peer) and not roster
 	_sidebar_title.text = _peer.split("@")[0] if _peer != "" else "xat"
-	# "Agente" sólo tiene sentido dentro de una conversación con un agente.
-	_sb_mind.visible = not roster and is_agent
-	_sb_chat.disabled = _peer == ""
-	_sb_roster.pressed = roster
-	_sb_chat.pressed = not roster
-	_sb_mind.pressed = _mind_pinned
-	# Acciones de roster vs. de sala.
-	_sb_add.visible = roster
-	_sb_room.visible = roster
+	_sb_add.visible = true
+	_sb_room.visible = true
 	_sb_occ.visible = in_room
 	_sb_act.visible = in_room
 	_sb_leave.visible = in_room
@@ -1314,15 +1384,30 @@ func _update_panes(p_single: bool, p_mind: bool) -> void:
 		_chat.visible = true
 	_roster.size_flags_horizontal = Control.SIZE_EXPAND_FILL if p_single else 0
 	_mind.size_flags_horizontal = Control.SIZE_EXPAND_FILL if p_single else 0
-	# En landscape la navegación y el título van al sidebar: la cabecera del chat
-	# queda compacta para ganar alto.
-	_chat.set_nav_visible(p_single and _chat.visible and not landscape, not landscape)
+	# En landscape la navegación no tiene pestañas: el botón atrás del header
+	# vuelve al roster, y el título vive en el sidebar (cabecera compacta).
+	_chat.set_nav_visible(p_single and _chat.visible, not landscape)
+	# En landscape no hay franja de cabecera: la identidad (avatar/orbe) pasa al
+	# sidebar y el alto se gana para los mensajes.
+	_chat.set_header_visible(not landscape)
+	_layout_identity(landscape)
 	# Los botones chicos del roster y de la cabecera del chat pasan al sidebar.
 	_roster.set_chrome_visible(not landscape)
 	_chat.set_header_actions_visible(not landscape)
 	if _roster.has_method("set_columns"):
 		_roster.set_columns(_landscape_columns())
 	_refresh_sidebar()
+
+# Mueve avatar/orbe entre la cabecera del chat y el sidebar según orientación.
+func _layout_identity(p_sidebar: bool) -> void:
+	if _sidebar_identity == null or _header_avatar == null or _header_orb == null:
+		return
+	var target = _sidebar_identity if p_sidebar else _chat.header_slot
+	for c in [_header_avatar, _header_orb]:
+		if c.get_parent() != target:
+			if c.get_parent() != null:
+				c.get_parent().remove_child(c)
+			target.add_child(c)
 
 func _on_back() -> void:
 	_show_roster = true
@@ -1369,19 +1454,34 @@ func _do_stretch(p_base: Vector2) -> void:
 
 # Móvil: deja sitio para el notch/recorte superior (si no, tapa el margen del
 # roster y la cabecera). get_window_safe_area() viene en píxeles de pantalla.
+# También calcula el inset inferior (barra de gestos) para el composer.
 func _update_safe_area() -> void:
 	if not (OS.get_name() in ["Android", "iOS"]):
+		if _chat != null:
+			_chat.set_bottom_inset(0)
 		return
 	var safe = OS.get_window_safe_area()
-	var win_h = OS.window_size.y
-	if safe.position.y <= 0.0 or win_h <= 0.0 or rect_size.y <= 0.0:
+	var win = OS.window_size
+	if win.x <= 0.0 or win.y <= 0.0 or rect_size.y <= 0.0:
 		return
-	_split.margin_top = safe.position.y * (rect_size.y / win_h)
+	var ratio = rect_size.y / win.y
+	if safe.position.y > 0.0:
+		_split.margin_top = safe.position.y * ratio
+	# Inset inferior (barra de gestos), salvo con el teclado virtual visible: el
+	# teclado ya eleva el split vía _follow_keyboard.
+	var inset = 0
+	if OS.get_virtual_keyboard_height() <= 0:
+		var bottom_gap = win.y - (safe.position.y + safe.size.y)
+		inset = int(max(0.0, bottom_gap * ratio))
+	if _chat != null:
+		_chat.set_bottom_inset(inset)
 
 func _follow_keyboard() -> void:
 	var kb = OS.get_virtual_keyboard_height()
 	var ratio = get_viewport().get_visible_rect().size.y / max(1.0, OS.window_size.y)
 	_split.margin_bottom = -kb * ratio
+	if _chat != null and kb > 0:
+		_chat.set_bottom_inset(0)
 
 func _on_header_orb() -> void:
 	_mind_pinned = not _mind_pinned
@@ -1400,7 +1500,10 @@ func _input(p_event) -> void:
 		elif p_event.button_index == BUTTON_WHEEL_DOWN:
 			_zoom(-1)
 	elif p_event is InputEventKey and p_event.pressed and not p_event.echo and p_event.control:
-		if p_event.scancode in [KEY_EQUAL, KEY_KP_ADD]:
+		if p_event.scancode == KEY_V and p_event.shift:
+			_on_paste_image()
+			get_tree().set_input_as_handled()
+		elif p_event.scancode in [KEY_EQUAL, KEY_KP_ADD]:
 			_zoom(1)
 		elif p_event.scancode in [KEY_MINUS, KEY_KP_SUBTRACT]:
 			_zoom(-1)

@@ -28,11 +28,19 @@ const XatTheme = preload("res://addons/xat_xmpp/ui/xat_theme.gd")
 const Bubble = preload("res://addons/xat_xmpp/ui/bubble.gd")
 const LocalTime = preload("res://addons/xat_xmpp/ui/localtime.gd")
 const Media = preload("res://addons/xat_xmpp/xmpp/media.gd")
+const FilePicker = preload("res://addons/xat_xmpp/ui/file_picker.gd")
 const ToolCard = preload("res://addons/xat_xmpp/ui/tool_card.gd")
 const ApprovalCard = preload("res://addons/xat_xmpp/ui/approval_card.gd")
 const Shimmer = preload("res://addons/xat_xmpp/ui/fx/shimmer.gd")
+const IconButton = preload("res://addons/xat_xmpp/ui/icon_button.gd")
+const Waveform = preload("res://addons/xat_xmpp/ui/waveform.gd")
 
 const MAX_LINES := 6
+# Umbrales del gesto de voz (px lógicos ≈ dp). Ver docs/input-bar-design.md §5.1.
+const HOLD_DELAY_MS := 150      # un toque más corto es tap, no grabación
+const MIN_RECORD_MS := 800      # soltar antes descarta "demasiado corto"
+const LOCK_THRESHOLD := 72.0    # deslizar ↑ para bloquear
+const CANCEL_THRESHOLD := 110.0 # deslizar ← para cancelar
 const MAX_BUBBLES := 200  # más viejas se liberan (el modelo _messages queda completo)
 const RENDER_CHUNK := 12  # burbujas por frame en el render diferido (no bloquear la UI)
 const NEAR_PX := 80.0
@@ -66,6 +74,7 @@ var _typing := ""
 var _thinking := false
 var _render_seq := 0  # aborta renders diferidos cuando llega uno nuevo
 var header_slot: HBoxContainer  # a la derecha del título (mini-orbe, etc.)
+var _head: PanelContainer      # franja de cabecera (ocultable en landscape)
 
 var _title: Label
 var back_button: Button
@@ -80,10 +89,26 @@ var _jump: Button
 var _more: Button
 var _anim: Timer  # fuerza redibujo del shimmer (low_processor_mode lo congela)
 var _file_dialog: FileDialog
-var _attach_btn: Button
-var _cam_btn: Button
-var _mic_btn: Button
-var _mic_cancel: Button
+var _picker # FilePicker nativo (escritorio)
+var _attach_btn            # IconButton: adjuntar
+var _compose: MarginContainer
+var _row: HBoxContainer
+var _field: PanelContainer      # pastilla del campo
+var _emoji_btn                  # IconButton: emoji
+var _tail_btn                   # IconButton: mic <-> enviar
+var _rec_strip: PanelContainer  # tira de grabación
+var _rec_dot: Control
+var _rec_timer: Label
+var _rec_wave                    # Waveform
+var _rec_hint: Label
+var _rec_trash                   # IconButton: cancelar grabación
+var _emoji_menu: PopupMenu
+var _attach_menu: PopupMenu
+var _emoji_values := []
+var _bottom_inset := 0
+var _attach_enabled := true
+var _voice_enabled := true
+var juice = null                 # inyectado por main (háptica/sonido), opcional
 var _recording := false
 var _sel_bar: PanelContainer
 var _lp: Timer
@@ -100,7 +125,17 @@ var _room_menu: PopupMenu
 var _occ_action_menu: PopupMenu
 var _occ_action_ctx := {}
 var _header_actions := true
-var _tools_row: HBoxContainer
+
+# Estado del gesto de voz (máquina de estados, ver docs/input-bar-design.md §5.1).
+var _rec_phase := "idle"        # idle | armed | held | locked | cancel
+var _rec_index := -1            # índice de toque que posee el gesto (-2 = mouse)
+var _rec_origin := Vector2.ZERO
+var _rec_arm_timer: Timer
+var _rec_cancel := false
+var _rec_started_ms := 0
+var _rec_elapsed_ms := 0
+var _tail_mode := "mic"
+var _mobile_override := -1      # -1 = auto; 1/0 fuerza para tests
 
 func _init() -> void:
 	name = "ChatPanel"
@@ -112,6 +147,7 @@ func _build() -> void:
 	v.add_constant_override("separation", 0)
 	# Cabecera con el peer.
 	var head = PanelContainer.new()
+	_head = head
 	head.add_stylebox_override("panel", XatTheme.with_border(XatTheme.box(Palette.BG1, 0, 16, 12), Palette.LINE))
 	_title = Label.new()
 	_title.text = "—"
@@ -221,62 +257,154 @@ func _build() -> void:
 	_anim.wait_time = 0.05
 	_anim.connect("timeout", _state, "update")
 	add_child(_anim)
-	var h = HBoxContainer.new()
-	h.add_constant_override("separation", 8)
+	# Composer: una sola fila con iconos incrustados y botón cola que muta
+	# (mic <-> enviar). Ver docs/input-bar-design.md §3–§5.
+	_compose = MarginContainer.new()
+	_compose.add_constant_override("margin_left", 8)
+	_compose.add_constant_override("margin_right", 8)
+	_compose.add_constant_override("margin_top", 6)
+	_compose.add_constant_override("margin_bottom", 6)
+	_row = HBoxContainer.new()
+	_row.add_constant_override("separation", 8)
+	_attach_btn = IconButton.new()
+	_attach_btn.setup("paperclip", 40, Palette.TEXT_DIM, "Adjuntar (archivo o foto)")
+	_attach_btn.connect("pressed", self, "_on_attach")
+	_row.add_child(_attach_btn)
+	# Pastilla del campo: el borde lo dibuja el PanelContainer (TextEdit sin caja).
+	_field = PanelContainer.new()
+	_field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_field.size_flags_vertical = Control.SIZE_SHRINK_END
+	_field.rect_min_size = Vector2(0, 44)
+	_field.add_stylebox_override("panel", _pill_box(Palette.BG2, Palette.LINE))
+	var field_row = HBoxContainer.new()
+	field_row.add_constant_override("separation", 0)
 	_input = TextEdit.new()
 	_input.wrap_enabled = true
+	_input.context_menu_enabled = true
+	_input.shortcut_keys_enabled = true
 	_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_input.size_flags_vertical = Control.SIZE_SHRINK_END
 	_input.connect("gui_input", self, "_on_input_event")
 	_input.connect("text_changed", self, "_fit_input")
+	_input.connect("text_changed", self, "_update_tail")
+	_input.connect("focus_entered", self, "_on_input_focus", [true])
+	_input.connect("focus_exited", self, "_on_input_focus", [false])
+	var empty = StyleBoxEmpty.new()
+	for side in ["left", "right", "top", "bottom"]:
+		var mv = {"left": 14, "right": 4, "top": 11, "bottom": 11}[side]
+		empty.set("content_margin_" + side, mv)
+	for st in ["normal", "focus", "read_only"]:
+		_input.add_stylebox_override(st, empty)
 	_hint = Label.new()
 	_hint.text = "Escribe un mensaje…"
 	_hint.add_color_override("font_color", Palette.TEXT_DIM)
 	_hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_hint.rect_position = Vector2(15, 10)
+	_hint.rect_position = Vector2(14, 11)
 	_input.add_child(_hint)
-	h.add_child(_input)
-	var tools = HBoxContainer.new()
-	_tools_row = tools
-	tools.add_constant_override("separation", 6)
-	tools.size_flags_vertical = Control.SIZE_SHRINK_END
-	_attach_btn = _tool_button("Adj", "Adjuntar un archivo")
-	_attach_btn.connect("pressed", self, "_open_file_dialog")
-	_cam_btn = _tool_button("Foto", "Tomar una foto con la cámara")
-	_cam_btn.connect("pressed", self, "_on_camera")
-	_mic_btn = _tool_button("Voz", "Grabar un mensaje de voz")
-	_mic_btn.connect("pressed", self, "_on_mic")
-	_mic_cancel = _tool_button("X", "Cancelar la grabación")
-	_mic_cancel.visible = false
-	_mic_cancel.connect("pressed", self, "_on_mic_cancel")
-	tools.add_child(_attach_btn)
-	tools.add_child(_cam_btn)
-	tools.add_child(_mic_btn)
-	tools.add_child(_mic_cancel)
-	h.add_child(tools)
-	var send = Button.new()
-	send.connect("draw", self, "_draw_send", [send])
-	send.rect_min_size = Vector2(52, 52)
-	send.size_flags_vertical = Control.SIZE_SHRINK_END
-	for st in ["normal", "hover", "pressed", "focus"]:
-		var s = XatTheme.box(Palette.USER if st != "hover" else Palette.USER.lightened(0.15), 26, 0, 0)
-		send.add_stylebox_override(st, s)
-	send.connect("pressed", self, "_on_send")
-	h.add_child(send)
-	# Pequeño margen alrededor de la fila de composición (los botones no quedan
-	# pegados al borde inferior/lateral en pantallas de teléfono).
-	var hm = MarginContainer.new()
-	hm.add_constant_override("margin_left", 4)
-	hm.add_constant_override("margin_right", 4)
-	hm.add_constant_override("margin_bottom", 4)
-	hm.add_child(h)
-	f.add_child(hm)
+	field_row.add_child(_input)
+	_emoji_btn = IconButton.new()
+	_emoji_btn.setup("emoji", 36, Palette.TEXT_DIM, "Emoji")
+	_emoji_btn.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_emoji_btn.connect("pressed", self, "_on_emoji")
+	field_row.add_child(_emoji_btn)
+	_field.add_child(field_row)
+	_row.add_child(_field)
+	# Tira de grabación (reemplaza a la pastilla mientras se graba).
+	_rec_strip = PanelContainer.new()
+	_rec_strip.visible = false
+	_rec_strip.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_rec_strip.size_flags_vertical = Control.SIZE_SHRINK_END
+	_rec_strip.rect_min_size = Vector2(0, 44)
+	_rec_strip.add_stylebox_override("panel", _pill_box(Palette.BG2, Palette.LINE))
+	var rec_row = HBoxContainer.new()
+	rec_row.add_constant_override("separation", 8)
+	rec_row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_rec_dot = Control.new()
+	_rec_dot.rect_min_size = Vector2(12, 12)
+	_rec_dot.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_rec_dot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_rec_dot.connect("draw", self, "_draw_rec_dot")
+	rec_row.add_child(_rec_dot)
+	_rec_timer = Label.new()
+	_rec_timer.text = "0:00"
+	_rec_timer.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_rec_timer.add_color_override("font_color", Palette.TEXT)
+	_rec_timer.add_font_override("font", XatTheme.font(Palette.FONT_MONO, Palette.FONT_SIZE - 2))
+	rec_row.add_child(_rec_timer)
+	_rec_wave = Waveform.new()
+	_rec_wave.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_rec_wave.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_rec_wave.rect_min_size = Vector2(60, 24)
+	_rec_wave.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	rec_row.add_child(_rec_wave)
+	_rec_hint = Label.new()
+	_rec_hint.text = "← desliza para cancelar"
+	_rec_hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_rec_hint.add_color_override("font_color", Palette.TEXT_DIM)
+	_rec_hint.add_font_override("font", XatTheme.font(Palette.FONT_REGULAR, Palette.FONT_SIZE - 3))
+	rec_row.add_child(_rec_hint)
+	_rec_trash = IconButton.new()
+	_rec_trash.setup("trash", 40, Palette.ERROR, "Cancelar la grabación")
+	_rec_trash.visible = false
+	_rec_trash.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_rec_trash.connect("pressed", self, "_on_rec_trash")
+	rec_row.add_child(_rec_trash)
+	_rec_strip.add_child(rec_row)
+	_row.add_child(_rec_strip)
+	# Botón cola: mic cuando vacío, enviar con texto o grabando bloqueado.
+	_tail_btn = IconButton.new()
+	_tail_btn.setup("mic", 48, Palette.TEXT, "Grabar un mensaje de voz")
+	_tail_btn.size_flags_vertical = Control.SIZE_SHRINK_END
+	# El mouse/tacto del tail se rastrea en _input (gesto); ignoramos el mouse
+	# del Control para no disparar dos veces con emulate_mouse_from_touch.
+	_tail_btn.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_row.add_child(_tail_btn)
+	_compose.add_child(_row)
+	f.add_child(_compose)
 	foot.add_child(f)
 	v.add_child(foot)
 	add_child(v)
+	_update_tail()
 	_fit_input()
 	_build_select()
 	_build_occupants()
+	_build_emoji_menu()
+	# Timer de armado del gesto: al disparar, el toque se vuelve grabación.
+	_rec_arm_timer = Timer.new()
+	_rec_arm_timer.one_shot = true
+	_rec_arm_timer.wait_time = float(HOLD_DELAY_MS) / 1000.0
+	_rec_arm_timer.connect("timeout", self, "_on_arm_timeout")
+	add_child(_rec_arm_timer)
+
+# Pastilla redondeada del campo/tira (radio 22 = RADIUS + 6).
+func _pill_box(p_bg: Color, p_border: Color) -> StyleBoxFlat:
+	return XatTheme.with_border(XatTheme.box(p_bg, Palette.RADIUS + 6, 0, 0), p_border)
+
+func _draw_rec_dot() -> void:
+	var c = _rec_dot.rect_size * 0.5
+	_rec_dot.draw_circle(c, min(4.0, _rec_dot.rect_size.x * 0.4), Palette.ERROR)
+
+# Menú de emoji mínimo (Fase 1: unos pocos; el picker completo es Fase 2).
+func _build_emoji_menu() -> void:
+	_emoji_values = ["😀", "😂", "😊", "😍", "👍", "🙏", "🎉", "❤️"]
+	_emoji_menu = PopupMenu.new()
+	for i in range(_emoji_values.size()):
+		_emoji_menu.add_item(_emoji_values[i], i)
+	_emoji_menu.connect("id_pressed", self, "_on_emoji_pick")
+	add_child(_emoji_menu)
+
+func _on_emoji() -> void:
+	if _emoji_menu == null:
+		return
+	_emoji_menu.popup_centered()
+
+func _on_emoji_pick(p_id: int) -> void:
+	if p_id < 0 or p_id >= _emoji_values.size():
+		return
+	_input.insert_text_at_cursor(_emoji_values[p_id])
+	_fit_input()
+	_update_tail()
+
 
 # Popup de ocupantes de la sala: cada fila inserta `@nick` en el composer.
 func _build_occupants() -> void:
@@ -345,21 +473,42 @@ func _build_select() -> void:
 	_lp.connect("timeout", self, "_on_long_press")
 	add_child(_lp)
 
-# Flecha hacia arriba dibujada (la fuente no trae ↑).
-func _draw_send(p_btn: Button) -> void:
-	var c = p_btn.rect_size / 2
-	p_btn.draw_polyline(PoolVector2Array([c + Vector2(-7, 2), c + Vector2(0, -6), c + Vector2(7, 2)]), Palette.TEXT, 2.5, true)
-	p_btn.draw_line(c + Vector2(0, -5), c + Vector2(0, 8), Palette.TEXT, 2.5, true)
-
 # Al elegir un chat se puede escribir de inmediato (deferred: el panel puede
 # estar recién visible y aún no aceptar foco).
 func focus_composer() -> void:
 	_input.call_deferred("grab_focus")
 
+# Juice (háptica/sonido) inyectado por main; opcional para instanciar en tests.
+func set_juice(p_juice) -> void:
+	juice = p_juice
+
+# Inset inferior de safe area (barra de gestos). Súmalo al margen del composer.
+func set_bottom_inset(p_px: int) -> void:
+	_bottom_inset = p_px
+	if _compose != null:
+		_compose.add_constant_override("margin_bottom", 6 + p_px)
+
+func _ready() -> void:
+	if get_tree() != null and not get_tree().is_connected("files_dropped", self, "_on_files_dropped"):
+		get_tree().connect("files_dropped", self, "_on_files_dropped")
+
+# Arrastrar y soltar archivos sobre la ventana: se adjunta el primero (Fase 1,
+# envío inmediato como hoy). Alternativa sin arrastre: el botón adjuntar.
+func _on_files_dropped(p_files: PoolStringArray, _screen: int) -> void:
+	if not visible or _peer == "" or p_files.empty() or not _attach_enabled:
+		return
+	emit_signal("attach_picked", _peer, p_files[0])
+
 # En landscape la navegación y el título viven en el sidebar: cabecera compacta.
 func set_nav_visible(p_back: bool, p_title: bool) -> void:
 	back_button.visible = p_back
 	_title.visible = p_title
+
+# Oculta toda la franja de cabecera (en landscape el título/identidad viven en
+# el sidebar y el alto es escaso).
+func set_header_visible(p_visible: bool) -> void:
+	if _head != null:
+		_head.visible = p_visible
 
 # Los botones de acción de sala (Ocupantes/⋯/Salir) pueden vivir en el sidebar.
 func set_header_actions_visible(p_visible: bool) -> void:
@@ -386,18 +535,24 @@ func popup_room_menu() -> void:
 
 # --- Adjuntos (composer) ---
 
-func _tool_button(p_text: String, p_tip: String) -> Button:
-	var b = Button.new()
-	b.text = p_text
-	b.hint_tooltip = p_tip
-	b.focus_mode = Control.FOCUS_NONE
-	b.rect_min_size = Vector2(54, 46)
-	b.size_flags_vertical = Control.SIZE_SHRINK_END
-	for st in ["normal", "hover", "pressed", "focus"]:
-		var bg = Palette.BG2.lightened(0.12) if st == "hover" else Palette.BG2
-		b.add_stylebox_override(st, XatTheme.box(bg, 99, 16, 11))
-	b.add_font_override("font", XatTheme.font(Palette.FONT_MEDIUM, Palette.FONT_SIZE))
-	return b
+# Un solo icono de adjuntar: abre un menú con archivo (selector) y cámara/foto,
+# preservando ambos accesos del composer anterior.
+func _on_attach() -> void:
+	if _peer == "" or not _attach_enabled:
+		return
+	if _attach_menu == null:
+		_attach_menu = PopupMenu.new()
+		_attach_menu.add_item("Archivo…", 1)
+		_attach_menu.add_item("Cámara / Foto…", 2)
+		_attach_menu.connect("id_pressed", self, "_on_attach_menu")
+		add_child(_attach_menu)
+	_attach_menu.popup_centered()
+
+func _on_attach_menu(p_id: int) -> void:
+	if p_id == 1:
+		_open_file_dialog()
+	elif p_id == 2:
+		_on_camera()
 
 func _open_file_dialog() -> void:
 	if _peer == "":
@@ -408,6 +563,25 @@ func _open_file_dialog() -> void:
 	if Engine.has_singleton("XatMedia"):
 		emit_signal("attach_requested", _peer)
 		return
+	# Escritorio con backend nativo (zenity/kdialog/osascript/PowerShell): mejor
+	# que el FileDialog dibujado por el motor.
+	if FilePicker.has_native():
+		if _picker == null:
+			_picker = FilePicker.new()
+			_picker.name = "FilePicker"
+			add_child(_picker)
+			_picker.connect("picked", self, "_on_native_file_picked")
+			_picker.connect("unavailable", self, "_on_picker_unavailable")
+		_picker.open("Elegir archivo", [
+			"Imágenes | *.png *.jpg *.jpeg *.webp *.gif *.bmp *.heic",
+			"Audio | *.ogg *.oga *.opus *.mp3 *.m4a *.wav *.flac",
+			"Todos | *",
+		])
+		return
+	_show_engine_dialog()
+
+# Fallback: FileDialog dibujado por el motor (sin backend nativo disponible).
+func _show_engine_dialog() -> void:
 	if _file_dialog == null:
 		_file_dialog = FileDialog.new()
 		_file_dialog.mode = FileDialog.MODE_OPEN_FILE
@@ -430,6 +604,13 @@ func _open_file_dialog() -> void:
 				break
 	_file_dialog.popup_centered_ratio(0.7)
 
+func _on_native_file_picked(p_path: String) -> void:
+	if _peer != "" and p_path != "":
+		emit_signal("attach_picked", _peer, p_path)
+
+func _on_picker_unavailable() -> void:
+	_show_engine_dialog()
+
 # Galería del teléfono (fallback cuando no hay cámara nativa).
 func open_gallery() -> void:
 	_open_file_dialog()
@@ -442,35 +623,326 @@ func _on_camera() -> void:
 	if _peer != "":
 		emit_signal("camera_requested", _peer)
 
-func _on_mic() -> void:
-	if _peer == "":
-		return
-	_recording = not _recording
-	emit_signal("voice_toggle", _peer, _recording)
-	set_recording(_recording, 0)
+# --- Gesto de voz y botón cola (ver docs/input-bar-design.md §5–§6) ---
 
-func _on_mic_cancel() -> void:
+func _is_mobile() -> bool:
+	if _mobile_override >= 0:
+		return _mobile_override == 1
+	return OS.has_feature("mobile")
+
+func _juice_haptic(p_kind: String) -> void:
+	if juice != null:
+		juice.haptic(p_kind)
+
+# El botón cola muta: mic (vacío) / enviar (con texto) / enviar (grabación
+# bloqueada); durante la grabación en curso sin bloquear sigue mostrando mic.
+func _update_tail() -> void:
+	if _input == null:
+		return
+	var has_text = _input.text.strip_edges() != ""
+	var mode = "mic"
+	if _recording:
+		mode = "send" if _rec_phase == "locked" else "mic"
+	elif has_text:
+		mode = "send"
+	_tail_set_mode(mode)
+
+func _tail_set_mode(p_mode: String) -> void:
+	if _tail_btn == null:
+		return
+	_tail_mode = p_mode
+	if p_mode == "send":
+		_tail_btn.set_glyph("send")
+		_tail_btn.set_icon_color(Palette.TEXT)
+		_tail_btn.hint_tooltip = "Enviar"
+		for st in ["normal", "pressed", "focus", "disabled"]:
+			_tail_btn.add_stylebox_override(st, XatTheme.box(Palette.USER, 24, 0, 0))
+		_tail_btn.add_stylebox_override("hover", XatTheme.box(Palette.USER.lightened(0.15), 24, 0, 0))
+	else:
+		_tail_btn.set_glyph("mic")
+		_tail_btn.set_icon_color(Palette.TEXT)
+		_tail_btn.hint_tooltip = "Grabar un mensaje de voz"
+		for st in ["normal", "pressed", "focus", "disabled"]:
+			_tail_btn.add_stylebox_override(st, XatTheme.box(Palette.BG2, 24, 0, 0))
+		_tail_btn.add_stylebox_override("hover", XatTheme.box(Palette.BG2.lightened(0.15), 24, 0, 0))
+
+# Un clic/tap "seco" en el botón cola sin gesto (p. ej. activación externa).
+func _on_tail() -> void:
 	if _peer == "":
 		return
-	_recording = false
-	set_recording(false, 0)
+	if _recording or _rec_phase in ["locked", "held", "cancel"]:
+		_rec_send()
+		return
+	if _input != null and _input.text.strip_edges() != "":
+		_on_send()
+		return
+	if _voice_enabled:
+		_start_locked_recording()
+
+func _on_input_focus(p_entered: bool) -> void:
+	if _field == null:
+		return
+	_field.add_stylebox_override("panel", _pill_box(Palette.BG2, Palette.AGENT_EDGE if p_entered else Palette.LINE))
+
+# Gesto del composer: rastrea el toque del botón cola por ÍNDICE. Godot 3 no
+# tiene pointer capture, así que se consume el evento acá y se sigue por drag.
+func _composer_gesture(p_event) -> bool:
+	if _tail_btn == null:
+		return false
+	if p_event is InputEventScreenTouch:
+		if p_event.pressed:
+			if _tail_hit(p_event.position):
+				_gesture_press(p_event.index, p_event.position)
+				_consume_input()
+				return true
+		elif p_event.index == _rec_index:
+			_consume_input()
+			_gesture_release()
+			return true
+	elif p_event is InputEventScreenDrag:
+		if p_event.index == _rec_index:
+			_consume_input()
+			_gesture_move(p_event.position)
+			return true
+	elif p_event is InputEventMouseButton and p_event.button_index == BUTTON_LEFT:
+		if p_event.pressed:
+			if _tail_hit(p_event.position):
+				_gesture_press(-2, p_event.position)
+				_consume_input()
+				return true
+			elif _rec_index == -2 and _rec_phase != "idle":
+				_consume_input()
+				return true
+		elif _rec_index == -2:
+			_consume_input()
+			_gesture_release()
+			return true
+	elif p_event is InputEventMouseMotion and _rec_index == -2 and _rec_phase in ["armed", "held", "cancel"]:
+		_consume_input()
+		_gesture_move(p_event.position)
+		return true
+	return false
+
+func _consume_input() -> void:
+	var t = get_tree()
+	if t != null:
+		t.set_input_as_handled()
+
+func _tail_hit(p_pos: Vector2) -> bool:
+	return _tail_btn.get_global_rect().grow(6).has_point(p_pos)
+
+func _gesture_press(p_index: int, p_pos: Vector2) -> void:
+	if _rec_phase == "locked":
+		_rec_send()
+		return
+	if _rec_phase != "idle" or _recording:
+		return
+	if _input != null and _input.text.strip_edges() != "":
+		_rec_index = p_index
+		_rec_phase = "tap_send"   # enviar recién al soltar (WCAG 2.5.2)
+		return
+	if not _voice_enabled:
+		return
+	_rec_index = p_index
+	_rec_origin = p_pos
+	_rec_cancel = false
+	# Escritorio (mouse): clic directo a grabación bloqueada, sin mantener.
+	if p_index == -2:
+		_rec_phase = "armed_click"
+		return
+	_rec_phase = "armed"
+	_rec_arm_timer.start()
+
+func _gesture_move(p_pos: Vector2) -> void:
+	if _rec_phase in ["idle", "locked", "tap_send", "armed_click"]:
+		return
+	var dx = p_pos.x - _rec_origin.x
+	var dy = p_pos.y - _rec_origin.y
+	var lock_p = clamp(-dy / LOCK_THRESHOLD, 0.0, 1.0)
+	if _rec_phase == "armed":
+		# Antes de armar sólo bloquear (subir) es válido; cancelar se ignora.
+		_rec_wave.set_progress(lock_p, 0.0)
+		if lock_p >= 1.0:
+			_lock_recording()
+		return
+	var cancel_p = clamp(-dx / CANCEL_THRESHOLD, 0.0, 1.0)
+	_rec_wave.set_progress(lock_p, cancel_p)
+	if cancel_p >= 1.0:
+		if not _rec_cancel:
+			_rec_cancel = true
+			_rec_phase = "cancel"
+			_juice_haptic("alert")
+			_tint_rec_strip(true)
+			_rec_hint.text = "Suelta para cancelar"
+		return
+	if _rec_cancel:
+		_rec_cancel = false
+		_rec_phase = "held"
+		_tint_rec_strip(false)
+		_rec_hint.text = "← desliza para cancelar"
+	if lock_p >= 1.0:
+		_lock_recording()
+
+func _gesture_release() -> void:
+	if _rec_arm_timer != null:
+		_rec_arm_timer.stop()
+	var phase = _rec_phase
+	_rec_index = -1
+	if phase in ["idle", "locked"]:
+		return
+	if phase == "tap_send":
+		_rec_phase = "idle"
+		_on_send()
+		return
+	if phase == "cancel":
+		_rec_phase = "idle"
+		_rec_cancel = false
+		_tint_rec_strip(false)
+		_rec_cancel_recording()
+		return
+	if phase == "armed":
+		# Tap corto sin llegar a grabar: grabación bloqueada (WCAG 2.5.1).
+		_start_locked_recording()
+		return
+	if phase == "armed_click":
+		# Escritorio: clic = grabación bloqueada.
+		_start_locked_recording()
+		return
+	# held: comprobar duración mínima antes de enviar.
+	var elapsed = OS.get_ticks_msec() - _rec_started_ms
+	_rec_phase = "idle"
+	if elapsed < MIN_RECORD_MS:
+		_rec_cancel_recording()
+		_juice_haptic("tick")
+		if juice != null:
+			juice.toast("Mantén para grabar")
+		return
+	_rec_send()
+
+func _on_arm_timeout() -> void:
+	_start_recording()
+
+func _start_recording() -> void:
+	if _rec_phase != "armed":
+		return
+	_rec_phase = "held"
+	_rec_started_ms = OS.get_ticks_msec()
+	_begin_recording_ui(false)
+	emit_signal("voice_toggle", _peer, true)
+
+func _start_locked_recording() -> void:
+	if _recording or _rec_phase == "locked":
+		return
+	_rec_phase = "locked"
+	_rec_index = -1
+	_rec_cancel = false
+	_rec_started_ms = OS.get_ticks_msec()
+	_begin_recording_ui(true)
+	emit_signal("voice_toggle", _peer, true)
+
+func _lock_recording() -> void:
+	if _rec_phase == "locked":
+		return
+	var was = _recording
+	if _rec_arm_timer != null:
+		_rec_arm_timer.stop()
+	_rec_phase = "locked"
+	_rec_cancel = false
+	_tint_rec_strip(false)
+	if not was:
+		_rec_started_ms = OS.get_ticks_msec()
+		_begin_recording_ui(true)
+		emit_signal("voice_toggle", _peer, true)
+	else:
+		_rec_trash.visible = true
+		_rec_hint.text = "Bloqueado"
+		_tail_set_mode("send")
+	_juice_haptic("success")
+	if juice != null:
+		juice.pop(_tail_btn)
+
+func _rec_send() -> void:
+	if _rec_arm_timer != null:
+		_rec_arm_timer.stop()
+	_rec_phase = "idle"
+	_rec_index = -1
+	_rec_cancel = false
+	emit_signal("voice_toggle", _peer, false)
+
+func _rec_cancel_recording() -> void:
+	if _rec_arm_timer != null:
+		_rec_arm_timer.stop()
+	_rec_phase = "idle"
+	_rec_index = -1
+	_rec_cancel = false
+	if _recording:
+		_juice_haptic("error")
+		if juice != null:
+			juice.play("alert")
 	emit_signal("voice_cancel", _peer)
 
-# La app avisa del estado real de la grabación (por si el micro falla).
-func set_recording(p_on: bool, p_elapsed_ms: int) -> void:
+func _on_rec_trash() -> void:
+	if _peer != "" and _recording:
+		_rec_cancel_recording()
+
+func _begin_recording_ui(p_locked: bool) -> void:
+	_recording = true
+	_rec_cancel = false
+	_rec_elapsed_ms = 0
+	if _field != null:
+		_field.visible = false
+	if _rec_strip != null:
+		_rec_strip.visible = true
+	if _rec_wave != null:
+		_rec_wave.clear()
+	if _rec_timer != null:
+		_rec_timer.text = "0:00"
+	if _rec_trash != null:
+		_rec_trash.visible = p_locked
+	if _rec_hint != null:
+		_rec_hint.text = "Bloqueado" if p_locked else "← desliza para cancelar"
+	_tint_rec_strip(false)
+	_tail_set_mode("send" if p_locked else "mic")
+	_juice_haptic("receive")
+	if juice != null:
+		juice.play("tool_start")
+
+func _tint_rec_strip(p_on: bool) -> void:
+	if _rec_strip == null:
+		return
+	_rec_strip.add_stylebox_override("panel", _pill_box(Palette.BG2, Palette.ERROR if p_on else Palette.LINE))
+
+# La app avisa del estado real de la grabación (por si el micro falla) y empuja
+# la amplitud real del micrófono para la forma de onda (p_level < 0 = sin dato).
+func set_recording(p_on: bool, p_elapsed_ms: int, p_level: float = -1.0) -> void:
 	_recording = p_on
-	if _mic_btn == null:
+	if _rec_strip == null:
 		return
 	if p_on:
-		_mic_btn.text = "Enviar " + Media.format_duration_ms(p_elapsed_ms)
-		_mic_btn.add_color_override("font_color", Palette.ERROR)
-		if _mic_cancel != null:
-			_mic_cancel.visible = true
+		_rec_elapsed_ms = p_elapsed_ms
+		_rec_timer.text = Media.format_duration_ms(p_elapsed_ms)
+		_field.visible = false
+		_rec_strip.visible = true
+		_rec_trash.visible = _rec_phase == "locked"
+		_rec_hint.text = "Bloqueado" if _rec_phase == "locked" else "← desliza para cancelar"
+		_tail_set_mode("send" if _rec_phase == "locked" else "mic")
+		if p_level >= 0.0 and _rec_wave != null:
+			_rec_wave.push(p_level)
 	else:
-		_mic_btn.text = "Voz"
-		_mic_btn.add_color_override("font_color", Palette.TEXT)
-		if _mic_cancel != null:
-			_mic_cancel.visible = false
+		_rec_phase = "idle"
+		_rec_index = -1
+		_rec_cancel = false
+		_rec_elapsed_ms = 0
+		if _rec_arm_timer != null:
+			_rec_arm_timer.stop()
+		_field.visible = true
+		_rec_strip.visible = false
+		_rec_trash.visible = false
+		if _rec_wave != null:
+			_rec_wave.clear()
+		_tint_rec_strip(false)
+		_update_tail()
+
 
 func _on_bubble_media_action(p_rec: Dictionary, p_action: String) -> void:
 	emit_signal("media_action", _peer, p_rec, p_action)
@@ -485,6 +957,9 @@ func _input(p_event) -> void:
 		return
 	if _file_dialog != null and _file_dialog.visible:
 		return
+	# Gesto del composer primero (consume el toque del botón cola).
+	if _composer_gesture(p_event):
+		return
 	# Rueda/trackpad: paso propio y suave (ver _handle_wheel).
 	if _handle_wheel(p_event):
 		return
@@ -495,11 +970,6 @@ func _input(p_event) -> void:
 		pressed = p_event.pressed
 		pos = p_event.position
 	elif p_event is InputEventScreenDrag:
-		# Mientras se ajusta una selección, el arrastre extiende/gobierna el rango.
-		if _sel_bubble != null and is_instance_valid(_sel_bubble):
-			_press_pos = p_event.position
-			_sel_bubble.drag_selection(p_event.position)
-			return
 		if _press and p_event.position.distance_to(_press_pos) > 14.0:
 			_press_moved = true
 			if _lp != null:
@@ -508,9 +978,9 @@ func _input(p_event) -> void:
 	else:
 		return
 	if not get_global_rect().has_point(pos):
-		# Si soltó fuera con una selección activa, cerrar el arrastre.
-		if not pressed and _sel_bubble != null and is_instance_valid(_sel_bubble):
-			_sel_bubble.end_selection_drag()
+		return
+	# El composer tiene su propia selección/gesto: no iniciar pulsación larga acá.
+	if _in_composer(pos):
 		return
 	if pressed:
 		# Un toque sobre la barra no debe disparar otra selección.
@@ -525,9 +995,11 @@ func _input(p_event) -> void:
 		_press = false
 		if _lp != null:
 			_lp.stop()
-		# Fin del gesto: sellar el rango seleccionado (se conserva la barra).
-		if _sel_bubble != null and is_instance_valid(_sel_bubble):
-			_sel_bubble.end_selection_drag()
+
+# ¿El punto cae dentro del composer? (para no robar el gesto de selección).
+func _in_composer(p_pos: Vector2) -> bool:
+	return _compose != null and _compose.get_global_rect().has_point(p_pos)
+
 
 # Scroll de rueda/trackpad con paso fijo. Devuelve true si consumió el evento.
 # El ScrollContainer por defecto mueve page/8 por muesca: con ventanas grandes
@@ -639,6 +1111,8 @@ func set_media_local(p_id: String, p_path: String) -> void:
 
 func set_peer(p_bare: String) -> void:
 	_exit_selection()
+	if _recording:
+		_rec_cancel_recording()
 	_peer = p_bare
 	_room = ""
 	_room_nick = ""
@@ -704,9 +1178,17 @@ func set_room_subject(p_subject: String) -> void:
 	if _room != "":
 		_title.hint_tooltip = _room + (("\n" + p_subject) if p_subject != "" else "")
 
+# En salas se suprimen adjuntos y voz (comportamiento previo): se deshabilitan
+# el botón de adjuntar y el arranque de grabación por gesto/tap.
 func _set_tools_visible(p_visible: bool) -> void:
-	if _tools_row != null:
-		_tools_row.visible = p_visible
+	_attach_enabled = p_visible
+	_voice_enabled = p_visible
+	if _attach_btn != null:
+		_attach_btn.disabled = not p_visible
+		_attach_btn.set_icon_color(Palette.ASLEEP if not p_visible else Palette.TEXT_DIM)
+	if not p_visible and _recording:
+		_rec_cancel_recording()
+	_update_tail()
 
 func _refresh_occupants() -> void:
 	_occ_btn.text = "Ocupantes (%d)" % _occupants.size()
@@ -821,6 +1303,7 @@ func _insert_mention(p_nick: String) -> void:
 	if not (OS.get_name() in ["Android", "iOS"]):
 		_input.grab_focus()
 	_fit_input()
+	_update_tail()
 
 # Tras cambiar el zoom, conservar el punto de lectura: ancla el ÚLTIMO mensaje
 # visible (no el primero) a su misma posición en pantalla.
@@ -1094,6 +1577,11 @@ func _render_chunked(p_seq: int) -> void:
 	_end_render(keep)
 
 func _append_bubble(p_rec: Dictionary, p_new: bool) -> void:
+	# Si `_bubbles` quedó desincronizado de `_messages[_first:]` (p. ej. un render
+	# por tandas abortado por otro contacto), reconstruir en vez de indexar mal.
+	if _bubbles.size() != _messages.size() - 1 - _first:
+		_rebuild()
+		return
 	_make_bubble(_messages.size() - 1, p_new)
 	if _pinned:
 		_trim()
@@ -1143,8 +1631,8 @@ func _make_bubble(i: int, p_new: bool) -> void:
 		_bub(i - 1).set_group_last(true)
 	_break = false
 	var last = i == _messages.size() - 1 or _messages[i + 1].get("direction", "in") != dir
-	if same_prev:
-		_bubbles[i - 1 - _first].set_group_last(false)
+	if same_prev and _bub(i - 1) != null:
+		_bub(i - 1).set_group_last(false)
 	var gap = Palette.GAP if sep else (0 if i == _first else (Palette.GAP if same_prev else Palette.GROUP_GAP))
 	var b = Bubble.new()
 	b.connect("media_action", self, "_on_bubble_media_action")
@@ -1322,10 +1810,18 @@ static func day_label(p_day: String, p_today: String) -> String:
 	return out
 
 func _on_input_event(p_ev: InputEvent) -> void:
-	if p_ev is InputEventKey and p_ev.pressed and not p_ev.shift \
-			and (p_ev.scancode == KEY_ENTER or p_ev.scancode == KEY_KP_ENTER):
-		_input.accept_event()
-		_on_send()
+	if not (p_ev is InputEventKey) or not p_ev.pressed or p_ev.echo:
+		return
+	if p_ev.scancode != KEY_ENTER and p_ev.scancode != KEY_KP_ENTER:
+		return
+	# Móvil: Enter inserta salto de línea (se envía con el botón cola).
+	if _is_mobile():
+		return
+	# Escritorio: Shift+Enter inserta salto de línea; Enter / Ctrl+Enter envían.
+	if p_ev.shift:
+		return
+	_input.accept_event()
+	_on_send()
 
 # Crece de 1 a MAX_LINES líneas visuales (incluye las envueltas).
 func _fit_input() -> void:
@@ -1344,5 +1840,9 @@ func _on_send() -> void:
 		return
 	_input.text = ""
 	_fit_input()
+	_update_tail()
+	if juice != null:
+		juice.play("send")
 	_clear_unread()
 	emit_signal("message_submitted", _peer, text)
+

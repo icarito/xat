@@ -56,6 +56,8 @@ func _init():
 	check(load("res://addons/xat_xmpp/xmpp/push.gd") != null, "push.gd compila")
 	check(load("res://addons/xat_xmpp/ui/add_contact_dialog.gd") != null, "add_contact_dialog.gd compila")
 	check(load("res://addons/xat_xmpp/ui/notifier.gd") != null, "notifier.gd compila")
+	check(load("res://addons/xat_xmpp/ui/file_picker.gd") != null, "file_picker.gd compila")
+	check(load("res://addons/xat_xmpp/ui/clipboard_image.gd") != null, "clipboard_image.gd compila")
 	var transport_script = load("res://addons/xat_xmpp/xmpp/transport.gd")
 	var transport = transport_script.new()
 	check(transport.available(), "transport ve el modulo nativo")
