@@ -18,6 +18,16 @@ var _players := []
 var _next := 0
 var _layer: CanvasLayer
 var _tex: ImageTexture
+var _silent_cached = null
+
+# Detecta corridas sin salida de audio (tests headless): --no-window, o
+# XAT_SILENT. Sin esto los SFX del juice suenan durante tools/run_tests.sh
+# (el binario del fork usa SDL2 y no respeta AUDIODRIVER=Dummy).
+func _silent() -> bool:
+	if _silent_cached == null:
+		var args = OS.get_cmdline_args()
+		_silent_cached = args.has("--no-window") or args.has("--headless") or OS.get_environment("XAT_SILENT") == "1"
+	return bool(_silent_cached)
 
 func _ready():
 	load_settings()
@@ -81,7 +91,7 @@ static func load_wav(path: String) -> AudioStreamSample:
 	return null
 
 func play(sfx: String):
-	if not settings["sound_enabled"] or _players.empty():
+	if _silent() or not settings["sound_enabled"] or _players.empty():
 		return
 	var now = OS.get_ticks_msec()
 	if now - _last.get(sfx, -THROTTLE_MS) < THROTTLE_MS:

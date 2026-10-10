@@ -35,7 +35,7 @@ for t in $TESTS; do
 	# sin audio. El binario frt puede crashear al salir con todos los checks ok:
 	# mirar ok/FAIL, no sólo el rc.
 	out=$(env -u WAYLAND_DISPLAY -u DISPLAY SDL_VIDEODRIVER=offscreen AUDIODRIVER=Dummy \
-		XAT_AUTOCONNECT=0 XDG_DATA_HOME="$test_data_home" \
+		XAT_AUTOCONNECT=0 XAT_SILENT=1 XDG_DATA_HOME="$test_data_home" \
 		timeout 60 "$BIN" --no-window --path app -s "$PWD/$t" 2>&1); rc=$?
 	ok=$(printf '%s\n' "$out" | grep -c '^ok' || true)
 	fail=$(printf '%s\n' "$out" | grep -c '^FAIL' || true)

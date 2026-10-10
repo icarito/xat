@@ -19,8 +19,16 @@ func _init():
 	get_root().add_child(c)
 
 	j.set_setting("sound_enabled", false)
+	j._silent_cached = false # el runner corre con XAT_SILENT=1; probar el path con audio
 	j.play("receive")
 	check(j._last.empty(), "play sin sonido es no-op")
+	# Modo silencioso (tests headless): play es no-op aunque sound_enabled.
+	j.set_setting("sound_enabled", true)
+	j._silent_cached = true
+	j._last.clear()
+	j.play("receive")
+	check(j._last.empty(), "play en modo silencioso es no-op")
+	j._silent_cached = false
 	j.set_setting("sound_enabled", true)
 	j.play("receive")
 	check(j._last.has("receive"), "play con sonido")
