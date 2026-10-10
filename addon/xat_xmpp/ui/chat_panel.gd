@@ -690,7 +690,11 @@ func _on_attach() -> void:
 		_attach_menu.add_item("Cámara / Foto…", 2)
 		_attach_menu.connect("id_pressed", self, "_on_attach_menu")
 		add_child(_attach_menu)
-	_attach_menu.popup_centered()
+	# Posicionar bajo el botón adjuntar (popup_centered podía quedar fuera de
+	# una ventana chica y parecer que "no hace nada").
+	var rect = _attach_btn.get_global_rect()
+	_attach_menu.rect_position = Vector2(rect.position.x, rect.position.y - 8)
+	_attach_menu.popup()
 
 func _on_attach_menu(p_id: int) -> void:
 	if p_id == 1:
@@ -1629,6 +1633,14 @@ func deselect_all() -> void:
 	for b in _bubbles:
 		if is_instance_valid(b) and b.has_method("deselect"):
 			b.deselect()
+
+# True si p_pos (global) cae sobre el texto de alguna burbuja: en ese caso un
+# clic puede iniciar/continuar una selección y NO hay que deseleccionar.
+func is_point_on_bubble(p_pos: Vector2) -> bool:
+	for b in _bubbles:
+		if is_instance_valid(b) and b.has_method("text_global_rect") and b.text_global_rect().has_point(p_pos):
+			return true
+	return false
 
 func set_history(p_rows: Array) -> void:
 	_fill_rows(p_rows)

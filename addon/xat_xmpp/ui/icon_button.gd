@@ -51,8 +51,13 @@ func _glyph(g: String, c: Vector2, r: float, col: Color) -> void:
 			draw_polyline(PoolVector2Array([c + Vector2(-r * 0.62, r * 0.15), c + Vector2(0, -r * 0.62), c + Vector2(r * 0.62, r * 0.15)]), col, w, true)
 			draw_line(c + Vector2(0, -r * 0.5), c + Vector2(0, r * 0.78), col, w, true)
 		"paperclip":
-			draw_arc(c, r * 0.58, -PI * 0.85, PI * 0.55, 24, col, w, true)
-			draw_arc(c + Vector2(0, -r * 0.12), r * 0.32, -PI * 0.85, PI * 0.5, 18, col, w, true)
+			# Clip diagonal estilizado: cuerpo (dos trazos paralelos) + gancho.
+			var a = c + Vector2(-r * 0.5, r * 0.5)
+			var b = c + Vector2(r * 0.42, -r * 0.42)
+			draw_line(a, b, col, w, true)
+			draw_line(a + Vector2(r * 0.34, r * 0.34), b + Vector2(-r * 0.34, r * 0.34), col, w, true)
+			draw_arc(c + Vector2(r * 0.5, -r * 0.5), r * 0.34, PI * 0.5, PI * 1.5, 16, col, w, true)
+			draw_arc(c + Vector2(-r * 0.5, r * 0.5), r * 0.34, -PI * 0.5, PI * 0.5, 16, col, w, true)
 		"emoji":
 			draw_arc(c, r * 0.72, 0.0, TAU, 30, col, w, true)
 			draw_circle(c + Vector2(-r * 0.26, -r * 0.18), w * 0.7, col)

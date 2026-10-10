@@ -62,6 +62,8 @@ var _roster_hidden := false # desktop: roster colapsado (más ancho para el chat
 var _mind_hidden := false   # desktop: mente colapsada a mano
 var _roster_toggle
 var _search_toggle
+var _plus_btn
+var _plus_menu
 var _header_orb
 var _header_avatar
 var _show_roster := true # vista de un panel: qué se ve
@@ -80,6 +82,7 @@ var _zoom_target := 1.0 # factor de zoom objetivo (se aplica coalescido en _proc
 var _sidebar
 var _sidebar_title
 var _sidebar_identity
+var _sb_back
 var _sb_add
 var _sb_room
 var _sb_occ
@@ -129,6 +132,10 @@ var _own_avatar_type := "image/png"
 
 func _ready() -> void:
 	set_process(false) # el zoom se aplica coalescido on-demand
+	# El back de Android navega dentro de la app; _notification decide cuándo
+	# salir (set_quit_on_go_back) para que no cierre en medio de una conversación.
+	if OS.get_name() == "Android":
+		get_tree().set_quit_on_go_back(false)
 	theme = XatTheme.build()
 	juice = Juice.new()
 	add_child(juice)
@@ -242,6 +249,22 @@ func _ready() -> void:
 	_roster_toggle.hint_tooltip = "Mostrar/ocultar contactos"
 	_roster_toggle.connect("pressed", self, "_toggle_roster")
 	_chat.header_slot.add_child(_roster_toggle)
+	# Botón ＋ (desktop): añadir contacto, unirse a sala o ajustes. Reemplaza los
+	# botones del roster (que estorban sobre la vista de mensajes).
+	_plus_btn = Button.new()
+	_plus_btn.text = "＋"
+	_plus_btn.flat = true
+	_plus_btn.focus_mode = Control.FOCUS_NONE
+	_plus_btn.hint_tooltip = "Nuevo: contacto, sala o ajustes"
+	_plus_btn.connect("pressed", self, "_on_plus")
+	_chat.header_slot.add_child(_plus_btn)
+	_plus_menu = PopupMenu.new()
+	_plus_menu.add_item("Añadir contacto…", 1)
+	_plus_menu.add_item("Unirse a una sala…", 2)
+	_plus_menu.add_separator()
+	_plus_menu.add_item("Ajustes de la cuenta", 3)
+	_plus_menu.connect("id_pressed", self, "_on_plus_menu")
+	add_child(_plus_menu)
 	_search_toggle = Button.new()
 	_search_toggle.text = "🔍"
 	_search_toggle.flat = true
@@ -706,6 +729,21 @@ func _on_muc_error(p_room: String, p_condition: String) -> void:
 		msg = "La sala es sólo para miembros"
 	juice.play("alert")
 	juice.toast(msg, P.ERROR)
+
+func _on_plus() -> void:
+	if _plus_menu == null or _plus_btn == null:
+		return
+	_plus_menu.rect_position = Vector2(_plus_btn.get_global_rect().position.x, _plus_btn.get_global_rect().position.y + _plus_btn.rect_size.y)
+	_plus_menu.popup()
+
+func _on_plus_menu(p_id: int) -> void:
+	match p_id:
+		1:
+			_on_add_contact_requested()
+		2:
+			_on_join_room_requested()
+		3:
+			_on_sidebar_profile()
 
 func _on_search_toggle() -> void:
 	if _chat.search_open():
@@ -1643,6 +1681,14 @@ func _build_sidebar() -> void:
 	_sidebar_title.add_color_override("font_color", P.TEXT)
 	_sidebar_title.add_font_override("font", XatTheme.font(P.FONT_MEDIUM, P.FONT_SIZE))
 	tm.add_child(_sidebar_title)
+	# Botón para volver a la lista de contactos cuando hay un chat abierto (en
+	# landscape la cabecera del chat se oculta, así que la navegación vive acá).
+	_sb_back = Button.new()
+	_sb_back.text = "←  Contactos"
+	_sb_back.visible = false
+	_sb_back.focus_mode = Control.FOCUS_NONE
+	_sb_back.connect("pressed", self, "_on_back")
+	sv.add_child(_sb_back)
 	# Arriba: acceso al perfil/cuenta y a "acerca de".
 	var top = HBoxContainer.new()
 	top.alignment = BoxContainer.ALIGN_CENTER
@@ -1810,6 +1856,8 @@ func _refresh_sidebar() -> void:
 	var roster = _peer == "" or _show_roster
 	var in_room = _peer != "" and session.is_room(_peer) and not roster
 	_sidebar_title.text = _peer.split("@")[0] if _peer != "" else "xat"
+	if _sb_back != null:
+		_sb_back.visible = _peer != "" and not roster
 	_sb_add.visible = true
 	_sb_room.visible = true
 	_sb_occ.visible = in_room
@@ -1882,9 +1930,13 @@ func _update_panes(p_single: bool, p_mind: bool) -> void:
 	# sidebar y el alto se gana para los mensajes.
 	_chat.set_header_visible(not landscape)
 	_layout_identity(landscape)
-	# Los botones chicos del roster y de la cabecera del chat pasan al sidebar.
-	_roster.set_chrome_visible(not landscape)
+	# Los botones del roster (añadir/sala y pie de ajustes) se ocultan cuando el
+	# roster convive con el chat en desktop: estorban sobre la vista de mensajes.
+	# En pantalla de un solo panel (móvil) el roster los muestra.
+	_roster.set_chrome_visible(p_single)
 	_chat.set_header_actions_visible(not landscape)
+	if _plus_btn != null:
+		_plus_btn.visible = not p_single
 	if _roster.has_method("set_columns"):
 		_roster.set_columns(_landscape_columns())
 	_refresh_sidebar()
@@ -1912,12 +1964,18 @@ func _on_mind_back() -> void:
 # Atrás del sistema (Android): cierra la mente o vuelve al roster según el panel.
 func _notification(p_what: int) -> void:
 	if p_what == NOTIFICATION_WM_GO_BACK_REQUEST:
+		# Back de Android: navegar hacia atrás; sólo cierra si estamos en el
+		# roster raíz (sin conversación abierta). Se desactiva el cierre
+		# automático en _ready (set_quit_on_go_back(false)), así que aquí se
+		# decide explícitamente.
 		if _lightbox.visible:
 			_lightbox.close()
 		elif _mind_pinned:
 			_on_mind_back()
-		elif _single_pane() and _chat.visible:
+		elif _chat.visible and (_single_pane() or _peer != ""):
 			_on_back()
+		elif not _account.visible:
+			get_tree().quit()
 
 # En móvil la base de stretch del proyecto es portrait (420x880): al girar a
 # landscape Godot encogería todo para encajar la altura y la letra se ve chica.
@@ -1993,10 +2051,11 @@ func _toggle_roster() -> void:
 
 # Zoom de letra como en un navegador: Ctrl+scroll, Ctrl+= y Ctrl+-.
 func _input(p_event) -> void:
-	# Un clic en cualquier lado quita la selección de texto del chat (el doble/
-	# triple clic la vuelven a crear después, en el propio RichTextLabel).
+	# Un clic fuera de las burbujas quita la selección de texto del chat. Sobre una
+	# burbuja no, para no romper el arrastre de selección (el RichTextLabel la
+	# gestiona).
 	if p_event is InputEventMouseButton and p_event.pressed and p_event.button_index == BUTTON_LEFT:
-		if _chat != null:
+		if _chat != null and not _chat.is_point_on_bubble(p_event.position):
 			_chat.deselect_all()
 	if p_event is InputEventMouseButton and p_event.control and p_event.pressed:
 		if p_event.button_index == BUTTON_WHEEL_UP:
