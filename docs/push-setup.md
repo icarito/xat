@@ -97,9 +97,13 @@ En `app/project.godot`:
 [xat]
 push_service_android="fcm-push.hablar.fuentelibre.org"
 push_service_ios="apns-push.hablar.fuentelibre.org"
+firebase_api_key="..."
+firebase_app_id="..."
+firebase_project_id="..."
+firebase_sender_id="..."
 ```
-Y actualizar `.github/box3d_release` a `v0.5.8-xmpp` (o el tag vigente), luego
-reexportar la app.
+Y `.github/box3d_release` apunta al tag vigente (v0.5.11-xmpp), luego reexportar
+la app.
 
 ## 4. Verificación
 
@@ -114,3 +118,44 @@ reexportar la app.
 - Silenciar conversaciones: pasar `muted` a `session.enable_push(...)`.
 - Agrupamiento por conversación (60 s) + notificación estable (reemplaza, no
   apila); las ediciones de streaming no disparan push (`push_hints_filter`).
+
+## 6. CI de la app (`.github/workflows/release.yml`)
+
+En un tag `v*` (o `workflow_dispatch` con `platform=all`) construye y publica:
+
+- **android**: APK (firmado con keystore si hay secretos; si no, debug).
+- **linux**: binario `xat-<ver>-linux.x86_64` (templates `linux_x11_64_*_xmpp`).
+- **macos**: `xat-<ver>-macos.zip`.
+- **ios**: IPA firmado y **subida a TestFlight** (gated por secretos).
+
+Secretos (Settings → Secrets and variables → Actions):
+
+| Secreto | Uso |
+|---|---|
+| `IOS_CERT_P12_B64` / `IOS_CERT_PASSWORD` | certificado Apple Distribution (base64) |
+| `IOS_PROVISION_B64` | perfil de aprovisionamiento (base64) |
+| `APP_STORE_CONNECT_KEY_ID` / `APP_STORE_CONNECT_ISSUER_ID` / `APP_STORE_CONNECT_API_KEY_P8` | API key de **App Store Connect** para subir a TestFlight (rol App Manager; **no** es la key de APNs) |
+| `ANDROID_KEYSTORE_B64` / `ANDROID_KEYSTORE_PASS` / `ANDROID_KEY_ALIAS` | firmar el APK de release |
+
+**Pendiente para que iOS/TestFlight pase** (el build `v0.1.0` falló en el
+archive):
+
+> `error: Provisioning profile "xat App Store CI" doesn't include the Push
+> Notifications capability / the aps-environment entitlement.`
+
+El App ID `org.fuentelibre.xat` ya tiene **Push Notifications**, pero el perfil
+`xat App Store CI` se creó **antes**: hay que **regenerarlo** (Apple Developer →
+Profiles → editar el perfil → Save, o crear uno nuevo App Store con esa App ID),
+descargar el `.mobileprovision`, pasarlo a base64 y actualizar el secreto
+`IOS_PROVISION_B64`:
+
+```bash
+base64 -w0 perfil.mobileprovision   # pegar en el secreto IOS_PROVISION_B64
+```
+
+Luego re-ejecutar:
+
+```bash
+gh workflow run release.yml --repo icarito/xat -f platform=all
+# o pushear un tag nuevo (v0.1.1)
+```
