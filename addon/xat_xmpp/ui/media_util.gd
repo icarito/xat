@@ -5,6 +5,7 @@ extends Reference
 # el audio se decodifica con el parser WAV de `media.gd`.
 
 const Media = preload("res://addons/xat_xmpp/xmpp/media.gd")
+const Adpcm = preload("res://addons/xat_xmpp/xmpp/adpcm.gd")
 
 const SCRIPT_PATH := "res://addons/xat_xmpp/ui/media_util.gd"
 const THUMB_CACHE_KEY := "xat_thumb_cache_v1"
@@ -98,13 +99,25 @@ static func _load_image(p_path: String):
 		ok = img.load_webp_from_buffer(buf) == OK
 	return img if ok and not img.is_empty() else null
 
-# Audio WAV -> AudioStreamSample, o null si no es WAV PCM.
+# Audio WAV -> AudioStreamSample. Soporta PCM (directo) e IMA-ADPCM (lo
+# decodifica a PCM, ver media.gd/adpcm.gd). null si no es reproducible.
 static func load_wav(p_path: String):
 	var f = File.new()
 	if not f.file_exists(p_path) or f.open(p_path, File.READ) != OK:
 		return null
 	var buf = f.get_buffer(f.get_len())
 	f.close()
+	if Media.is_wav_adpcm(buf):
+		var a = Media.parse_wav_adpcm(buf)
+		if not a["ok"]:
+			return null
+		var pcm = Adpcm.decode(a["data"], int(a["channels"]), int(a["samples_per_block"]))
+		var sa = AudioStreamSample.new()
+		sa.format = AudioStreamSample.FORMAT_16_BITS
+		sa.mix_rate = int(a["sample_rate"])
+		sa.stereo = int(a["channels"]) > 1
+		sa.data = pcm
+		return sa
 	var info = Media.parse_wav(buf)
 	if not info["ok"]:
 		return null

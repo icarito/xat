@@ -420,3 +420,120 @@ static func _u16(p_bytes: PoolByteArray, p_pos: int) -> int:
 
 static func _u32(p_bytes: PoolByteArray, p_pos: int) -> int:
 	return p_bytes[p_pos] | (p_bytes[p_pos + 1] << 8) | (p_bytes[p_pos + 2] << 16) | (p_bytes[p_pos + 3] << 24)
+
+# --- Audio de voz: downmix + remuestreo + WAV IMA-ADPCM (ver adpcm.gd) ---
+
+# Baja a mono y remuestrea por interpolación lineal a p_rate. Entrada y salida
+# PCM16 LE. Pensado para voz (44.1 kHz estéreo -> 16 kHz mono), donde el coste
+# de calidad es despreciable frente al ahorro de tamaño.
+static func downmix_resample(p_pcm: PoolByteArray, p_channels: int, p_in_rate: int, p_out_rate: int) -> PoolByteArray:
+	var n = p_pcm.size() / 2
+	if n == 0 or p_channels <= 0 or p_out_rate <= 0:
+		return PoolByteArray()
+	var frames = n / p_channels
+	if frames == 0:
+		return PoolByteArray()
+	# 1) Downmix a mono float.
+	var mono := PoolRealArray()
+	mono.resize(frames)
+	for f in range(frames):
+		var acc := 0.0
+		for ch in range(p_channels):
+			acc += _sample_at(p_pcm, f * p_channels + ch)
+		mono[f] = acc / float(p_channels)
+	# 2) Remuestreo lineal a out_rate.
+	var out_frames = int(round(frames * float(p_out_rate) / float(p_in_rate)))
+	if out_frames <= 0:
+		return PoolByteArray()
+	var out := PoolByteArray()
+	out.resize(out_frames * 2)
+	var ratio = float(p_in_rate) / float(p_out_rate)
+	for i in range(out_frames):
+		var src = i * ratio
+		var i0 = int(floor(src))
+		var i1 = min(i0 + 1, frames - 1)
+		var t = src - i0
+		if i0 > frames - 1:
+			i0 = frames - 1
+		var s = int(round(mono[i0] * (1.0 - t) + mono[i1] * t))
+		s = int(clamp(s, -32768, 32767))
+		var u = s if s >= 0 else s + 65536
+		out[i * 2] = u & 0xFF
+		out[i * 2 + 1] = (u >> 8) & 0xFF
+	return out
+
+static func _sample_at(p_pcm: PoolByteArray, p_index: int) -> float:
+	var v = p_pcm[p_index * 2] | (p_pcm[p_index * 2 + 1] << 8)
+	if v >= 32768:
+		v -= 65536
+	return float(v)
+
+# Arma un WAV IMA-ADPCM (format 0x11) a partir del bloque codificado.
+# p_enc es la salida de Adpcm.encode.
+static func build_wav_adpcm(p_enc: Dictionary) -> PoolByteArray:
+	var channels = int(p_enc["channels"])
+	var rate = int(p_enc["sample_rate"])
+	var block_align = int(p_enc["block_align"])
+	var spb = int(p_enc["samples_per_block"])
+	var data: PoolByteArray = p_enc["data"]
+	var out := PoolByteArray()
+	out.append_array("RIFF".to_utf8())
+	out.append_array(_le(36 + data.size(), 4))
+	out.append_array("WAVE".to_utf8())
+	out.append_array("fmt ".to_utf8())
+	out.append_array(_le(20, 4)) # tamaño del bloque fmt con extension
+	out.append_array(_le(0x11, 2)) # WAVE_FORMAT_IMA_ADPCM
+	out.append_array(_le(channels, 2))
+	out.append_array(_le(rate, 4))
+	# byte rate = (rate / spb) * block_align
+	out.append_array(_le(int(rate / spb) * block_align, 4))
+	out.append_array(_le(block_align, 2))
+	out.append_array(_le(4, 2)) # bits por muestra (4) -- convención ADPCM
+	out.append_array(_le(2, 2)) # cbSize (extension)
+	out.append_array(_le(spb, 2)) # samples per block
+	out.append_array("data".to_utf8())
+	out.append_array(_le(data.size(), 4))
+	out.append_array(data)
+	return out
+
+# Devuelve true si el WAV (en bytes) usa IMA-ADPCM.
+static func is_wav_adpcm(p_bytes: PoolByteArray) -> bool:
+	if p_bytes.size() < 24:
+		return false
+	return _ascii4(p_bytes, 0) == "RIFF" and _ascii4(p_bytes, 8) == "WAVE" and _u16(p_bytes, 20) == 0x11
+
+# Lee un WAV IMA-ADPCM -> {ok, channels, sample_rate, samples_per_block, data}.
+static func parse_wav_adpcm(p_bytes: PoolByteArray) -> Dictionary:
+	var out := {"ok": false, "channels": 1, "sample_rate": 8000, "samples_per_block": 505, "data": PoolByteArray()}
+	if p_bytes.size() < 44 or _ascii4(p_bytes, 0) != "RIFF" or _ascii4(p_bytes, 8) != "WAVE":
+		return out
+	var pos := 12
+	var got_fmt := false
+	while pos + 8 <= p_bytes.size():
+		var cid = _ascii4(p_bytes, pos)
+		var csize = _u32(p_bytes, pos + 4)
+		var body = pos + 8
+		if cid == "fmt " and body + 20 <= p_bytes.size():
+			if _u16(p_bytes, body) != 0x11:
+				return out
+			out["channels"] = _u16(p_bytes, body + 2)
+			out["sample_rate"] = _u32(p_bytes, body + 4)
+			out["samples_per_block"] = _u16(p_bytes, body + 18)
+			got_fmt = true
+		elif cid == "data":
+			if not got_fmt:
+				return out
+			var take = min(int(csize), p_bytes.size() - body)
+			out["data"] = p_bytes.subarray(body, body + take - 1)
+			out["ok"] = out["data"].size() > 0
+			return out
+		pos = body + int(csize)
+		if int(csize) == 0:
+			break
+	return out
+
+static func _le(p_value: int, p_bytes: int) -> PoolByteArray:
+	var out := PoolByteArray()
+	for i in range(p_bytes):
+		out.append((p_value >> (8 * i)) & 0xFF)
+	return out

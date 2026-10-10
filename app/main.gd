@@ -99,6 +99,7 @@ var _rec_start_ms := 0
 var _playing_path := ""
 var _playing_id := ""
 var _playing_active := false
+var _rec_pending_peer := ""
 var _native_media = null          # singleton XatMedia (selector/cámara nativa)
 var _pending_media_peer := ""     # peer que espera el resultado del selector
 var _pending_avatar := false      # el selector está eligiendo la foto de perfil
@@ -253,6 +254,8 @@ func _ready() -> void:
 	_chat.connect("occupant_action", self, "_on_occupant_action")
 	_recorder = Recorder.new()
 	_recorder.name = "Recorder"
+	_recorder.connect("recording_finished", self, "_on_recording_finished")
+	_recorder.connect("recording_failed", self, "_on_recording_failed")
 	add_child(_recorder)
 	_audio = AudioStreamPlayer.new()
 	_audio.name = "MediaAudio"
@@ -315,6 +318,16 @@ func _ready() -> void:
 	# revisar el layout. Uso: XAT_DEV_PANELS=1 XAT_LANDSCAPE=1.
 	if OS.get_environment("XAT_DEV_PANELS") == "1":
 		_dev_seed()
+	# Soporte: XAT_AUDIO_TEST=<ruta.wav> reproduce un archivo tras arrancar.
+	if OS.get_environment("XAT_AUDIO_TEST") != "":
+		_audio_test(OS.get_environment("XAT_AUDIO_TEST"))
+
+func _audio_test(p_path: String) -> void:
+	yield(get_tree().create_timer(2.0), "timeout")
+	print("xat: AUDIO_TEST play %s" % p_path)
+	_perform_media("play", p_path, "audio", "test")
+	yield(get_tree().create_timer(1.0), "timeout")
+	print("xat: AUDIO_TEST state playing=%s pos=%.2f len=%.2f" % [_audio.playing, _audio.get_playback_position(), _audio.stream.get_length() if _audio.stream != null else 0.0])
 
 func _dev_seed() -> void:
 	_account.visible = false
@@ -911,9 +924,25 @@ func _on_voice_toggle(peer: String, start: bool) -> void:
 	else:
 		_rec_timer.stop()
 		_chat.set_recording(false, 0)
+		# El encode va a un Thread: esperamos recording_finished para subir.
+		_rec_pending_peer = peer
 		var r = _recorder.stop()
-		if not r.empty():
-			_send_attachment(peer, r["path"], "audio/wav", int(r["duration_ms"]), "")
+		if r.empty():
+			_rec_pending_peer = ""
+		elif not r.get("pending", false):
+			_on_recording_finished(str(r["path"]), int(r["duration_ms"]), 0)
+
+# El Recorder terminó de comprimir/guardar (vuelve desde el thread).
+func _on_recording_finished(p_path: String, p_duration_ms: int, _bytes: int) -> void:
+	var peer = _rec_pending_peer
+	_rec_pending_peer = ""
+	if peer == "" or p_path == "":
+		return
+	_send_attachment(peer, p_path, "audio/wav", p_duration_ms, "")
+
+func _on_recording_failed(p_reason: String) -> void:
+	_rec_pending_peer = ""
+	juice.toast("No se pudo guardar la nota de voz", P.ERROR)
 
 func _mic_permitted() -> bool:
 	if OS.get_name() != "Android":
@@ -935,11 +964,14 @@ func _tick_recording() -> void:
 # Duración máxima de grabación para que el WAV PCM (estéreo 16 bits 44.1 kHz,
 # 176400 B/s) no supere el max-file-size del servidor (XEP-0363). Sin dato se
 # asume 10 MB, el límite típico.
+# Duración máxima de grabación para que la nota ADPCM 16 kHz mono (~8 kB/s)
+# no supere el max-file-size del servidor (XEP-0363). Sin dato se asume 10 MB.
 func _max_record_ms() -> int:
 	var limit = session.upload_max_bytes()
 	if limit <= 0:
 		limit = 10485760
-	var secs = int(float(limit) * 0.9 / 176400.0)
+	# ~8 kB/s real; 10 kB/s de margen. Antes se estimaba por PCM 176400 B/s.
+	var secs = int(float(limit) * 0.9 / 10240.0)
 	if secs < 5:
 		secs = 5
 	elif secs > 300:
@@ -1053,7 +1085,8 @@ func _perform_media(action: String, path: String, kind: String, p_id: String = "
 			_playing_active = true
 			set_process(true)
 			_sync_audio_ui()
-			print("xat: audio play %s (playing=%s)" % [path, _audio.playing])
+			print("xat: audio play %s (playing=%s bus=%s vol=%.1f mute=%s mix=%d)" % [path, _audio.playing, _audio.bus, _audio.volume_db, AudioServer.is_bus_mute(AudioServer.get_bus_index(_audio.bus)), AudioServer.get_mix_rate()])
+			_log_audio_progress()
 
 # Refleja en la burbuja el estado del player global (play/pausa + progreso).
 func _sync_audio_ui() -> void:
@@ -1066,6 +1099,16 @@ func _sync_audio_ui() -> void:
 	if _audio.stream != null and _audio.stream.get_length() > 0.0:
 		frac = _audio.get_playback_position() / _audio.stream.get_length()
 	_chat.set_audio_state(_playing_id, _playing_active, frac)
+
+# Diagnóstico: loguea posición/longitud 1 s después de play() para ver si el
+# stream realmente avanza (en Android `playing=True` puede ser solo el estado
+# de la llamada, no del decodificador).
+func _log_audio_progress() -> void:
+	yield(get_tree().create_timer(1.0), "timeout")
+	if _audio == null:
+		return
+	var ln = _audio.stream.get_length() if _audio.stream != null else 0.0
+	print("xat: audio 1s playing=%s pos=%.3f len=%.3f paused=%s" % [_audio.playing, _audio.get_playback_position(), ln, _audio.stream_paused])
 
 func _on_audio_finished() -> void:
 	_playing_path = ""
