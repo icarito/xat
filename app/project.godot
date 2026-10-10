@@ -26,7 +26,7 @@ run/main_scene="res://main.tscn"
 run/low_processor_mode=true
 run/low_processor_mode_sleep_usec=8000
 config/icon="res://icon.png"
-config/version="0.1.7"
+config/version="0.1.8"
 
 [audio]
 
