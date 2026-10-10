@@ -1187,7 +1187,7 @@ func _build_sidebar() -> void:
 	top.alignment = BoxContainer.ALIGN_CENTER
 	top.add_constant_override("separation", 6)
 	sv.add_child(top)
-	_sb_profile = _sidebar_icon_action("person", "Perfil y cuenta")
+	_sb_profile = _sidebar_icon_action("person", "Cambiar foto de perfil")
 	_sb_profile.connect("pressed", self, "_on_sidebar_profile")
 	top.add_child(_sb_profile)
 	_sb_about = _sidebar_icon_action("info", "Acerca de · privacidad")
@@ -1293,8 +1293,8 @@ func _init_sidebar_settings() -> void:
 		pair[0].set_icon_color(P.USER if on else P.TEXT_DIM)
 
 func _on_sidebar_profile() -> void:
-	if _account != null:
-		_account.visible = true
+	# Misma acción que el botón de perfil del roster: cambiar la foto (XEP-0084).
+	_on_avatar_requested()
 
 func _on_sidebar_about() -> void:
 	OS.shell_open(XatXmpp.PRIVACY_URL)

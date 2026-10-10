@@ -91,3 +91,13 @@ func _glyph(g: String, c: Vector2, r: float, col: Color) -> void:
 		"person":
 			draw_arc(c + Vector2(0, -r * 0.32), r * 0.34, 0.0, TAU, 24, col, w, true)
 			draw_arc(c + Vector2(0, r * 0.92), r * 0.82, PI + 0.4, TAU - 0.4, 24, col, w, true)
+		"person_add":
+			draw_arc(c + Vector2(-r * 0.22, -r * 0.32), r * 0.32, 0.0, TAU, 22, col, w, true)
+			draw_arc(c + Vector2(-r * 0.22, r * 0.95), r * 0.78, PI + 0.42, TAU - 0.42, 22, col, w, true)
+			draw_line(c + Vector2(r * 0.64, -r * 0.62), c + Vector2(r * 0.64, r * 0.02), col, w, true)
+			draw_line(c + Vector2(r * 0.32, -r * 0.3), c + Vector2(r * 0.96, -r * 0.3), col, w, true)
+		"hash":
+			draw_line(c + Vector2(-r * 0.34, -r * 0.72), c + Vector2(-r * 0.14, r * 0.72), col, w, true)
+			draw_line(c + Vector2(r * 0.14, -r * 0.72), c + Vector2(r * 0.34, r * 0.72), col, w, true)
+			draw_line(c + Vector2(-r * 0.7, -r * 0.18), c + Vector2(r * 0.7, -r * 0.32), col, w, true)
+			draw_line(c + Vector2(-r * 0.7, r * 0.32), c + Vector2(r * 0.7, r * 0.18), col, w, true)

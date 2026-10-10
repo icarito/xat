@@ -18,6 +18,7 @@ const AgentOrb = preload("res://addons/xat_xmpp/ui/agent_orb.gd")
 const XatTheme = preload("res://addons/xat_xmpp/ui/xat_theme.gd")
 const AvatarBadge = preload("res://addons/xat_xmpp/ui/avatar_badge.gd")
 const XatXmpp = preload("res://addons/xat_xmpp/xat_xmpp.gd")
+const IconButton = preload("res://addons/xat_xmpp/ui/icon_button.gd")
 
 var _peers := []
 var _agents := {} # bare -> último state de agente
@@ -41,7 +42,6 @@ var _req_box: VBoxContainer
 var _scrolling := false
 var _juice = null
 var _sound_btn: Button
-var _motion_btn: Button
 var _haptic_btn: Button
 var _add_btn: Button
 var _room_btn: Button
@@ -89,29 +89,21 @@ func _init() -> void:
 	_grid_scroll.add_child(_grid)
 	# Recoloca la columna cuando cambia el ancho (móvil portrait/landscape).
 	connect("resized", self, "_on_resized")
-	# Pie: ajustes de juice (sonido / movimiento reducido).
+	# Pie: ajustes (sonido / vibración / avatar / acerca) con los mismos iconos
+	# vectoriales que el sidebar de landscape, para no mezclar estilos.
 	var foot = HBoxContainer.new()
 	_foot = foot
 	foot.alignment = BoxContainer.ALIGN_CENTER
+	foot.add_constant_override("separation", 4)
 	root.add_child(foot)
-	_sound_btn = _toggle("♪", "sound_enabled", "Sonido")
+	_sound_btn = _icon_toggle("sound", "sound_enabled", "Sonido")
 	foot.add_child(_sound_btn)
-	var avatar_btn = Button.new()
-	avatar_btn.text = "☺"
-	avatar_btn.hint_tooltip = "Cambiar foto de perfil"
-	avatar_btn.rect_min_size = Vector2(44, 32)
-	avatar_btn.focus_mode = Control.FOCUS_NONE
+	var avatar_btn = _icon_button("person", "Cambiar foto de perfil")
 	avatar_btn.connect("pressed", self, "_on_avatar")
 	foot.add_child(avatar_btn)
-	_motion_btn = _toggle("✦", "motion_enabled", "Animación")
-	foot.add_child(_motion_btn)
-	_haptic_btn = _toggle("≋", "haptics_enabled", "Vibración (móvil / gamepad)")
+	_haptic_btn = _icon_toggle("vibrate", "haptics_enabled", "Vibración (móvil / gamepad)")
 	foot.add_child(_haptic_btn)
-	var about_btn = Button.new()
-	about_btn.text = "ⓘ"
-	about_btn.hint_tooltip = "Privacidad y soporte"
-	about_btn.rect_min_size = Vector2(44, 32)
-	about_btn.focus_mode = Control.FOCUS_NONE
+	var about_btn = _icon_button("info", "Privacidad y soporte")
 	about_btn.connect("pressed", self, "_on_about")
 	foot.add_child(about_btn)
 	_box = VBoxContainer.new()
@@ -158,17 +150,11 @@ func _make_header() -> HBoxContainer:
 	title.text = "Contactos"
 	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	m.add_child(title)
-	var add = Button.new()
-	add.text = "+ Añadir"
-	add.hint_tooltip = "Añadir contacto por JID"
-	add.focus_mode = Control.FOCUS_NONE
+	var add = _icon_button("person_add", "Añadir contacto por JID")
 	add.connect("pressed", self, "_on_add_contact")
 	_add_btn = add
 	h.add_child(add)
-	var room = Button.new()
-	room.text = "+ Sala"
-	room.hint_tooltip = "Unirse a una sala (MUC)"
-	room.focus_mode = Control.FOCUS_NONE
+	var room = _icon_button("hash", "Unirse a una sala (MUC)")
 	room.connect("pressed", self, "_on_join_room")
 	_room_btn = room
 	h.add_child(room)
@@ -313,24 +299,46 @@ func _on_request_deny(p_bare: String) -> void:
 
 func set_juice(p_juice) -> void:
 	_juice = p_juice
-	_sound_btn.pressed = bool(_juice.settings.get("sound_enabled", true))
-	_motion_btn.pressed = bool(_juice.settings.get("motion_enabled", true))
-	_haptic_btn.pressed = bool(_juice.settings.get("haptics_enabled", true))
+	for pair in [[_sound_btn, "sound_enabled"], [_haptic_btn, "haptics_enabled"]]:
+		var on = bool(_juice.settings.get(pair[1], true))
+		pair[0].pressed = on
+		pair[0].set_icon_color(P.USER if on else P.TEXT_DIM)
 
-func _toggle(p_text: String, p_key: String, p_tip: String) -> Button:
-	var b = Button.new()
-	b.text = p_text
-	b.hint_tooltip = p_tip
-	b.rect_min_size = Vector2(44, 32)
-	b.toggle_mode = true
-	b.pressed = true
-	b.focus_mode = Control.FOCUS_NONE
-	b.connect("toggled", self, "_on_setting", [p_key])
+# Iconos vectoriales compartidos con el sidebar de landscape (mismo estilo).
+func _icon_button(p_glyph: String, p_tip: String) -> IconButton:
+	var b = IconButton.new()
+	b.setup(p_glyph, 40, P.TEXT_DIM, p_tip)
+	for st in ["normal", "focus"]:
+		b.add_stylebox_override(st, XatTheme.box(P.BG2, 10, 4, 4))
+	b.add_stylebox_override("hover", XatTheme.box(P.BG2.lightened(0.12), 10, 4, 4))
+	b.add_stylebox_override("pressed", XatTheme.box(P.BG2.darkened(0.15), 10, 4, 4))
+	b.connect("mouse_entered", self, "_on_icon_hover", [b, true])
+	b.connect("mouse_exited", self, "_on_icon_hover", [b, false])
 	return b
 
-func _on_setting(p_on: bool, p_key: String) -> void:
+func _icon_toggle(p_glyph: String, p_key: String, p_tip: String) -> IconButton:
+	var b = IconButton.new()
+	b.setup(p_glyph, 40, P.TEXT_DIM, p_tip)
+	b.toggle_mode = true
+	b.add_stylebox_override("normal", XatTheme.box(P.BG2, 10, 4, 4))
+	b.add_stylebox_override("focus", XatTheme.box(P.BG2, 10, 4, 4))
+	b.add_stylebox_override("hover", XatTheme.box(P.BG2.lightened(0.12), 10, 4, 4))
+	b.add_stylebox_override("pressed", XatTheme.box(P.USER.darkened(0.55), 10, 4, 4))
+	var on = _juice == null or bool(_juice.settings.get(p_key, true))
+	b.pressed = on
+	b.set_icon_color(P.USER if on else P.TEXT_DIM)
+	b.connect("toggled", self, "_on_icon_toggle", [b, p_key])
+	return b
+
+func _on_icon_hover(p_b, p_enter: bool) -> void:
+	if p_b.toggle_mode and p_b.pressed:
+		return
+	p_b.set_icon_color(P.TEXT if p_enter else P.TEXT_DIM)
+
+func _on_icon_toggle(p_on: bool, p_b, p_key: String) -> void:
 	if _juice != null:
 		_juice.set_setting(p_key, p_on)
+	p_b.set_icon_color(P.USER if p_on else P.TEXT_DIM)
 
 func _on_about() -> void:
 	OS.shell_open(XatXmpp.PRIVACY_URL)
