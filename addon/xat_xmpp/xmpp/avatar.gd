@@ -126,6 +126,46 @@ static func process(p_path: String, p_side: int = 96) -> Dictionary:
 			mime = "image/jpeg"
 	return {"bytes": bytes, "mime": mime, "width": img.get_width(), "height": img.get_height(), "id": sha1_hex(bytes)}
 
+# Recorte cuadrado elegido por el usuario. `p_rect` va en píxeles de la imagen
+# (esquina superior izquierda + tamaño); se ajusta a cuadrado y se limita a los
+# bordes. Devuelve lo mismo que process().
+static func process_rect(p_path: String, p_rect: Rect2, p_side: int = 96) -> Dictionary:
+	var img := Image.new()
+	if img.load(p_path) != OK:
+		return {}
+	var w = img.get_width()
+	var h = img.get_height()
+	if w <= 0 or h <= 0:
+		return {}
+	var side = int(min(p_rect.size.x, p_rect.size.y))
+	side = int(clamp(side, 16, min(w, h)))
+	var x = int(clamp(round(p_rect.position.x), 0, w - side))
+	var y = int(clamp(round(p_rect.position.y), 0, h - side))
+	img = img.get_rect(Rect2(x, y, side, side))
+	if img.get_width() > p_side:
+		img.resize(p_side, p_side, Image.INTERPOLATE_BILINEAR)
+	var bytes = img.save_png_to_buffer()
+	var mime := "image/png"
+	if bytes.size() > 24 * 1024:
+		var jpg = img.save_jpg_to_buffer(0.85)
+		if jpg.size() < bytes.size():
+			bytes = jpg
+			mime = "image/jpeg"
+	return {"bytes": bytes, "mime": mime, "width": img.get_width(), "height": img.get_height(), "id": sha1_hex(bytes)}
+
+# Mapea un rectángulo de la VISTA (donde la imagen se muestra con ajuste
+# "contain": escalada y centrada) a píxeles de la imagen. `p_view` = tamaño del
+# área visible, `p_img` = tamaño de la imagen original.
+static func map_view_rect(p_sel: Rect2, p_view: Vector2, p_img: Vector2) -> Rect2:
+	if p_view.x <= 0.0 or p_view.y <= 0.0 or p_img.x <= 0.0 or p_img.y <= 0.0:
+		return Rect2()
+	var scale = min(p_view.x / p_img.x, p_view.y / p_img.y)
+	if scale <= 0.0:
+		return Rect2()
+	var disp = p_img * scale
+	var off = (p_view - disp) * 0.5
+	return Rect2((p_sel.position - off) / scale, p_sel.size / scale)
+
 # <iq type=set><pubsub><publish node=urn:xmpp:avatar:data><item id><data>B64
 static func build_publish_data(p_iq_id: String, p_item_id: String, p_base64: String):
 	var pubsub = Stanza.new("pubsub")

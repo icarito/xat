@@ -8,6 +8,9 @@ const AccountPanel = preload("res://addons/xat_xmpp/ui/account_panel.gd")
 const RosterPanel = preload("res://addons/xat_xmpp/ui/roster_panel.gd")
 const AddContactDialog = preload("res://addons/xat_xmpp/ui/add_contact_dialog.gd")
 const JoinRoomDialog = preload("res://addons/xat_xmpp/ui/join_room_dialog.gd")
+const AvatarCropDialog = preload("res://addons/xat_xmpp/ui/avatar_crop_dialog.gd")
+const Updater = preload("res://addons/xat_xmpp/xmpp/updater.gd")
+const UpdateView = preload("res://addons/xat_xmpp/ui/update_view.gd")
 const InviteDialog = preload("res://addons/xat_xmpp/ui/invite_dialog.gd")
 const TextPromptDialog = preload("res://addons/xat_xmpp/ui/text_prompt_dialog.gd")
 const ChatPanel = preload("res://addons/xat_xmpp/ui/chat_panel.gd")
@@ -83,6 +86,7 @@ var _sb_sound
 var _sb_haptic
 var _sb_profile
 var _sb_about
+var _sb_update
 var _credentials
 var _startup_splash
 var _startup_cfg := {}
@@ -105,8 +109,13 @@ var _pending_media_peer := ""     # peer que espera el resultado del selector
 var _pending_avatar := false      # el selector está eligiendo la foto de perfil
 var _avatar_picker               # FilePicker nativo para la foto de perfil
 var _avatar_file_dialog          # fallback FileDialog para la foto de perfil
+var _avatar_crop                 # diálogo de recorte
+var _updater                     # Node updater (GitHub Releases)
+var _update_view                 # vista integrada de actualizaciones
 var _clipboard                   # ClipboardImage (pegar imagen en escritorio)
 var _notifier
+var _push_retry: Timer = null
+var _push_retry_ticks := 0
 var _fleet_monitor
 var _fleet_snapshot := {}
 var _own_avatar_id := ""
@@ -189,6 +198,7 @@ func _ready() -> void:
 	_roster.connect("subscription_accept", self, "_on_subscription_accept")
 	_roster.connect("subscription_deny", self, "_on_subscription_deny")
 	_roster.connect("avatar_requested", self, "_on_avatar_requested")
+	_roster.connect("update_requested", self, "_on_updates_requested")
 	_roster.connect("join_room_requested", self, "_on_join_room_requested")
 	_roster.connect("room_invite_accept", self, "_on_room_invite_accept")
 	_roster.connect("room_invite_ignore", self, "_on_room_invite_ignore")
@@ -294,6 +304,16 @@ func _ready() -> void:
 	_join_room = JoinRoomDialog.new()
 	add_child(_join_room)
 	_join_room.connect("submitted", self, "_on_join_room_submitted")
+	_avatar_crop = AvatarCropDialog.new()
+	add_child(_avatar_crop)
+	_avatar_crop.connect("cropped", self, "_on_avatar_cropped")
+	_updater = Updater.new()
+	_updater.name = "Updater"
+	add_child(_updater)
+	_updater.connect("update_available", self, "_on_update_available")
+	_update_view = UpdateView.new()
+	add_child(_update_view)
+	_update_view.setup(_updater, _app_version())
 	_invite_dialog = InviteDialog.new()
 	add_child(_invite_dialog)
 	_invite_dialog.connect("submitted", self, "_on_invite_submitted")
@@ -858,7 +878,7 @@ func _on_native_media_picked(path: String) -> void:
 	if _pending_avatar:
 		_pending_avatar = false
 		if path != "":
-			_apply_avatar(path)
+			_open_avatar_crop(path)
 		return
 	var peer = _pending_media_peer
 	_pending_media_peer = ""
@@ -1201,7 +1221,11 @@ func _on_avatar_requested() -> void:
 		return
 	if _native_media != null:
 		_pending_avatar = true
-		_native_media.pickFile()
+		# Sólo imágenes (el picker de archivos genérico dejaba elegir cualquier cosa).
+		if _native_media.has_method("pickImage"):
+			_native_media.pickImage()
+		else:
+			_native_media.pickFile()
 		return
 	if FilePicker.has_native():
 		if _avatar_picker == null:
@@ -1223,9 +1247,22 @@ func _on_avatar_requested() -> void:
 	_avatar_file_dialog.popup_centered_ratio(0.7)
 
 func _on_avatar_filedialog(p_path: String) -> void:
-	_apply_avatar(p_path)
+	_open_avatar_crop(p_path)
 
 func _on_avatar_picked(p_path: String) -> void:
+	_open_avatar_crop(p_path)
+
+# Abre el diálogo de recorte con la imagen elegida.
+func _open_avatar_crop(p_path: String) -> void:
+	if p_path == "":
+		return
+	if _avatar_crop == null:
+		_avatar_crop = AvatarCropDialog.new()
+		add_child(_avatar_crop)
+		_avatar_crop.connect("cropped", self, "_on_avatar_cropped")
+	_avatar_crop.open(p_path)
+
+func _on_avatar_cropped(p_path: String) -> void:
 	_apply_avatar(p_path)
 
 func _apply_avatar(p_path: String) -> void:
@@ -1263,6 +1300,7 @@ func _on_clipboard_pasted(p_path: String) -> void:
 # reconectar.
 func _register_push() -> void:
 	var service = _push_service_for_os()
+	print("xat: push register os=%s service=%s native=%s" % [OS.get_name(), service, _notifier != null and _notifier.native_available()])
 	if service == "":
 		return
 	# Android: Firebase debe inicializarse con la config de la app (del
@@ -1271,11 +1309,43 @@ func _register_push() -> void:
 		_notifier.configure_firebase(_psetting("xat/firebase_api_key"), _psetting("xat/firebase_app_id"),
 				_psetting("xat/firebase_project_id"), _psetting("xat/firebase_sender_id"))
 	var token = _notifier.device_token()
+	print("xat: push token_len=%d" % token.length())
 	if token == "":
+		# El token (APNs/FCM) llega asíncrono, DESPUÉS de pedir permiso: en la
+		# primera conexión normalmente todavía no está. Reintentar hasta que
+		# aparezca; sin esto el registro se perdía y no había push.
+		_start_push_retry()
 		return
 	# Filtro del servidor: no pushear mensajes de desconocidos (los agentes son
 	# contactos del roster). Es el principal anti-ruido del lado del gateway.
 	session.enable_push(service, token, {"ignore_unknown": true})
+
+# Reintenta el registro de push mientras el token no esté disponible.
+func _start_push_retry() -> void:
+	if _push_retry != null:
+		return
+	_push_retry = Timer.new()
+	_push_retry.wait_time = 2.0
+	_push_retry.autostart = false
+	_push_retry.connect("timeout", self, "_on_push_retry")
+	add_child(_push_retry)
+	_push_retry_ticks = 0
+	_push_retry.start()
+
+func _on_push_retry() -> void:
+	_push_retry_ticks += 1
+	var token = _notifier.device_token() if _notifier != null else ""
+	if token != "":
+		_push_retry.stop()
+		_push_retry.queue_free()
+		_push_retry = null
+		_register_push()
+		return
+	# ~60 s de intentos: suficiente para el diálogo de permiso + APNs.
+	if _push_retry_ticks >= 30:
+		_push_retry.stop()
+		_push_retry.queue_free()
+		_push_retry = null
 
 func _psetting(p_key: String) -> String:
 	return str(ProjectSettings.get_setting(p_key)) if ProjectSettings.has_setting(p_key) else ""
@@ -1393,6 +1463,9 @@ func _build_sidebar() -> void:
 	_sb_about = _sidebar_icon_action("info", "Acerca de · privacidad")
 	_sb_about.connect("pressed", self, "_on_sidebar_about")
 	top.add_child(_sb_about)
+	_sb_update = _sidebar_icon_action("download", "Buscar actualizaciones")
+	_sb_update.connect("pressed", self, "_on_updates_requested")
+	top.add_child(_sb_update)
 	# Identidad del peer/sala (avatar + orbe del agente) que en landscape se mueve
 	# acá desde la cabecera del chat, para no perder una franja de alto.
 	_sidebar_identity = HBoxContainer.new()
@@ -1498,6 +1571,23 @@ func _on_sidebar_profile() -> void:
 
 func _on_sidebar_about() -> void:
 	OS.shell_open(XatXmpp.PRIVACY_URL)
+
+# --- Actualizaciones (GitHub Releases) ---
+
+func _app_version() -> String:
+	if ProjectSettings.has_setting("application/config/version"):
+		var v = str(ProjectSettings.get_setting("application/config/version"))
+		if v != "":
+			return v
+	return "0.0.0"
+
+func _on_updates_requested() -> void:
+	if _update_view != null:
+		_update_view.open()
+
+func _on_update_available(_info) -> void:
+	if _update_view != null and not _update_view.visible:
+		juice.toast("Hay una nueva versión de xat disponible", P.PENDING)
 
 func _on_sidebar_add() -> void:
 	_on_add_contact_requested()

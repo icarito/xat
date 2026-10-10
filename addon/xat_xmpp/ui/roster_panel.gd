@@ -10,6 +10,7 @@ signal join_room_requested()
 signal subscription_accept(bare)
 signal subscription_deny(bare)
 signal avatar_requested()
+signal update_requested()
 signal room_invite_accept(room)
 signal room_invite_ignore(room)
 
@@ -109,6 +110,9 @@ func _init() -> void:
 	var about_btn = _icon_button("info", "Privacidad y soporte")
 	about_btn.connect("pressed", self, "_on_about")
 	foot.add_child(about_btn)
+	var update_btn = _icon_button("download", "Buscar actualizaciones")
+	update_btn.connect("pressed", self, "_on_update")
+	foot.add_child(update_btn)
 	_box = VBoxContainer.new()
 	_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_box.mouse_filter = Control.MOUSE_FILTER_IGNORE # deja pasar el arrastre táctil entre filas
@@ -406,6 +410,9 @@ func _on_about() -> void:
 
 func _on_avatar() -> void:
 	emit_signal("avatar_requested")
+
+func _on_update() -> void:
+	emit_signal("update_requested")
 
 func set_peers(p_bares: Array) -> void:
 	_peers = p_bares

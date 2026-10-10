@@ -192,9 +192,10 @@ func _entity_row(p_entity: Dictionary):
 	row.add_child(identity)
 	var team = str(p_entity.get("team", "Unassigned"))
 	var instance_id = str(p_entity.get("id", ""))
-	var title = _label(team, P.TEXT, P.FONT_MEDIUM, 13)
+	var entity_label = str(p_entity.get("label", team))
+	var title = _label(entity_label, P.TEXT, P.FONT_MEDIUM, 13)
 	title.clip_text = true
-	title.hint_tooltip = team
+	title.hint_tooltip = entity_label + " · " + team
 	identity.add_child(title)
 	var subtitle_text = instance_id
 	var jid = str(p_entity.get("jid", ""))

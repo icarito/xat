@@ -1427,6 +1427,7 @@ func _handle_pubsub_error(p_stanza) -> void:
 # XEP-0357: resultado del registro de push. `enable` exitoso deja el estado
 # registrado; cualquier error lo marca fallido y avisa con la condición.
 func _handle_push_result(p_kind: String, p_ok: bool, p_error: String) -> void:
+	print("xat: push %s ok=%s error=%s" % [p_kind, p_ok, p_error])
 	if p_kind == "enable":
 		_push_enabled = p_ok
 		emit_signal("push_registration_changed", p_ok, p_error)

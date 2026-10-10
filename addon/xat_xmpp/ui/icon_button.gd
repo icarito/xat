@@ -91,6 +91,10 @@ func _glyph(g: String, c: Vector2, r: float, col: Color) -> void:
 		"person":
 			draw_arc(c + Vector2(0, -r * 0.32), r * 0.34, 0.0, TAU, 24, col, w, true)
 			draw_arc(c + Vector2(0, r * 0.92), r * 0.82, PI + 0.4, TAU - 0.4, 24, col, w, true)
+		"download":
+			draw_line(c + Vector2(0, -r * 0.72), c + Vector2(0, r * 0.2), col, w, true)
+			draw_polyline(PoolVector2Array([c + Vector2(-r * 0.36, -r * 0.12), c + Vector2(0, r * 0.26), c + Vector2(r * 0.36, -r * 0.12)]), col, w, true)
+			draw_line(c + Vector2(-r * 0.5, r * 0.62), c + Vector2(r * 0.5, r * 0.62), col, w, true)
 		"play":
 			draw_polyline(PoolVector2Array([
 				c + Vector2(-r * 0.45, -r * 0.6), c + Vector2(r * 0.62, 0),

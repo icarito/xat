@@ -31,4 +31,7 @@ tools/run_tests.sh tests/jid_test.gd  # uno puntual
 ```sh
 bin/godot-xat --path app
 # o dentro de la sesión gdtk
+
+# Vista Joe Work opcional (PEP privado de Operator)
+tools/run-joework.sh
 ```
