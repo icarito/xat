@@ -232,8 +232,10 @@ func _init():
 	m._chat.set_room("sala@conference.h", "yo", [])
 	m._chat.add_message({"from": "sala@conference.h/ana", "body": "texto seleccionable", "direction": "in", "timestamp": "2026-01-04T11:00:00Z", "id": "sel1", "commands": [], "quick_responses": []})
 	var bub = m._chat._bubbles[0]
-	bub.select_all()
+	bub.begin_selection()
 	check(bub.selected_text().find("seleccionable") >= 0, "bubble: selección de texto")
+	# La barra no debe ser hija directa del PanelContainer (se estiraría fullscreen).
+	check(m._chat._sel_bar.get_parent() != m._chat and not (m._chat._sel_bar.get_parent() is Container), "selección: barra en capa overlay")
 	bub.end_selection()
 	m._chat.set_peer("a@h")
 

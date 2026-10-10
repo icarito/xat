@@ -46,6 +46,9 @@ var _haptic_btn: Button
 var _add_btn: Button
 var _room_btn: Button
 var _foot: HBoxContainer
+var _id_btn: Button
+var _id_avatar
+var _id_name: Label
 
 # La lista es una columna de ancho fijo, centrada en el panel: los avatares
 # quedan alineados entre filas (no pegados al borde izquierdo a pantalla completa).
@@ -135,21 +138,60 @@ func _init() -> void:
 	sc.add_child(top)
 	top.add_child(content)
 
-# Encabezado del roster: título y botón para añadir contacto.
+# Encabezado del roster: tu identidad (foto + nombre) y las acciones.
 func _make_header() -> HBoxContainer:
 	var h = HBoxContainer.new()
 	h.add_constant_override("separation", 6)
+	# Identidad propia: foto de perfil (XEP-0084) con un botón superpuesto para
+	# cambiarla, y tu nombre debajo. Va primero para saber de quién es la cuenta.
+	var id_m = MarginContainer.new()
+	id_m.add_constant_override("margin_left", COLUMN_MARGIN)
+	id_m.add_constant_override("margin_top", 8)
+	id_m.add_constant_override("margin_bottom", 4)
+	var id_v = VBoxContainer.new()
+	id_v.alignment = BoxContainer.ALIGN_CENTER
+	id_v.add_constant_override("separation", 2)
+	# La foto y el botón de cambio comparten celda: el botón va superpuesto en la
+	# esquina inferior derecha, sobre la foto misma (no como control aparte).
+	var pic = Control.new()
+	pic.rect_min_size = Vector2(48, 48)
+	pic.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	_id_avatar = AvatarBadge.new(48.0)
+	pic.add_child(_id_avatar)
+	_id_btn = Button.new()
+	_id_btn.flat = true
+	_id_btn.focus_mode = Control.FOCUS_NONE
+	_id_btn.hint_tooltip = "Cambiar foto de perfil"
+	_id_btn.rect_min_size = Vector2(22, 22)
+	_id_btn.anchor_left = 1.0
+	_id_btn.anchor_top = 1.0
+	_id_btn.anchor_right = 1.0
+	_id_btn.anchor_bottom = 1.0
+	_id_btn.margin_left = -22
+	_id_btn.margin_top = -22
+	_id_btn.add_stylebox_override("normal", _circle_box(P.BG2, P.LINE))
+	_id_btn.add_stylebox_override("hover", _circle_box(P.LINE, P.AGENT_EDGE))
+	_id_btn.add_stylebox_override("pressed", _circle_box(P.BG0, P.AGENT_EDGE))
+	_id_btn.connect("pressed", self, "_on_avatar")
+	pic.add_child(_id_btn)
+	id_v.add_child(pic)
+	_id_name = Label.new()
+	_id_name.align = Label.ALIGN_CENTER
+	_id_name.clip_text = true
+	_id_name.rect_min_size = Vector2(64, 14)
+	_id_name.add_color_override("font_color", P.TEXT)
+	_id_name.add_font_override("font", XatTheme.font(P.FONT_MEDIUM, P.FONT_SIZE - 3))
+	id_v.add_child(_id_name)
+	id_m.add_child(id_v)
+	h.add_child(id_m)
+	# Sin título "Contactos": es la única lista del panel, el nombre sobra.
 	var m = MarginContainer.new()
-	m.add_constant_override("margin_left", COLUMN_MARGIN)
+	m.add_constant_override("margin_left", 0)
 	m.add_constant_override("margin_right", 8)
 	m.add_constant_override("margin_top", 12)
 	m.add_constant_override("margin_bottom", 4)
 	m.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	h.add_child(m)
-	var title = Label.new()
-	title.text = "Contactos"
-	title.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	m.add_child(title)
 	var add = _icon_button("person_add", "Añadir contacto por JID")
 	add.connect("pressed", self, "_on_add_contact")
 	_add_btn = add
@@ -159,6 +201,16 @@ func _make_header() -> HBoxContainer:
 	_room_btn = room
 	h.add_child(room)
 	return h
+
+# Fija tu identidad en la cabecera (foto de perfil y nombre de la cuenta).
+func set_identity(p_bare: String, p_tex) -> void:
+	if _id_avatar != null:
+		_id_avatar.bare = p_bare
+		_id_avatar.set_texture(p_tex)
+	if _id_name != null:
+		_id_name.text = p_bare.split("@")[0] if p_bare != "" else ""
+	if _id_btn != null:
+		_id_btn.hint_tooltip = p_bare if p_bare != "" else "Cambiar foto de perfil"
 
 # Oculta los botones propios del roster (añadir/sala y pie de ajustes) cuando la
 # navegación vive en el sidebar (landscape).
@@ -315,6 +367,15 @@ func _icon_button(p_glyph: String, p_tip: String) -> IconButton:
 	b.connect("mouse_entered", self, "_on_icon_hover", [b, true])
 	b.connect("mouse_exited", self, "_on_icon_hover", [b, false])
 	return b
+
+# Caja circular pequeña para el botón overlay de la foto.
+func _circle_box(p_bg: Color, p_border: Color) -> StyleBoxFlat:
+	var s = StyleBoxFlat.new()
+	s.bg_color = p_bg
+	s.set_corner_radius_all(11)
+	s.set_border_width_all(1)
+	s.border_color = p_border
+	return s
 
 func _icon_toggle(p_glyph: String, p_key: String, p_tip: String) -> IconButton:
 	var b = IconButton.new()
@@ -565,6 +626,13 @@ func _rebuild() -> void:
 		if row.has_meta("orb"):
 			row.get_meta("orb").set_state(_agents[str(b)])
 			row.get_meta("orb").set_connected(_online.get(str(b), false))
+	_settle_scale()
+
+# Escala la geometría de las filas recién creadas al factor de zoom vigente.
+func _settle_scale() -> void:
+	var fz = get_node_or_null("/root/FontZoom")
+	if fz != null:
+		fz.settle(self)
 
 # Multicolumna (landscape): reparte contactos y salas en `_columns` columnas,
 # llenando de izquierda a derecha (orden de lectura) y con scroll lateral.

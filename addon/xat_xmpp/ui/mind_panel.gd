@@ -8,6 +8,7 @@ signal back_requested() # vista de un panel (móvil): volver al chat
 
 const P = preload("res://addons/xat_xmpp/ui/palette.gd")
 const Orb = preload("res://addons/xat_xmpp/ui/agent_orb.gd")
+const SmoothScroll = preload("res://addons/xat_xmpp/ui/smooth_scroll.gd")
 const CHIPS := [["status", P.TEXT], ["context", P.TEXT], ["compact", P.OK], ["model", P.TEXT], ["new", P.TEXT], ["abort", P.ERROR]]
 const MAX_NOTES := 3
 
@@ -18,6 +19,8 @@ var _model: Label
 var _grid: GridContainer
 var _badge: Label
 var _notes: VBoxContainer
+var _scroll: ScrollContainer
+var _smooth = SmoothScroll.new()
 var _tween: Tween
 
 func _init():
@@ -33,6 +36,9 @@ func _init():
 	sc.scroll_horizontal_enabled = false
 	sc.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	sc.mouse_filter = Control.MOUSE_FILTER_STOP
+	sc.connect("gui_input", self, "_on_scroll_input")
+	_scroll = sc
+	_smooth.setup(sc)
 	root.add_child(sc)
 	var v := VBoxContainer.new()
 	v.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -92,6 +98,24 @@ func _init():
 	add_child(_tween)
 	set_state({})
 
+func _ready() -> void:
+	set_process(false) # el integrador de scroll se activa on-demand
+
+func _process(p_delta: float) -> void:
+	if not _smooth.process(p_delta):
+		set_process(false)
+
+# Rueda/trackpad sobre el panel: scroll suave (ver smooth_scroll.gd).
+func _on_scroll_input(p_event) -> void:
+	var dy = SmoothScroll.wheel_delta(p_event)
+	if is_zero_approx(dy):
+		return
+	if _scroll == null:
+		return
+	get_tree().set_input_as_handled()
+	_smooth.kick(dy)
+	set_process(true)
+
 func set_agent(p_bare: String) -> void:
 	_name.text = p_bare.split("@")[0]
 	_name.hint_tooltip = p_bare
@@ -147,6 +171,7 @@ func _fill(p_rows: Array) -> void:
 	if p_rows.empty():
 		_grid.columns = 1
 		_grid.add_child(_label("sin telemetría", P.TEXT_DIM, P.FONT_REGULAR, 13))
+		_settle_scale()
 		return
 	_grid.columns = 2
 	for r in p_rows:
@@ -156,6 +181,13 @@ func _fill(p_rows: Array) -> void:
 		l.autowrap = true
 		l.rect_min_size.x = 120
 		_grid.add_child(l)
+	_settle_scale()
+
+# Escala la geometría de la telemetría recién creada al factor de zoom vigente.
+func _settle_scale() -> void:
+	var fz = _font_zoom()
+	if fz != null:
+		fz.settle(self)
 
 # Nota diegética bajo el orbe: aparece, se mantiene ~4 s y se desvanece.
 func show_note(p_text: String) -> void:
@@ -211,8 +243,21 @@ func _label(p_text: String, p_color: Color, p_font: String, p_size: int) -> Labe
 		var f := DynamicFont.new()
 		f.font_data = load(p_font)
 		f.size = p_size
+		# Registro en el zoom global: sin esto las etiquetas de la vista mente
+		# no se reescalaban al cambiar el zoom (a diferencia de XatTheme.font).
+		var fz = _font_zoom()
+		if fz != null:
+			fz.register(f, p_size)
 		l.add_font_override("font", f)
 	return l
+
+static func _font_zoom():
+	var loop = Engine.get_main_loop()
+	if loop is SceneTree:
+		var root = loop.get_root()
+		if root != null:
+			return root.get_node_or_null("FontZoom")
+	return null
 
 func _box(p_bg: Color, p_radius: int, p_pad: int, p_border = null) -> StyleBoxFlat:
 	var s := StyleBoxFlat.new()

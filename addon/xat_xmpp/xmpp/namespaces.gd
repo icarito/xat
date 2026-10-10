@@ -34,7 +34,8 @@ const HOOKS_ACTIVITY := "urn:openclaw:hooks:activity:0"
 const HOOKS_APPROVAL := "urn:openclaw:hooks:approval:0"
 const HOOKS_PROGRESS := "urn:openclaw:hooks:progress:0"
 const PUBSUB := "http://jabber.org/protocol/pubsub"
-const PEP := "http://jabber.org/protocol/pubsub#event"
+const PUBSUB_EVENT := "http://jabber.org/protocol/pubsub#event"
+const PEP := PUBSUB_EVENT
 # Adjuntos: XEP-0066 (OOB) para el link y XEP-0363 (HTTP Upload) para subirlo.
 const OOB := "jabber:x:oob"
 const HTTP_UPLOAD := "urn:xmpp:http:upload:0"

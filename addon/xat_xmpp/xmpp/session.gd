@@ -23,6 +23,10 @@ signal agent_state_changed(bare_jid, state)
 signal auth_failed()
 signal avatar_changed(bare_jid, texture)
 signal agent_hook(bare_jid, hook)
+signal pubsub_items_received(from_jid, node, items)
+signal pubsub_event_received(from_jid, event)
+signal pubsub_subscribed(from_jid, node, response)
+signal pubsub_error(id, from_jid, node, stanza)
 # Adjuntos (XEP-0363 + OOB): estado de subida y disponibilidad local del media.
 signal media_upload_state(bare_jid, request_id, state, url)
 signal media_ready(bare_jid, message_id, path, kind)
@@ -64,6 +68,7 @@ const Caps = preload("res://addons/xat_xmpp/xmpp/caps.gd")
 const Pep = preload("res://addons/xat_xmpp/xmpp/pep.gd")
 const AgentState = preload("res://addons/xat_xmpp/xmpp/agent_state.gd")
 const Avatar = preload("res://addons/xat_xmpp/xmpp/avatar.gd")
+const PubSub = preload("res://addons/xat_xmpp/xmpp/pubsub.gd")
 const Media = preload("res://addons/xat_xmpp/xmpp/media.gd")
 const HttpTransfer = preload("res://addons/xat_xmpp/xmpp/http_transfer.gd")
 const Muc = preload("res://addons/xat_xmpp/xmpp/muc.gd")
@@ -98,6 +103,7 @@ var _reconnect_timer: Timer
 var _ping_timer: Timer
 var _ping_outstanding := 0
 var _pending_mam := {} # queryid -> bare_jid
+var _pending_pubsub := {} # iq id -> {kind, to, node}
 var _auth_failed := false
 var last_sent_id := "" # id del último send_message (para matchear recibos 0184)
 
@@ -845,6 +851,30 @@ func get_recent_history(p_bare_jid: String, p_limit: int = 50) -> Array:
 		return []
 	return store.get_recent(p_bare_jid, p_limit)
 
+# Solicita los items actuales de un nodo PubSub. `p_to` puede ser un servicio
+# PubSub o el bare JID de un publicador PEP; p_max=0 omite paginación RSM.
+func request_pubsub_items(p_to: String, p_node: String, p_max: int = 0) -> int:
+	if not is_connected_to_server() or p_node == "":
+		return -1
+	var id = _new_id("ps")
+	_pending_pubsub[id] = {"kind": "items", "to": p_to, "node": p_node}
+	var rc = _transport.send(PubSub.build_items_request(id, p_to, p_node, p_max).to_xml())
+	if rc != 0:
+		_pending_pubsub.erase(id)
+	return rc
+
+# Suscribe el JID local (o `p_subscriber`) al nodo del destino.
+func subscribe_pubsub(p_to: String, p_node: String, p_subscriber: String = "") -> int:
+	if not is_connected_to_server() or p_node == "":
+		return -1
+	var subscriber = p_subscriber if p_subscriber != "" else _bare
+	var id = _new_id("ps")
+	_pending_pubsub[id] = {"kind": "subscribe", "to": p_to, "node": p_node}
+	var rc = _transport.send(PubSub.build_subscribe(id, p_to, p_node, subscriber).to_xml())
+	if rc != 0:
+		_pending_pubsub.erase(id)
+	return rc
+
 # Ejecuta un comando ad-hoc (o el selection IQ de un ítem inline) contra un JID.
 func execute_command(p_to: String, p_node: String, p_sessionid: String = "") -> int:
 	if not is_connected_to_server():
@@ -1020,6 +1050,9 @@ func _on_message(p_stanza) -> void:
 func _on_pep_event(p_stanza) -> void:
 	var bare = _bare_of(p_stanza.get_attr("from", ""))
 	var ev = Pep.parse_event(p_stanza)
+	var generic_event = PubSub.parse_event(p_stanza)
+	if generic_event["kind"] != "":
+		emit_signal("pubsub_event_received", p_stanza.get_attr("from", ""), generic_event)
 	if ev["retract"] or bare == "":
 		return
 	if ev["node"] == NS.AVATAR_METADATA:
@@ -1328,6 +1361,7 @@ func _on_iq(p_stanza) -> void:
 			emit_signal("roster_changed")
 		return
 	if iq_type == "result":
+		_handle_pubsub_result(p_stanza)
 		if p_stanza.get_child("query", NS.ROSTER) != null:
 			roster_model.apply_roster_result(p_stanza)
 			emit_signal("roster_changed")
@@ -1353,6 +1387,7 @@ func _on_iq(p_stanza) -> void:
 		_ping_outstanding = 0
 	elif iq_type == "error":
 		emit_signal("error_received", {})
+		_handle_pubsub_error(p_stanza)
 		var eid = p_stanza.get_attr("id", "")
 		if _push_ctx.has(eid):
 			_handle_push_result(_push_ctx[eid], false, Push.error_condition(p_stanza))
@@ -1366,6 +1401,28 @@ func _on_iq(p_stanza) -> void:
 		_on_mam_error(p_stanza)
 		if p_stanza.get_child("command", NS.COMMANDS) != null:
 			_on_command_response(p_stanza)
+
+func _handle_pubsub_result(p_stanza) -> void:
+	var id = p_stanza.get_attr("id", "")
+	var pending = _pending_pubsub.get(id, null)
+	if pending == null:
+		return
+	_pending_pubsub.erase(id)
+	if pending["kind"] == "items":
+		var result = PubSub.parse_items_result(p_stanza)
+		if result["node"] == "":
+			result["node"] = pending["node"]
+		emit_signal("pubsub_items_received", p_stanza.get_attr("from", pending["to"]), result["node"], result["items"])
+	elif pending["kind"] == "subscribe":
+		emit_signal("pubsub_subscribed", p_stanza.get_attr("from", pending["to"]), pending["node"], p_stanza)
+
+func _handle_pubsub_error(p_stanza) -> void:
+	var id = p_stanza.get_attr("id", "")
+	var pending = _pending_pubsub.get(id, null)
+	if pending == null:
+		return
+	_pending_pubsub.erase(id)
+	emit_signal("pubsub_error", id, p_stanza.get_attr("from", pending["to"]), pending["node"], p_stanza)
 
 # XEP-0357: resultado del registro de push. `enable` exitoso deja el estado
 # registrado; cualquier error lo marca fallido y avisa con la condición.

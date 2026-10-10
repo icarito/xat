@@ -44,7 +44,9 @@ const CANCEL_THRESHOLD := 110.0 # deslizar ← para cancelar
 const MAX_BUBBLES := 200  # más viejas se liberan (el modelo _messages queda completo)
 const RENDER_CHUNK := 12  # burbujas por frame en el render diferido (no bloquear la UI)
 const NEAR_PX := 80.0
-const WHEEL_STEP := 72.0  # px por muesca de rueda/pan; el ScrollContainer usa page/8 (brusco en pantallas grandes)
+# Scroll suave con inercia (ver smooth_scroll.gd): la rueda/pan empuja una
+# velocidad y _process la integra con fricción hasta detenerse.
+const SmoothScroll = preload("res://addons/xat_xmpp/ui/smooth_scroll.gd")
 const WEEKDAYS := ["dom", "lun", "mar", "mié", "jue", "vie", "sáb"]
 const MONTHS := ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
 
@@ -89,12 +91,12 @@ var _jump: Button
 var _more: Button
 var _anim: Timer  # fuerza redibujo del shimmer (low_processor_mode lo congela)
 var _file_dialog: FileDialog
+var _smooth = SmoothScroll.new()
 var _picker # FilePicker nativo (escritorio)
 var _attach_btn            # IconButton: adjuntar
 var _compose: MarginContainer
 var _row: HBoxContainer
 var _field: PanelContainer      # pastilla del campo
-var _emoji_btn                  # IconButton: emoji
 var _tail_btn                   # IconButton: mic <-> enviar
 var _rec_strip: PanelContainer  # tira de grabación
 var _rec_dot: Control
@@ -102,15 +104,14 @@ var _rec_timer: Label
 var _rec_wave                    # Waveform
 var _rec_hint: Label
 var _rec_trash                   # IconButton: cancelar grabación
-var _emoji_menu: PopupMenu
 var _attach_menu: PopupMenu
-var _emoji_values := []
 var _bottom_inset := 0
 var _attach_enabled := true
 var _voice_enabled := true
 var juice = null                 # inyectado por main (háptica/sonido), opcional
 var _recording := false
 var _sel_bar: PanelContainer
+var _sel_overlay: Control    # capa (no contenedora) donde vive la barra flotante
 var _lp: Timer
 var _press := false
 var _press_pos := Vector2.ZERO
@@ -196,6 +197,7 @@ func _build() -> void:
 	# Log de burbujas.
 	_scroll = ScrollContainer.new()
 	_scroll.scroll_horizontal_enabled = false
+	_smooth.setup(_scroll)
 	_scroll.add_stylebox_override("bg", XatTheme.box(Palette.BG0, 0, 0, 0))
 	var m = MarginContainer.new()
 	m.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -266,24 +268,30 @@ func _build() -> void:
 	_compose.add_constant_override("margin_bottom", 6)
 	_row = HBoxContainer.new()
 	_row.add_constant_override("separation", 8)
+	_row.alignment = BoxContainer.ALIGN_CENTER
+	# Adjuntar con el mismo estilo de pluma que el mic/enviar (icono vectorial),
+	# no un PNG: antes el paperclip (imagen) no combinaba con el mic (vector).
 	_attach_btn = IconButton.new()
-	_attach_btn.setup("paperclip", 40, Palette.TEXT_DIM, "Adjuntar (archivo o foto)")
+	_attach_btn.setup("paperclip", 48, Palette.TEXT_DIM, "Adjuntar (archivo o foto)")
+	_attach_btn.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	_attach_btn.connect("pressed", self, "_on_attach")
 	_row.add_child(_attach_btn)
 	# Pastilla del campo: el borde lo dibuja el PanelContainer (TextEdit sin caja).
 	_field = PanelContainer.new()
 	_field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_field.size_flags_vertical = Control.SIZE_SHRINK_END
-	_field.rect_min_size = Vector2(0, 44)
+	_field.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	_field.add_stylebox_override("panel", _pill_box(Palette.BG2, Palette.LINE))
 	var field_row = HBoxContainer.new()
 	field_row.add_constant_override("separation", 0)
+	field_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_input = TextEdit.new()
 	_input.wrap_enabled = true
 	_input.context_menu_enabled = true
 	_input.shortcut_keys_enabled = true
 	_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_input.size_flags_vertical = Control.SIZE_SHRINK_END
+	# SHRINK_CENTER: con una línea el campo queda centrado respecto a los iconos
+	# de adjuntar/mic (antes SHRINK_END lo pegaba abajo y el texto se veía alto).
+	_input.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	_input.connect("gui_input", self, "_on_input_event")
 	_input.connect("text_changed", self, "_fit_input")
 	_input.connect("text_changed", self, "_update_tail")
@@ -291,7 +299,7 @@ func _build() -> void:
 	_input.connect("focus_exited", self, "_on_input_focus", [false])
 	var empty = StyleBoxEmpty.new()
 	for side in ["left", "right", "top", "bottom"]:
-		var mv = {"left": 14, "right": 4, "top": 11, "bottom": 11}[side]
+		var mv = {"left": 14, "right": 4, "top": 10, "bottom": 10}[side]
 		empty.set("content_margin_" + side, mv)
 	for st in ["normal", "focus", "read_only"]:
 		_input.add_stylebox_override(st, empty)
@@ -299,21 +307,16 @@ func _build() -> void:
 	_hint.text = "Escribe un mensaje…"
 	_hint.add_color_override("font_color", Palette.TEXT_DIM)
 	_hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_hint.rect_position = Vector2(14, 11)
+	_hint.rect_position = Vector2(14, 10)
 	_input.add_child(_hint)
 	field_row.add_child(_input)
-	_emoji_btn = IconButton.new()
-	_emoji_btn.setup("emoji", 36, Palette.TEXT_DIM, "Emoji")
-	_emoji_btn.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	_emoji_btn.connect("pressed", self, "_on_emoji")
-	field_row.add_child(_emoji_btn)
 	_field.add_child(field_row)
 	_row.add_child(_field)
 	# Tira de grabación (reemplaza a la pastilla mientras se graba).
 	_rec_strip = PanelContainer.new()
 	_rec_strip.visible = false
 	_rec_strip.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_rec_strip.size_flags_vertical = Control.SIZE_SHRINK_END
+	_rec_strip.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	_rec_strip.rect_min_size = Vector2(0, 44)
 	_rec_strip.add_stylebox_override("panel", _pill_box(Palette.BG2, Palette.LINE))
 	var rec_row = HBoxContainer.new()
@@ -368,7 +371,6 @@ func _build() -> void:
 	_fit_input()
 	_build_select()
 	_build_occupants()
-	_build_emoji_menu()
 	# Timer de armado del gesto: al disparar, el toque se vuelve grabación.
 	_rec_arm_timer = Timer.new()
 	_rec_arm_timer.one_shot = true
@@ -385,27 +387,6 @@ func _draw_rec_dot() -> void:
 	_rec_dot.draw_circle(c, min(4.0, _rec_dot.rect_size.x * 0.4), Palette.ERROR)
 
 # Menú de emoji mínimo (Fase 1: unos pocos; el picker completo es Fase 2).
-func _build_emoji_menu() -> void:
-	_emoji_values = ["😀", "😂", "😊", "😍", "👍", "🙏", "🎉", "❤️"]
-	_emoji_menu = PopupMenu.new()
-	for i in range(_emoji_values.size()):
-		_emoji_menu.add_item(_emoji_values[i], i)
-	_emoji_menu.connect("id_pressed", self, "_on_emoji_pick")
-	add_child(_emoji_menu)
-
-func _on_emoji() -> void:
-	if _emoji_menu == null:
-		return
-	_emoji_menu.popup_centered()
-
-func _on_emoji_pick(p_id: int) -> void:
-	if p_id < 0 or p_id >= _emoji_values.size():
-		return
-	_input.insert_text_at_cursor(_emoji_values[p_id])
-	_fit_input()
-	_update_tail()
-
-
 # Popup de ocupantes de la sala: cada fila inserta `@nick` en el composer.
 func _build_occupants() -> void:
 	_occ_popup = PopupPanel.new()
@@ -431,6 +412,14 @@ func _build_occupants() -> void:
 # Barra flotante de selección (pulsación larga en táctil, o mantener el clic en
 # escritorio) con Copiar/Listo, y el detector de pulsación larga.
 func _build_select() -> void:
+	# El panel del chat es un PanelContainer (contenedor): todo hijo directo se
+	# estira al tamaño completo. La barra flotante necesita anclarse a sí misma,
+	# así que vive dentro de una capa Control común (que no reposiciona hijos).
+	_sel_overlay = Control.new()
+	_sel_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_sel_overlay.anchor_right = 1.0
+	_sel_overlay.anchor_bottom = 1.0
+	add_child(_sel_overlay)
 	_sel_bar = PanelContainer.new()
 	_sel_bar.anchor_left = 0.5
 	_sel_bar.anchor_right = 0.5
@@ -466,7 +455,7 @@ func _build_select() -> void:
 	row.add_child(done)
 	_sel_bar.add_child(row)
 	_sel_bar.visible = false
-	add_child(_sel_bar)
+	_sel_overlay.add_child(_sel_bar)
 	_lp = Timer.new()
 	_lp.one_shot = true
 	_lp.wait_time = 0.4
@@ -489,6 +478,7 @@ func set_bottom_inset(p_px: int) -> void:
 		_compose.add_constant_override("margin_bottom", 6 + p_px)
 
 func _ready() -> void:
+	set_process(false) # el integrador de scroll se activa on-demand
 	if get_tree() != null and not get_tree().is_connected("files_dropped", self, "_on_files_dropped"):
 		get_tree().connect("files_dropped", self, "_on_files_dropped")
 
@@ -970,6 +960,13 @@ func _input(p_event) -> void:
 		pressed = p_event.pressed
 		pos = p_event.position
 	elif p_event is InputEventScreenDrag:
+		# El arrastre táctil cancela la inercia de rueda para no pelear.
+		_cancel_smooth()
+		# Ajustando una selección: el arrastre extiende el rango elegido.
+		if _sel_bubble != null and is_instance_valid(_sel_bubble):
+			_press_pos = p_event.position
+			_sel_bubble.drag_selection(p_event.position)
+			return
 		if _press and p_event.position.distance_to(_press_pos) > 14.0:
 			_press_moved = true
 			if _lp != null:
@@ -995,38 +992,41 @@ func _input(p_event) -> void:
 		_press = false
 		if _lp != null:
 			_lp.stop()
+		# Cierra el gesto de selección (la barra queda visible para copiar).
+		if _sel_bubble != null and is_instance_valid(_sel_bubble):
+			_sel_bubble.end_selection_drag()
 
 # ¿El punto cae dentro del composer? (para no robar el gesto de selección).
 func _in_composer(p_pos: Vector2) -> bool:
 	return _compose != null and _compose.get_global_rect().has_point(p_pos)
 
 
-# Scroll de rueda/trackpad con paso fijo. Devuelve true si consumió el evento.
-# El ScrollContainer por defecto mueve page/8 por muesca: con ventanas grandes
-# son saltos enormes. Acá movemos unos pocos píxeles y respetamos el factor
-# (ruedas de alta resolución mandan factor chico → queda suave).
+# Detiene la inercia de scroll suave (p. ej. al iniciar un arrastre táctil).
+func _cancel_smooth() -> void:
+	_smooth.cancel()
+	set_process(false)
+
+# Scroll de rueda/trackpad suave (ver smooth_scroll.gd). Devuelve true si
+# consumió el evento.
 func _handle_wheel(p_event) -> bool:
 	if _scroll == null:
 		return false
-	var dy := 0.0
-	if p_event is InputEventMouseButton:
-		if not p_event.pressed:
-			return false
-		if p_event.button_index == BUTTON_WHEEL_UP:
-			dy = -WHEEL_STEP * p_event.factor
-		elif p_event.button_index == BUTTON_WHEEL_DOWN:
-			dy = WHEEL_STEP * p_event.factor
-		else:
-			return false
-	elif p_event is InputEventPanGesture:
-		dy = WHEEL_STEP * p_event.delta.y
-	else:
+	# Ctrl+rueda es zoom (lo maneja main): no consumirlo como scroll.
+	if p_event is InputEventMouseButton and p_event.control:
+		return false
+	var dy = SmoothScroll.wheel_delta(p_event)
+	if is_zero_approx(dy):
 		return false
 	if not get_global_rect().has_point(p_event.position):
 		return false
 	get_tree().set_input_as_handled()
-	_scroll.scroll_vertical = _scroll.scroll_vertical + int(dy)
+	_smooth.kick(dy)
+	set_process(true)
 	return true
+
+func _process(p_delta: float) -> void:
+	if not _smooth.process(p_delta):
+		set_process(false)
 
 func _on_long_press() -> void:
 	if not _press or _press_moved:
@@ -1109,6 +1109,23 @@ func set_media_local(p_id: String, p_path: String) -> void:
 				_bub(i).refresh()
 			return
 
+# Aplica a la burbuja del mensaje el estado del reproductor (play/pausa) y su
+# progreso 0..1. Lo llama main según el player global de audio.
+func set_audio_state(p_id: String, p_active: bool, p_frac: float) -> void:
+	for i in range(_messages.size()):
+		if str(_messages[i].get("id", "")) == p_id:
+			var b = _bub(i)
+			if b != null and b.has_method("set_audio_active"):
+				b.set_audio_active(p_active)
+				b.set_audio_progress(p_frac)
+			return
+
+# Quita el estado "reproduciendo" de todas las burbujas (al detener el player).
+func clear_audio_state() -> void:
+	for b in _bubbles:
+		if b != null and b.has_method("set_audio_active"):
+			b.set_audio_active(false)
+
 func set_peer(p_bare: String) -> void:
 	_exit_selection()
 	if _recording:
@@ -1185,7 +1202,7 @@ func _set_tools_visible(p_visible: bool) -> void:
 	_voice_enabled = p_visible
 	if _attach_btn != null:
 		_attach_btn.disabled = not p_visible
-		_attach_btn.set_icon_color(Palette.ASLEEP if not p_visible else Palette.TEXT_DIM)
+		_attach_btn.self_modulate = Palette.ASLEEP if not p_visible else Palette.TEXT_DIM
 	if not p_visible and _recording:
 		_rec_cancel_recording()
 	_update_tail()
@@ -1525,8 +1542,16 @@ func _rebuild(p_settle: bool = true) -> void:
 	var keep = _begin_render()
 	for i in range(_first, _messages.size()):
 		_make_bubble(i, false)
+	_settle_scale()
 	if p_settle:
 		_end_render(keep)
+
+# Escala la geometría de las burbujas recién creadas al factor de zoom vigente.
+func _settle_scale() -> void:
+	var fz = get_node_or_null("/root/FontZoom")
+	if fz != null:
+		for b in _bubbles:
+			fz.settle(b)
 
 # Deja la lista vacía para reconstruir. Devuelve la card activa a reanclar (o
 # null), que el llamador debe re-adjuntar en `_end_render`.
@@ -1830,7 +1855,7 @@ func _fit_input() -> void:
 		n += 1 + _input.get_line_wrap_count(i)
 	n = int(clamp(n, 1, MAX_LINES))
 	var lh = _input.get_font("font").get_height() + _input.get_constant("line_spacing")
-	_input.rect_min_size.y = n * lh + 22
+	_input.rect_min_size.y = n * lh + 20 # 10 de margen arriba + 10 abajo (ver _field)
 	_input.rect_size.y = 0
 	_hint.visible = _input.text == ""
 

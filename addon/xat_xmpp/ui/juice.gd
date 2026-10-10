@@ -10,7 +10,7 @@ const POOL := 4
 const THROTTLE_MS := 80
 
 var settings_path := "user://xat_settings.json"
-var settings := {"sound_enabled": true, "motion_enabled": true, "haptics_enabled": true, "volume_db": -8.0, "font_scale": 1.0}
+var settings := {"sound_enabled": true, "motion_enabled": true, "haptics_enabled": true, "volume_db": -8.0, "font_scale": 1.0, "roster_hidden": false, "mind_hidden": false}
 
 var _streams := {}
 var _last := {}

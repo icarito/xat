@@ -1,10 +1,17 @@
 extends Node
 
-# Zoom tipográfico global (Ctrl+scroll / Ctrl++ / Ctrl+- como un navegador).
+# Zoom global (Ctrl+scroll / Ctrl++ / Ctrl+- como un navegador).
 # Los DynamicFont que crea XatTheme.font() se registran aquí para poder
 # redimensionarlos en caliente; el factor se persiste en xat_settings.json.
+#
+# El zoom es PROPORCIONAL: además de los glifos reescala la geometría
+# (rect_min_size, separations, paddings de StyleBox) vía UiScale, aplicado
+# sobre el árbol vivo en cada cambio. Las fuentes creadas fuera de XatTheme
+# (p. ej. mind_panel) también deben registrarse aquí.
 
 signal scale_changed(scale)
+
+const UiScale = preload("res://addons/xat_xmpp/ui/ui_scale.gd")
 
 const DEFAULT := 1.0
 const MIN := 0.7
@@ -41,7 +48,23 @@ func set_scale(p_scale: float) -> void:
 		var f = e[0].get_ref()
 		if f != null:
 			f.size = _size(e[1])
+	# Geometría proporcional: reescala el árbol visible desde la base capturada.
+	apply_geometry()
 	emit_signal("scale_changed", scale)
+
+# Re-escala la geometría de todo el árbol (idempotente: el helper guarda bases).
+func apply_geometry() -> void:
+	var loop = Engine.get_main_loop()
+	if loop is SceneTree:
+		var root = loop.get_root()
+		if root != null:
+			UiScale.apply(root, scale)
+
+# Escala un subárbol recién (re)construido (filas, burbujas, etiquetas). Los
+# nodos nuevos no tenían base capturada: el helper la fija y aplica el factor.
+func settle(p_node: Node) -> void:
+	if p_node != null:
+		UiScale.apply(p_node, scale)
 
 func _size(p_base: int) -> int:
 	return int(max(1, int(round(p_base * scale))))

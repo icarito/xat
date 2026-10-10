@@ -5,8 +5,11 @@ extends VBoxContainer
 # Si el mensaje trae `attach`, en vez del link crudo se dibuja la media
 # (miniatura, reproductor de audio o chip de archivo).
 
-signal media_action(rec, action) # action: "open" | "play"
+signal media_action(rec, action) # action: "open" | "play" | "pause"
 signal nick_clicked(nick)        # chip de remitente de sala (@mención)
+
+const IconButton = preload("res://addons/xat_xmpp/ui/icon_button.gd")
+const AudioWave = preload("res://addons/xat_xmpp/ui/audio_wave.gd")
 
 const LocalTime = preload("res://addons/xat_xmpp/ui/localtime.gd")
 const Palette = preload("res://addons/xat_xmpp/ui/palette.gd")
@@ -58,6 +61,10 @@ var rec := {}
 var _last := false
 var _gap := Palette.GAP
 var _play := false
+var _audio_btn
+var _audio_wave
+var _audio_info: Label
+var _audio_active := false
 var _spacer: Control
 var _panel: PanelContainer
 var _label: RichTextLabel
@@ -231,14 +238,15 @@ func text_global_rect() -> Rect2:
 func is_text_visible() -> bool:
 	return _label.visible
 
+# --- Selección de texto ---
+# El RichTextLabel 3.x no procesa eventos táctiles para seleccionar, pero su
+# `_gui_input` sí ancla con un press y extiende con motion. En táctil le
+# inyectamos mouse sintético: press al mantener, motion al arrastrar, release al
+# soltar. Así se puede elegir sólo una parte del mensaje.
 var _drag_active := false
 var _last_global := Vector2.ZERO
 
-# Inicia una selección parcial anclada en `p_global` (donde el dedo tocó): el
-# label recibe un "mouse down" sintético y los arrastres posteriores extienden la
-# selección. Así se puede elegir sólo una parte del mensaje, no todo.
 func begin_selection_at(p_global: Vector2) -> void:
-	_label.mouse_filter = Control.MOUSE_FILTER_STOP
 	_label.deselect()
 	_drag_active = true
 	_feed_mouse(p_global, true)
@@ -252,26 +260,22 @@ func end_selection_drag() -> void:
 		_drag_active = false
 		_feed_mouse(_last_global, false)
 
-# Selecciona todo el mensaje (botón "Todo" de la barra).
+# Selección total (botón "Todo" de la barra).
 func select_all() -> void:
-	_label.mouse_filter = Control.MOUSE_FILTER_STOP
+	_label.deselect()
 	_label.select_all()
 
 func begin_selection() -> void:
-	_label.mouse_filter = Control.MOUSE_FILTER_STOP
-	_label.select_all()
+	select_all()
 
 func end_selection() -> void:
 	if _drag_active:
 		end_selection_drag()
 	_label.deselect()
-	_label.mouse_filter = Control.MOUSE_FILTER_IGNORE if OS.has_touchscreen_ui_hint() else Control.MOUSE_FILTER_PASS
 
 func selected_text() -> String:
 	return _label.get_selected_text()
 
-# El RichTextLabel 3.x no procesa eventos táctiles para la selección: se los
-# inyectamos como mouse sintético en coordenadas locales del label.
 func _feed_mouse(p_global: Vector2, p_pressed: bool) -> void:
 	_last_global = p_global
 	var local = _label.get_global_transform().affine_inverse().xform(p_global)
@@ -373,25 +377,50 @@ func _add_image(p_local: String, p_name: String) -> void:
 	_media_host.add_child(tr)
 
 func _add_audio(p_local: String, p_name: String, p_size: int, p_duration_ms: int) -> void:
+	# Reproductor embebido: botón play/pausa + barra de progreso + duración. Antes
+	# era un botón "▶" plano, sin estado ni avance visible.
 	var row = HBoxContainer.new()
 	row.add_constant_override("separation", 8)
-	var play = Button.new()
-	play.text = "▶"
-	play.focus_mode = Control.FOCUS_NONE
-	play.rect_min_size = Vector2(38, 38)
-	play.connect("pressed", self, "_emit_media", ["play"])
-	row.add_child(play)
+	_audio_btn = IconButton.new()
+	_audio_btn.setup("play", 36, Palette.TEXT, "Reproducir")
+	_audio_btn.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_audio_btn.connect("pressed", self, "_on_audio_press")
+	row.add_child(_audio_btn)
+	var col = VBoxContainer.new()
+	col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	col.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	col.add_constant_override("separation", 2)
+	_audio_wave = AudioWave.new()
+	_audio_wave.rect_min_size = Vector2(120, 18)
+	_audio_wave.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	col.add_child(_audio_wave)
 	var info := p_name
 	if p_duration_ms > 0:
-		info = Media.format_duration_ms(p_duration_ms) + " · " + p_name
+		info = Media.format_duration_ms(p_duration_ms)
 	if p_size > 0:
 		info += " · " + Media.format_size(p_size)
 	elif p_local == "":
 		info += " · tocar para oír"
-	var l = _media_label(info, Palette.TEXT)
-	l.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	row.add_child(l)
+	_audio_info = _media_label(info, Palette.TEXT_DIM)
+	col.add_child(_audio_info)
+	row.add_child(col)
 	_media_host.add_child(row)
+
+# El botón alterna reproducir/pausar según el estado del player global.
+func _on_audio_press() -> void:
+	_emit_media("pause" if _audio_active else "play")
+
+# Estado del player global aplicado a esta burbuja (acción solicitada).
+func set_audio_active(p_active: bool) -> void:
+	_audio_active = p_active
+	if _audio_btn != null:
+		_audio_btn.set_glyph("pause" if p_active else "play")
+		_audio_btn.hint_tooltip = "Pausar" if p_active else "Reproducir"
+
+# Progreso en vivo (0..1); mueve el marcador del waveform.
+func set_audio_progress(p_frac: float) -> void:
+	if _audio_wave != null:
+		_audio_wave.set_progress(clamp(p_frac, 0.0, 1.0))
 
 func _add_file(p_has_local: bool, p_name: String, p_size: int) -> void:
 	var txt = p_name

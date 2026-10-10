@@ -18,6 +18,9 @@ const XatTheme = preload("res://addons/xat_xmpp/ui/xat_theme.gd")
 const MindPanel = preload("res://addons/xat_xmpp/ui/mind_panel.gd")
 const AgentOrb = preload("res://addons/xat_xmpp/ui/agent_orb.gd")
 const AvatarBadge = preload("res://addons/xat_xmpp/ui/avatar_badge.gd")
+const Ns = preload("res://addons/xat_xmpp/xmpp/namespaces.gd")
+const Pep = preload("res://addons/xat_xmpp/xmpp/pep.gd")
+const Avatar = preload("res://addons/xat_xmpp/xmpp/avatar.gd")
 const Juice = preload("res://addons/xat_xmpp/ui/juice.gd")
 const P = preload("res://addons/xat_xmpp/ui/palette.gd")
 const StartupSplash = preload("res://addons/xat_xmpp/ui/startup_splash.gd")
@@ -27,10 +30,13 @@ const Media = preload("res://addons/xat_xmpp/xmpp/media.gd")
 const MediaUtil = preload("res://addons/xat_xmpp/ui/media_util.gd")
 const MediaLightbox = preload("res://addons/xat_xmpp/ui/media_lightbox.gd")
 const Notifier = preload("res://addons/xat_xmpp/ui/notifier.gd")
+const FontZoom = preload("res://addons/xat_xmpp/ui/font_zoom.gd")
 const Push = preload("res://addons/xat_xmpp/xmpp/push.gd")
 const FilePicker = preload("res://addons/xat_xmpp/ui/file_picker.gd")
 const ClipboardImage = preload("res://addons/xat_xmpp/ui/clipboard_image.gd")
 const XatXmpp = preload("res://addons/xat_xmpp/xat_xmpp.gd")
+const FleetMonitor = preload("res://fleet_monitor.gd")
+const FleetSnapshot = preload("res://fleet_snapshot.gd")
 
 # Por debajo de este ancho el panel "mente" se oculta (se abre con el orbe del header).
 const MIND_MIN_WIDTH := 1000
@@ -47,6 +53,9 @@ var _chat
 var _split
 var _mind
 var _mind_pinned := false # abierto a mano en pantallas angostas
+var _roster_hidden := false # desktop: roster colapsado (más ancho para el chat)
+var _mind_hidden := false   # desktop: mente colapsada a mano
+var _roster_toggle
 var _header_orb
 var _header_avatar
 var _show_roster := true # vista de un panel: qué se ve
@@ -61,6 +70,7 @@ var _invite_dialog
 var _prompt_dialog
 var _room_settings
 var _prompt_ctx := {}
+var _zoom_target := 1.0 # factor de zoom objetivo (se aplica coalescido en _process)
 var _sidebar
 var _sidebar_title
 var _sidebar_identity
@@ -87,6 +97,8 @@ var _media_pending := {} # message_id -> acción pendiente tras descargar la med
 var _rec_timer: Timer
 var _rec_start_ms := 0
 var _playing_path := ""
+var _playing_id := ""
+var _playing_active := false
 var _native_media = null          # singleton XatMedia (selector/cámara nativa)
 var _pending_media_peer := ""     # peer que espera el resultado del selector
 var _pending_avatar := false      # el selector está eligiendo la foto de perfil
@@ -94,8 +106,13 @@ var _avatar_picker               # FilePicker nativo para la foto de perfil
 var _avatar_file_dialog          # fallback FileDialog para la foto de perfil
 var _clipboard                   # ClipboardImage (pegar imagen en escritorio)
 var _notifier
+var _fleet_monitor
+var _fleet_snapshot := {}
+var _own_avatar_id := ""
+var _own_avatar_type := "image/png"
 
 func _ready() -> void:
+	set_process(false) # el zoom se aplica coalescido on-demand
 	theme = XatTheme.build()
 	juice = Juice.new()
 	add_child(juice)
@@ -106,7 +123,10 @@ func _ready() -> void:
 	# la UI para que las fuentes nazcan ya al tamaño guardado.
 	var fz = get_node_or_null("/root/FontZoom")
 	if fz != null:
-		fz.set_scale(float(juice.settings.get("font_scale", 1.0)))
+		_zoom_target = float(juice.settings.get("font_scale", 1.0))
+		fz.set_scale(_zoom_target)
+	_roster_hidden = bool(juice.settings.get("roster_hidden", false))
+	_mind_hidden = bool(juice.settings.get("mind_hidden", false))
 	session = SessionScript.new()
 	session.name = "Session"
 	add_child(session)
@@ -137,6 +157,8 @@ func _ready() -> void:
 	session.connect("muc_invite", self, "_on_muc_invite")
 	session.connect("muc_error", self, "_on_muc_error")
 	session.connect("muc_config_form", self, "_on_muc_config_form")
+	session.connect("pubsub_event_received", self, "_on_pubsub_event")
+	session.connect("pubsub_items_received", self, "_on_pubsub_items")
 
 	_account = AccountPanel.new()
 	_account.anchor_right = 1.0
@@ -185,6 +207,15 @@ func _ready() -> void:
 	# Sidebar de navegación/acciones (sólo móvil landscape), a la derecha.
 	_build_sidebar()
 	# Mini-orbe en el header del chat: abre/cierra la mente en pantallas angostas.
+	# Botón ☰ para colapsar/mostrar el roster en desktop (donde ambos paneles no
+	# siempre caben). En pantallas de un panel el propio header ya navega.
+	_roster_toggle = Button.new()
+	_roster_toggle.text = "\u2630"
+	_roster_toggle.flat = true
+	_roster_toggle.focus_mode = Control.FOCUS_NONE
+	_roster_toggle.hint_tooltip = "Mostrar/ocultar contactos"
+	_roster_toggle.connect("pressed", self, "_toggle_roster")
+	_chat.header_slot.add_child(_roster_toggle)
 	_header_avatar = AvatarBadge.new(34.0)
 	_chat.header_slot.add_child(_header_avatar)
 	_header_orb = AgentOrb.new()
@@ -192,6 +223,17 @@ func _ready() -> void:
 	_header_orb.visible = false
 	_chat.header_slot.add_child(_header_orb)
 	_header_orb.connect("clicked", self, "_on_header_orb")
+	_fleet_monitor = FleetMonitor.new()
+	_fleet_monitor.name = "FleetMonitor"
+	_fleet_monitor.set_node(_fleet_monitoring_node())
+	_fleet_monitor.connect("close_requested", self, "_close_fleet_monitor")
+	add_child(_fleet_monitor)
+	if _fleet_monitoring_jid() != "":
+		var fleet_button = Button.new()
+		fleet_button.text = "Fleet"
+		fleet_button.hint_tooltip = "JoeWork fleet monitoring"
+		fleet_button.connect("pressed", self, "_open_fleet_monitor")
+		_chat.header_slot.add_child(fleet_button)
 	connect("resized", self, "_update_mind_visibility")
 	connect("resized", self, "_apply_mobile_stretch")
 	connect("resized", self, "_update_safe_area")
@@ -318,6 +360,8 @@ func _on_state_changed(p_state: int) -> void:
 		SessionScript.State.CONNECTED:
 			_account.set_busy(false)
 			_account.set_status("Conectado como %s" % session.bare())
+			_sync_roster_identity()
+			session.request_pubsub_items(session.bare(), Ns.AVATAR_METADATA, 1)
 			_account.visible = false
 			_split.visible = true
 			if _notifier != null:
@@ -331,6 +375,11 @@ func _on_state_changed(p_state: int) -> void:
 			# dependía de un resize posterior y podía quedar en dos paneles.
 			_update_mind_visibility()
 			_refresh_rooms()
+			# The app consumes Operator's versioned projection from its own PEP.
+			var monitoring_jid = _fleet_monitoring_jid()
+			if monitoring_jid != "":
+				session.request_pubsub_items(monitoring_jid, _fleet_monitoring_node(), 1)
+				session.subscribe_pubsub(monitoring_jid, _fleet_monitoring_node())
 			# Persistir la cuenta recién conectada (archivo 0600).
 			if not _pending_cfg.empty():
 				_credentials.save(Credentials.DEFAULT_PATH, _pending_cfg)
@@ -341,8 +390,75 @@ func _on_state_changed(p_state: int) -> void:
 			_account.set_busy(false)
 			_account.set_status("Desconectado.")
 
+func _on_pubsub_items(p_from: String, p_node: String, p_items: Array) -> void:
+	# Avatar propio (XEP-0084): pedimos nuestro metadata al conectar para mostrar
+	# la foto en el roster. Cargamos de caché o pedimos el item de datos.
+	if p_node == Ns.AVATAR_METADATA and _bare_jid(p_from).to_lower() == session.bare().to_lower() and not p_items.empty():
+		var meta = Pep.parse_avatar_metadata(p_items[p_items.size() - 1])
+		if str(meta["id"]) != "":
+			_own_avatar_id = str(meta["id"])
+			_own_avatar_type = str(meta["type"])
+			var path = Avatar.cache_path(meta["id"], meta["type"])
+			var tex = Avatar.load_texture(path)
+			if tex != null:
+				_on_avatar_ready(session.bare(), tex)
+			else:
+				session.request_pubsub_items(session.bare(), Ns.AVATAR_DATA, 1)
+		return
+	if p_node == Ns.AVATAR_DATA and _bare_jid(p_from).to_lower() == session.bare().to_lower() and not p_items.empty():
+		var item = p_items[p_items.size() - 1]
+		var data = Pep.parse_avatar_data({"item_id": item.get("id", ""), "payload": item.get("payload", null)})
+		if str(data["base64"]) != "":
+			var id = str(data["item_id"]) if str(data["item_id"]) != "" else _own_avatar_id
+			var path2 = Avatar.cache_path(id, _own_avatar_type)
+			Avatar.save(path2, Marshalls.base64_to_raw(data["base64"]))
+			var tex2 = Avatar.load_texture(path2)
+			if tex2 != null:
+				_on_avatar_ready(session.bare(), tex2)
+		return
+	if p_node != _fleet_monitoring_node() or _bare_jid(p_from).to_lower() != _fleet_monitoring_jid().to_lower() or p_items.empty(): return
+	var payload = p_items[p_items.size() - 1].get("payload", null)
+	if payload == null: return
+	_fleet_snapshot = FleetSnapshot.parse(payload)
+	_fleet_monitor.show_snapshot(_fleet_snapshot)
+
+# Fija el avatar propio ya resuelto (caché) en roster y cabecera.
+func _on_avatar_ready(p_bare: String, p_tex) -> void:
+	_roster.set_avatar(p_bare, p_tex)
+	_sync_roster_identity()
+
+func _on_pubsub_event(p_from: String, p_event: Dictionary) -> void:
+	if str(p_event.get("node", "")) != _fleet_monitoring_node() or _bare_jid(p_from).to_lower() != _fleet_monitoring_jid().to_lower(): return
+	var items = p_event.get("items", [])
+	if items.empty(): return
+	var payload = items[items.size() - 1].get("payload", null)
+	if payload == null: return
+	_fleet_snapshot = FleetSnapshot.parse(payload)
+	_fleet_monitor.show_snapshot(_fleet_snapshot)
+
+func _open_fleet_monitor() -> void:
+	_fleet_monitor.show_snapshot(_fleet_snapshot)
+	_fleet_monitor.visible = true
+
+func _close_fleet_monitor() -> void:
+	_fleet_monitor.visible = false
+
+func _fleet_monitoring_jid() -> String:
+	var configured = OS.get_environment("XAT_JOEWORK_MONITORING_JID").strip_edges()
+	var resource = configured.find("/")
+	return configured.substr(0, resource) if resource >= 0 else configured
+
+func _fleet_monitoring_node() -> String:
+	var configured = OS.get_environment("XAT_JOEWORK_MONITORING_NODE").strip_edges()
+	return configured if configured != "" else FleetSnapshot.DEFAULT_NODE
+
+func _bare_jid(p_jid: String) -> String:
+	var resource = p_jid.find("/")
+	return p_jid.substr(0, resource) if resource >= 0 else p_jid
+
 func _on_roster_changed() -> void:
 	_roster.set_peers(session.roster_model.bare_jids())
+	_sync_roster_identity()
 	# Orden por actividad: último mensaje guardado de cada contacto.
 	for b in session.roster_model.bare_jids():
 		var last = session.get_recent_history(b, 1)
@@ -873,7 +989,7 @@ func _on_media_ready(bare: String, message_id: String, path: String, kind: Strin
 	var action = _media_pending.get(message_id, "")
 	if action != "":
 		_media_pending.erase(message_id)
-		_perform_media(action, path, kind)
+		_perform_media(action, path, kind, message_id)
 
 func _on_media_failed(bare: String, message_id: String, reason: String) -> void:
 	_media_pending.erase(message_id)
@@ -889,15 +1005,15 @@ func _on_media_action(peer: String, rec: Dictionary, action: String) -> void:
 		return
 	var local = str(attach.get("local", ""))
 	var kind = str(attach.get("kind", "file"))
-	if local != "" and File.new().file_exists(local):
-		_perform_media(action, local, kind)
-		return
 	var mid = str(rec.get("id", ""))
+	if local != "" and File.new().file_exists(local):
+		_perform_media(action, local, kind, mid)
+		return
 	if mid != "":
 		_media_pending[mid] = action
 		session.ensure_media(peer, rec)
 
-func _perform_media(action: String, path: String, kind: String) -> void:
+func _perform_media(action: String, path: String, kind: String, p_id: String = "") -> void:
 	if action == "open":
 		if kind == "image":
 			_lightbox.open(path)
@@ -905,21 +1021,59 @@ func _perform_media(action: String, path: String, kind: String) -> void:
 			juice.toast("No se puede abrir este tipo de archivo acá", P.ERROR)
 		else:
 			OS.shell_open(ProjectSettings.globalize_path(path))
-	elif action == "play":
+	elif action == "play" or action == "pause":
+		if action == "pause" and _playing_path == path and _audio.playing:
+			_audio.stream_paused = true
+			_playing_active = false
+			_sync_audio_ui()
+			print("xat: audio pausado %s" % path)
+			return
+		if _playing_path == path and _audio.stream_paused:
+			_audio.stream_paused = false
+			_playing_active = true
+			set_process(true)
+			_sync_audio_ui()
+			return
 		if _playing_path == path and _audio.playing:
 			_audio.stop()
 			_playing_path = ""
+			_playing_active = false
+			_sync_audio_ui()
 			return
+		_audio.stop()
 		var stream = MediaUtil.load_audio(path)
 		if stream == null:
 			juice.toast("Formato de audio no soportado (%s)" % Media.extension_of(path).to_upper(), P.ERROR)
+			print("xat: audio no soportado: %s" % path)
 		else:
 			_audio.stream = stream
 			_audio.play()
 			_playing_path = path
+			_playing_id = p_id
+			_playing_active = true
+			set_process(true)
+			_sync_audio_ui()
+			print("xat: audio play %s (playing=%s)" % [path, _audio.playing])
+
+# Refleja en la burbuja el estado del player global (play/pausa + progreso).
+func _sync_audio_ui() -> void:
+	if _chat == null:
+		return
+	if _playing_id == "":
+		_chat.clear_audio_state()
+		return
+	var frac := 0.0
+	if _audio.stream != null and _audio.stream.get_length() > 0.0:
+		frac = _audio.get_playback_position() / _audio.stream.get_length()
+	_chat.set_audio_state(_playing_id, _playing_active, frac)
 
 func _on_audio_finished() -> void:
 	_playing_path = ""
+	_playing_id = ""
+	_playing_active = false
+	_sync_audio_ui()
+	var fz = get_node_or_null("/root/FontZoom")
+	set_process(fz != null and not is_equal_approx(fz.scale, _zoom_target))
 
 func _on_message_corrected(p_rec: Dictionary) -> void:
 	if _bare(p_rec.get("from", "")) == _peer:
@@ -1128,13 +1282,16 @@ func _update_mind_visibility() -> void:
 	var single = _single_pane()
 	# Un solo panel (móvil/angosto): la mente ocupa toda la pantalla. Ancho: sólo
 	# convive con los demás paneles si hay espacio o si se fijó a mano.
-	var mind = is_agent and (_mind_pinned if single else (rect_size.x >= MIND_MIN_WIDTH or _mind_pinned))
+	var mind = is_agent and not _mind_hidden and (_mind_pinned if single else (rect_size.x >= MIND_MIN_WIDTH or _mind_pinned))
 	_update_panes(single, mind)
 	_mind.visible = mind
 	_mind.set_back_visible(mind and single)
 	# El mini-orbe del header aparece cuando la mente no cabe, o siempre en un
 	# solo panel (móvil/landscape) para poder abrirla.
-	_header_orb.visible = is_agent and (single or rect_size.x < MIND_MIN_WIDTH)
+	_header_orb.visible = is_agent and (single or rect_size.x < MIND_MIN_WIDTH or _mind_hidden)
+	# El ☰ sólo tiene sentido cuando hay roster que colapsar (desktop, 2 paneles).
+	if _roster_toggle != null:
+		_roster_toggle.visible = not single
 
 # Un panel por vez: pantalla angosta, o móvil en landscape (ahí se colapsa el
 # roster y el nombre/orbe del agente quedan fijos en el header, a la derecha).
@@ -1380,7 +1537,9 @@ func _update_panes(p_single: bool, p_mind: bool) -> void:
 		_roster.visible = roster and not p_mind
 		_chat.visible = not roster and not p_mind
 	else:
-		_roster.visible = true
+		# Desktop: ambos paneles, pero el roster se puede colapsar a mano para
+		# ganar ancho cuando no caben los tres (roster + chat + mente).
+		_roster.visible = not _roster_hidden
 		_chat.visible = true
 	_roster.size_flags_horizontal = Control.SIZE_EXPAND_FILL if p_single else 0
 	_mind.size_flags_horizontal = Control.SIZE_EXPAND_FILL if p_single else 0
@@ -1484,7 +1643,20 @@ func _follow_keyboard() -> void:
 		_chat.set_bottom_inset(0)
 
 func _on_header_orb() -> void:
-	_mind_pinned = not _mind_pinned
+	# En un panel: abre/cierra la mente (fijada). En desktop: colapsa/expande.
+	if _single_pane():
+		_mind_pinned = not _mind_pinned
+	else:
+		_mind_hidden = not _mind_hidden
+		if juice != null:
+			juice.set_setting("mind_hidden", _mind_hidden)
+	_update_mind_visibility()
+
+# Desktop: colapsa/muestra el roster para ganar ancho (persistido).
+func _toggle_roster() -> void:
+	_roster_hidden = not _roster_hidden
+	if juice != null:
+		juice.set_setting("roster_hidden", _roster_hidden)
 	_update_mind_visibility()
 
 # Zoom de letra como en un navegador: Ctrl+scroll, Ctrl+= y Ctrl+-.
@@ -1508,26 +1680,42 @@ func _input(p_event) -> void:
 		elif p_event.scancode in [KEY_MINUS, KEY_KP_SUBTRACT]:
 			_zoom(-1)
 		elif p_event.scancode == KEY_0:
-			var fz = get_node_or_null("/root/FontZoom")
-			if fz != null:
-				fz.reset()
-				_persist_scale()
-				_roster.refresh()
-				_chat.refit_scroll()
+			set_zoom(1.0)
 			get_tree().set_input_as_handled()
 
 func _zoom(p_dir: int) -> void:
 	var fz = get_node_or_null("/root/FontZoom")
 	if fz == null:
 		return
-	if p_dir > 0:
-		fz.zoom_in()
-	else:
-		fz.zoom_out()
-	_persist_scale()
-	_roster.refresh() # recalcula los anchos medidos (clip_text) al nuevo tamaño
-	_chat.refit_scroll() # conserva el punto de lectura al cambiar la letra
+	# Coalescing: varios gestos en el mismo frame (rueda rápida) se agrupan y
+	# se aplican una sola vez en _process. Antes cada muesca reescalaba todo el
+	# árbol y reconstruía el roster: subir el zoom se sentía lento.
+	_zoom_target = clamp(_zoom_target + float(p_dir) * FontZoom.STEP, FontZoom.MIN, FontZoom.MAX)
+	set_process(true)
 	get_tree().set_input_as_handled()
+
+func _process(_delta: float) -> void:
+	if _playing_active and _audio.playing:
+		_sync_audio_ui()
+		return
+	# Zoom objetivo pendiente (coalescing de Ctrl+rueda/teclas).
+	var fz = get_node_or_null("/root/FontZoom")
+	if fz != null and not is_equal_approx(fz.scale, _zoom_target):
+		set_zoom(_zoom_target)
+		return
+	set_process(false)
+
+# Aplica el zoom (fuente + geometría) y conserva el punto de lectura. No
+# reconstruye el roster: UiScale reescala las filas vivas desde su base.
+func set_zoom(p_scale: float) -> void:
+	var fz = get_node_or_null("/root/FontZoom")
+	if fz == null:
+		return
+	_zoom_target = clamp(p_scale, FontZoom.MIN, FontZoom.MAX)
+	fz.set_scale(_zoom_target) # reescala fuentes + geometría de todo el árbol
+	_persist_scale()
+	if _chat != null:
+		_chat.refit_scroll() # conserva el punto de lectura al cambiar la letra
 
 func _persist_scale() -> void:
 	var fz = get_node_or_null("/root/FontZoom")
@@ -1538,6 +1726,15 @@ func _on_avatar_changed(p_bare: String, p_tex) -> void:
 	_roster.set_avatar(p_bare, p_tex)
 	if p_bare == _peer:
 		_header_avatar.set_texture(p_tex)
+	if p_bare == session.bare():
+		_sync_roster_identity()
+
+# Tu foto + nombre en la cabecera del roster (XEP-0084 propio).
+func _sync_roster_identity() -> void:
+	if _roster == null:
+		return
+	var my_bare = session.bare()
+	_roster.set_identity(my_bare, session.avatars.get(my_bare))
 
 func _on_auth_failed() -> void:
 	_account.visible = true

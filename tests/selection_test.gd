@@ -1,8 +1,8 @@
 extends SceneTree
 
-# Selección de texto por pulsación larga: el label siempre tiene la selección
-# habilitada y `begin_selection` lo pone a consumir el arrastre (STOP);
-# `end_selection` restaura el filtro según plataforma.
+# Selección de texto: el label tiene la selección habilitada; la selección total
+# es directa (`select_all`) y la parcial se hace inyectando mouse sintético
+# (press/motion/release) al `_gui_input` del label. El filtro de mouse no cambia.
 
 var _fail := 0
 
@@ -15,12 +15,20 @@ func _init():
 	check(b._label.selection_enabled, "selección habilitada (incluido táctil)")
 	var idle = Control.MOUSE_FILTER_IGNORE if OS.has_touchscreen_ui_hint() else Control.MOUSE_FILTER_PASS
 	check(b._label.mouse_filter == idle, "sin seleccionar, el arrastre pasa")
+
+	# Selección total.
 	b.begin_selection()
-	check(b._label.mouse_filter == Control.MOUSE_FILTER_STOP, "seleccionando consume el arrastre")
-	var t = b.selected_text()
-	check(t == "" or t.find("hola") >= 0, "selected_text no rompe")
+	check(b.selected_text().find("hola") >= 0, "select_all selecciona el texto")
+	check(b._label.mouse_filter == idle, "seleccionar no altera el filtro de mouse")
 	b.end_selection()
-	check(b._label.mouse_filter == idle, "al salir restaura el filtro")
+	check(b.selected_text() == "", "end_selection limpia la selección")
+
+	# Selección parcial (gesto sintético) no rompe ni deja estado colgado.
+	b.begin_selection_at(Vector2(4, 4))
+	b.drag_selection(Vector2(40, 10))
+	b.end_selection_drag()
+	check(b.selected_text() is String, "gesto de selección parcial no rompe")
+	b.end_selection()
 	check(b.is_text_visible(), "texto visible con selección soportada")
 	b.queue_free()
 	if _fail == 0:
