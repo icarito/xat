@@ -1,6 +1,7 @@
 extends Control
 
 signal close_requested
+signal source_requested
 
 const P = preload("res://addons/xat_xmpp/ui/palette.gd")
 const XatTheme = preload("res://addons/xat_xmpp/ui/xat_theme.gd")
@@ -14,7 +15,7 @@ const COLOR_HIBERNATED := Color("7e91b5")
 var _content
 var _operations_content
 var _freshness
-var _node := "joework/monitoring/team"
+var _node := ""
 var _summary_values := {}
 var _cost_rows
 
@@ -51,7 +52,7 @@ func _build_header(p_layout: VBoxContainer) -> void:
 	title_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	title_box.add_constant_override("separation", 1)
 	header.add_child(title_box)
-	var eyebrow = _label("JOEWORK  /  FLEET OPERATIONS", P.AGENT_EDGE, P.FONT_MEDIUM, 11)
+	var eyebrow = _label("FLEET  /  XMPP MONITORING", P.AGENT_EDGE, P.FONT_MEDIUM, 11)
 	title_box.add_child(eyebrow)
 	var title = _label("Fleet monitor", P.TEXT, P.FONT_BOLD, 24)
 	title_box.add_child(title)
@@ -62,12 +63,21 @@ func _build_header(p_layout: VBoxContainer) -> void:
 	_freshness.hint_tooltip = "Projection freshness"
 	_freshness.rect_min_size.x = 210
 	header.add_child(_freshness)
+	var source = Button.new()
+	source.text = "Source"
+	source.hint_tooltip = "Configurar publicador y nodo PubSub"
+	source.focus_mode = Control.FOCUS_NONE
+	source.connect("pressed", self, "_on_source")
+	header.add_child(source)
 	var close = Button.new()
 	close.text = "Close  ×"
 	close.focus_mode = Control.FOCUS_NONE
 	close.connect("pressed", self, "_on_close")
 	header.add_child(close)
 	_add_rule(p_layout)
+
+func _on_source() -> void:
+	emit_signal("source_requested")
 
 func _build_overview(p_layout: VBoxContainer) -> void:
 	var row = HBoxContainer.new()

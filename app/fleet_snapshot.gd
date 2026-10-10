@@ -3,7 +3,6 @@ extends Reference
 # JoeWork-specific projection decoder. Xat's XEP-0060 layer preserves payloads
 # without interpreting them; this app consumes Projection.to_pubsub_xml().
 const NODE_NAMESPACE := "urn:joework:monitoring:2"
-const DEFAULT_NODE := "joework/monitoring/team"
 const STALE_AFTER_SECONDS := 900
 
 static func parse(p_root) -> Dictionary:

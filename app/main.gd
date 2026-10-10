@@ -41,6 +41,7 @@ const ClipboardImage = preload("res://addons/xat_xmpp/ui/clipboard_image.gd")
 const XatXmpp = preload("res://addons/xat_xmpp/xat_xmpp.gd")
 const FleetMonitor = preload("res://fleet_monitor.gd")
 const FleetSnapshot = preload("res://fleet_snapshot.gd")
+const FleetSourceDialog = preload("res://fleet_source_dialog.gd")
 
 # Por debajo de este ancho el panel "mente" se oculta (se abre con el orbe del header).
 const MIND_MIN_WIDTH := 1000
@@ -122,6 +123,7 @@ var _push_retry: Timer = null
 var _push_retry_ticks := 0
 var _fleet_monitor
 var _fleet_snapshot := {}
+var _fleet_source_dialog
 var _own_avatar_id := ""
 var _own_avatar_type := "image/png"
 
@@ -258,13 +260,16 @@ func _ready() -> void:
 	_fleet_monitor.name = "FleetMonitor"
 	_fleet_monitor.set_node(_fleet_monitoring_node())
 	_fleet_monitor.connect("close_requested", self, "_close_fleet_monitor")
+	_fleet_monitor.connect("source_requested", self, "_configure_fleet_monitor")
 	add_child(_fleet_monitor)
-	if _fleet_monitoring_jid() != "":
-		var fleet_button = Button.new()
-		fleet_button.text = "Fleet"
-		fleet_button.hint_tooltip = "JoeWork fleet monitoring"
-		fleet_button.connect("pressed", self, "_open_fleet_monitor")
-		_chat.header_slot.add_child(fleet_button)
+	_fleet_source_dialog = FleetSourceDialog.new()
+	_fleet_source_dialog.connect("source_saved", self, "_on_fleet_source_saved")
+	add_child(_fleet_source_dialog)
+	var fleet_button = Button.new()
+	fleet_button.text = "Fleet"
+	fleet_button.hint_tooltip = "Monitoreo de flota por XEP-0060"
+	fleet_button.connect("pressed", self, "_open_fleet_monitor")
+	_chat.header_slot.add_child(fleet_button)
 	connect("resized", self, "_update_mind_visibility")
 	connect("resized", self, "_apply_mobile_stretch")
 	connect("resized", self, "_update_safe_area")
@@ -429,11 +434,7 @@ func _on_state_changed(p_state: int) -> void:
 			# dependía de un resize posterior y podía quedar en dos paneles.
 			_update_mind_visibility()
 			_refresh_rooms()
-			# The app consumes Operator's versioned projection from its own PEP.
-			var monitoring_jid = _fleet_monitoring_jid()
-			if monitoring_jid != "":
-				session.request_pubsub_items(monitoring_jid, _fleet_monitoring_node(), 1)
-				session.subscribe_pubsub(monitoring_jid, _fleet_monitoring_node())
+			_request_fleet_monitoring()
 			# Persistir la cuenta recién conectada (archivo 0600).
 			if not _pending_cfg.empty():
 				_credentials.save(Credentials.DEFAULT_PATH, _pending_cfg)
@@ -491,6 +492,9 @@ func _on_pubsub_event(p_from: String, p_event: Dictionary) -> void:
 	_fleet_monitor.show_snapshot(_fleet_snapshot)
 
 func _open_fleet_monitor() -> void:
+	if _fleet_monitoring_jid() == "" or _fleet_monitoring_node() == "":
+		_configure_fleet_monitor()
+		return
 	_fleet_monitor.show_snapshot(_fleet_snapshot)
 	_fleet_monitor.visible = true
 
@@ -498,13 +502,36 @@ func _close_fleet_monitor() -> void:
 	_fleet_monitor.visible = false
 
 func _fleet_monitoring_jid() -> String:
-	var configured = OS.get_environment("XAT_JOEWORK_MONITORING_JID").strip_edges()
+	var configured = str(juice.settings.get("fleet_monitor_jid", "")).strip_edges()
 	var resource = configured.find("/")
 	return configured.substr(0, resource) if resource >= 0 else configured
 
 func _fleet_monitoring_node() -> String:
-	var configured = OS.get_environment("XAT_JOEWORK_MONITORING_NODE").strip_edges()
-	return configured if configured != "" else FleetSnapshot.DEFAULT_NODE
+	var configured = str(juice.settings.get("fleet_monitor_node", "")).strip_edges()
+	return configured
+
+func _request_fleet_monitoring() -> void:
+	var monitoring_jid = _fleet_monitoring_jid()
+	if monitoring_jid == "" or _fleet_monitoring_node() == "" or session.state != SessionScript.State.CONNECTED:
+		return
+	session.request_pubsub_items(monitoring_jid, _fleet_monitoring_node(), 1)
+	session.subscribe_pubsub(monitoring_jid, _fleet_monitoring_node())
+
+func _configure_fleet_monitor() -> void:
+	_fleet_source_dialog.open(_fleet_monitoring_jid(), _fleet_monitoring_node())
+
+func _on_fleet_source_saved(p_jid: String, p_node: String) -> void:
+	var jid = _bare_jid(p_jid).to_lower()
+	if jid.find("@") <= 0 or p_node == "":
+		juice.toast("Indica un JID y un nodo PubSub válidos")
+		return
+	juice.set_setting("fleet_monitor_jid", jid)
+	juice.set_setting("fleet_monitor_node", p_node)
+	_fleet_snapshot = {}
+	_fleet_monitor.set_node(p_node)
+	_fleet_monitor.show_snapshot(_fleet_snapshot)
+	_request_fleet_monitoring()
+	_open_fleet_monitor()
 
 func _bare_jid(p_jid: String) -> String:
 	var resource = p_jid.find("/")
@@ -1460,12 +1487,14 @@ func _register_push() -> void:
 	var service = _push_service_for_os()
 	if service == "":
 		return
+	print("xat: PUSH register service=%s" % service)
 	# Android: Firebase debe inicializarse con la config de la app (del
 	# google-services.json) antes de poder pedir el token FCM.
 	if OS.get_name() == "Android" and _notifier != null:
 		_notifier.configure_firebase(_psetting("xat/firebase_api_key"), _psetting("xat/firebase_app_id"),
 				_psetting("xat/firebase_project_id"), _psetting("xat/firebase_sender_id"))
 	var token = _notifier.device_token()
+	print("xat: PUSH token_len=%d" % token.length())
 	if token == "":
 		# El token (APNs/FCM) llega asíncrono, DESPUÉS de pedir permiso: en la
 		# primera conexión normalmente todavía no está. Reintentar hasta que
@@ -1496,6 +1525,7 @@ func _on_push_retry() -> void:
 		_notifier.configure_firebase(_psetting("xat/firebase_api_key"), _psetting("xat/firebase_app_id"),
 				_psetting("xat/firebase_project_id"), _psetting("xat/firebase_sender_id"))
 	var token = _notifier.device_token() if _notifier != null else ""
+	print("xat: PUSH retry #%d token_len=%d" % [_push_retry_ticks, token.length()])
 	if token != "":
 		_push_retry.stop()
 		_push_retry.queue_free()

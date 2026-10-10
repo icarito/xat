@@ -1101,6 +1101,13 @@ func _input(p_event) -> void:
 		return
 	if _file_dialog != null and _file_dialog.visible:
 		return
+	# Enter en el composer (escritorio): enviar. Se maneja en _input (antes que
+	# el TextEdit procese el key) para que no inserte el salto de línea.
+	if p_event is InputEventKey and p_event.pressed and not p_event.echo and _input != null and _input.has_focus():
+		if p_event.scancode in [KEY_ENTER, KEY_KP_ENTER] and not p_event.shift and not _is_mobile():
+			get_tree().set_input_as_handled()
+			_on_send()
+			return
 	# Gesto del composer primero (consume el toque del botón cola).
 	if _composer_gesture(p_event):
 		return

@@ -31,7 +31,9 @@ tools/run_tests.sh tests/jid_test.gd  # uno puntual
 ```sh
 bin/godot-xat --path app
 # o dentro de la sesión gdtk
-
-# Vista Joe Work opcional (PEP privado de Operator)
-tools/run-joework.sh
 ```
+
+Para ver una flota, pulsa **Fleet** en la cabecera del chat y configura el JID
+del publicador y el nodo PubSub. Xat guarda estos datos localmente y obtiene el
+último snapshot por XEP-0060 al conectar. La cuenta XMPP debe tener acceso al
+nodo; esta opción no cambia el uso genérico del cliente.
