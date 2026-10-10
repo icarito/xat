@@ -6,6 +6,8 @@ extends PanelContainer
 
 signal back_requested() # vista de un panel (móvil): volver al roster
 signal message_submitted(bare, text)
+signal reply_submitted(bare, text, target)
+signal edit_submitted(bare, target, text)
 signal action_selected(bare, item)
 signal quick_selected(bare, value)
 signal chat_state_sent(bare, state)
@@ -16,9 +18,16 @@ signal camera_requested(peer)          # tomar foto
 signal voice_toggle(peer, start)       # empezar/terminar grabación
 signal voice_cancel(peer)              # descartar la grabación en curso
 signal text_copied(text)               # texto de una burbuja copiado al portapapeles
+signal reply_requested(rec)            # responder citando un mensaje
+signal edit_requested(rec)             # editar un mensaje propio
+signal retract_requested(rec)          # eliminar un mensaje propio
+signal forward_requested(rec)          # reenviar a otra conversación
+signal reaction_toggled(rec, emoji)    # añadir/quitar una reacción
+signal search_requested(query)         # buscar en el historial
 signal room_leave_requested()          # salir de la sala abierta
 signal room_invite_requested()         # invitar a un contacto a la sala
 signal room_settings_requested()       # editar la config de la sala (dueño/admin)
+signal room_channel_requested()        # convertir en canal (moderada + solo miembros)
 signal room_subject_requested()        # cambiar el tema de la sala
 signal room_destroy_requested()        # destruir la sala (dueño)
 signal occupant_action(room, nick, jid, action) # moderación sobre un ocupante
@@ -117,6 +126,22 @@ var _press := false
 var _press_pos := Vector2.ZERO
 var _press_moved := false
 var _sel_bubble = null
+var _reply_btn: Button
+var _react_btn: Button
+var _edit_btn: Button
+var _retract_btn: Button
+var _forward_btn: Button
+var _reply_target = {} # rec del mensaje citado (para el composer)
+var _edit_target = {}  # rec del mensaje en edición (vacío si no)
+var _react_popup: PopupPanel
+var _reply_bar: PanelContainer
+var _reply_who: Label
+var _reply_text: Label
+var _search_bar: PanelContainer
+var _search_field: LineEdit
+var _search_hits := []
+var _search_idx := -1
+var _swipe_done := false
 var _occ_btn: Button
 var _occ_popup: PopupPanel
 var _occ_list: VBoxContainer
@@ -194,6 +219,36 @@ func _build() -> void:
 	hh.add_child(header_slot)
 	head.add_child(hh)
 	v.add_child(head)
+	# Barra de búsqueda (oculta): filtra los mensajes cargados y navega entre hits.
+	_search_bar = PanelContainer.new()
+	_search_bar.visible = false
+	_search_bar.add_stylebox_override("panel", XatTheme.box(Palette.BG1, 0, 12, 6))
+	var search_row = HBoxContainer.new()
+	search_row.add_constant_override("separation", 6)
+	_search_field = LineEdit.new()
+	_search_field.placeholder_text = "Buscar en la conversación…"
+	_search_field.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_search_field.connect("text_changed", self, "_on_search_changed")
+	_search_field.connect("gui_input", self, "_on_search_input")
+	search_row.add_child(_search_field)
+	var prev = Button.new()
+	prev.text = "↑"
+	prev.focus_mode = Control.FOCUS_NONE
+	prev.connect("pressed", self, "_on_search_prev")
+	search_row.add_child(prev)
+	var nxt = Button.new()
+	nxt.text = "↓"
+	nxt.focus_mode = Control.FOCUS_NONE
+	nxt.connect("pressed", self, "_on_search_next")
+	search_row.add_child(nxt)
+	var cls = Button.new()
+	cls.text = "✕"
+	cls.flat = true
+	cls.focus_mode = Control.FOCUS_NONE
+	cls.connect("pressed", self, "_close_search")
+	search_row.add_child(cls)
+	_search_bar.add_child(search_row)
+	v.add_child(_search_bar)
 	# Log de burbujas.
 	_scroll = ScrollContainer.new()
 	_scroll.scroll_horizontal_enabled = false
@@ -245,6 +300,32 @@ func _build() -> void:
 	foot.add_stylebox_override("panel", XatTheme.box(Palette.BG1, 0, 12, 10))
 	var f = VBoxContainer.new()
 	f.add_constant_override("separation", 6)
+	# Franja de respuesta/edición: muestra el mensaje citado sobre el composer.
+	_reply_bar = PanelContainer.new()
+	_reply_bar.visible = false
+	_reply_bar.add_stylebox_override("panel", XatTheme.box(Palette.BG2, 10, 10, 6))
+	var reply_row = HBoxContainer.new()
+	reply_row.add_constant_override("separation", 8)
+	var reply_col = VBoxContainer.new()
+	reply_col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	reply_col.add_constant_override("separation", 0)
+	_reply_who = Label.new()
+	_reply_who.add_color_override("font_color", Palette.AGENT_EDGE)
+	_reply_who.add_font_override("font", XatTheme.font(Palette.FONT_MEDIUM, Palette.FONT_SIZE - 2))
+	reply_col.add_child(_reply_who)
+	_reply_text = Label.new()
+	_reply_text.clip_text = true
+	_reply_text.add_color_override("font_color", Palette.TEXT_DIM)
+	reply_col.add_child(_reply_text)
+	reply_row.add_child(reply_col)
+	var reply_close = Button.new()
+	reply_close.text = "✕"
+	reply_close.flat = true
+	reply_close.focus_mode = Control.FOCUS_NONE
+	reply_close.connect("pressed", self, "_on_reply_close")
+	reply_row.add_child(reply_close)
+	_reply_bar.add_child(reply_row)
+	f.add_child(_reply_bar)
 	_state = RichTextLabel.new()
 	_state.bbcode_enabled = true
 	_state.fit_content_height = true
@@ -436,22 +517,28 @@ func _build_select() -> void:
 	_sel_bar.add_stylebox_override("panel", sb)
 	var row = HBoxContainer.new()
 	row.alignment = BoxContainer.ALIGN_CENTER
-	row.add_constant_override("separation", 8)
+	row.add_constant_override("separation", 6)
+	# Acciones del mensaje (long-press): responder, reaccionar, copiar, y según
+	# el caso editar/eliminar (propio) o reenviar.
+	_reply_btn = _sel_action("Responder", "reply", ["reply"])
+	_react_btn = _sel_action("♥", "Reaccionar", ["react"])
+	_edit_btn = _sel_action("Editar", "edit", ["edit"])
+	_retract_btn = _sel_action("Eliminar", "retract", ["retract"])
+	_forward_btn = _sel_action("Reenviar", "forward", ["forward"])
+	row.add_child(_reply_btn)
+	row.add_child(_react_btn)
+	row.add_child(_forward_btn)
+	row.add_child(_edit_btn)
+	row.add_child(_retract_btn)
 	var copy = Button.new()
 	copy.text = "Copiar"
 	copy.focus_mode = Control.FOCUS_NONE
 	copy.connect("pressed", self, "_on_copy_selection")
-	var allb = Button.new()
-	allb.text = "Todo"
-	allb.hint_tooltip = "Seleccionar todo el mensaje"
-	allb.focus_mode = Control.FOCUS_NONE
-	allb.connect("pressed", self, "_on_select_all")
 	var done = Button.new()
 	done.text = "Listo"
 	done.focus_mode = Control.FOCUS_NONE
 	done.connect("pressed", self, "_exit_selection")
 	row.add_child(copy)
-	row.add_child(allb)
 	row.add_child(done)
 	_sel_bar.add_child(row)
 	_sel_bar.visible = false
@@ -466,6 +553,73 @@ func _build_select() -> void:
 # estar recién visible y aún no aceptar foco).
 func focus_composer() -> void:
 	_input.call_deferred("grab_focus")
+
+# --- Búsqueda ---
+
+func open_search() -> void:
+	if _search_bar == null:
+		return
+	_search_bar.visible = true
+	_search_field.grab_focus()
+	_on_search_changed(_search_field.text)
+
+func _close_search() -> void:
+	if _search_bar != null:
+		_search_bar.visible = false
+	_search_hits = []
+	_search_idx = -1
+	_clear_highlight()
+
+func _on_search_input(p_ev) -> void:
+	if p_ev is InputEventKey and p_ev.pressed and p_ev.scancode == KEY_ESCAPE:
+		_close_search()
+		_search_field.accept_event()
+
+func _on_search_changed(p_text: String) -> void:
+	var q = p_text.strip_edges().to_lower()
+	_search_hits = []
+	_search_idx = -1
+	_clear_highlight()
+	if q == "":
+		return
+	for i in range(_messages.size()):
+		var body = str(_messages[i].get("body", "")).to_lower()
+		if body.find(q) >= 0:
+			_search_hits.append(i)
+	if not _search_hits.empty():
+		_search_idx = _search_hits.size() - 1
+		_goto_hit(_search_idx)
+
+func _on_search_next() -> void:
+	if _search_hits.empty():
+		return
+	_search_idx = (_search_idx + 1) % _search_hits.size()
+	_goto_hit(_search_idx)
+
+func _on_search_prev() -> void:
+	if _search_hits.empty():
+		return
+	_search_idx = (_search_idx - 1 + _search_hits.size()) % _search_hits.size()
+	_goto_hit(_search_idx)
+
+func _goto_hit(p_i: int) -> void:
+	_clear_highlight()
+	if p_i < 0 or p_i >= _search_hits.size():
+		return
+	var mi = _search_hits[p_i]
+	var b = _bub(mi)
+	if b == null:
+		return
+	_scroll.scroll_vertical = int(max(b.rect_position.y - _scroll.rect_size.y * 0.4, 0.0))
+	b.set_search_highlight(true)
+
+func _clear_highlight() -> void:
+	for b in _bubbles:
+		if b != null and b.has_method("set_search_highlight"):
+			b.set_search_highlight(false)
+
+func search_open() -> bool:
+	return _search_bar != null and _search_bar.visible
 
 # Juice (háptica/sonido) inyectado por main; opcional para instanciar en tests.
 func set_juice(p_juice) -> void:
@@ -971,6 +1125,11 @@ func _input(p_event) -> void:
 			_press_moved = true
 			if _lp != null:
 				_lp.stop()
+			# Swipe horizontal grande = responder (como Telegram).
+			if not _swipe_done:
+				var dx = p_event.position.x - _press_pos.x
+				if abs(dx) > 70.0 and abs(dx) > abs(p_event.position.y - _press_pos.y) * 2.0:
+					_swipe_reply(_press_pos)
 		return
 	else:
 		return
@@ -1036,6 +1195,15 @@ func _on_long_press() -> void:
 		return
 	_enter_selection(b)
 
+# Swipe horizontal sobre una burbuja = responder citando ese mensaje.
+func _swipe_reply(p_pos: Vector2) -> void:
+	var b = _bubble_at(p_pos)
+	if b == null:
+		return
+	_swipe_done = true
+	_juice_haptic("tick")
+	emit_signal("reply_requested", b.rec)
+
 func _bubble_at(p_pos: Vector2):
 	for i in range(_bubbles.size() - 1, -1, -1):
 		var b = _bubbles[i]
@@ -1054,6 +1222,107 @@ func _enter_selection(p_bubble) -> void:
 	_sel_bubble.begin_selection_at(_press_pos)
 	if _sel_bar != null:
 		_sel_bar.visible = true
+		_update_sel_actions()
+
+# Muestra u oculta Editar/Eliminar según si el mensaje es propio.
+func _update_sel_actions() -> void:
+	if _sel_bubble == null or not is_instance_valid(_sel_bubble):
+		return
+	var own = str(_sel_bubble.rec.get("direction", "in")) == "out"
+	if _edit_btn != null:
+		_edit_btn.visible = own
+	if _retract_btn != null:
+		_retract_btn.visible = own
+
+func _sel_action(p_text: String, p_tip: String, p_kind: Array) -> Button:
+	var b = Button.new()
+	b.text = p_text
+	b.hint_tooltip = p_tip
+	b.focus_mode = Control.FOCUS_NONE
+	b.connect("pressed", self, "_on_sel_action", [p_kind[0]])
+	return b
+
+func _on_sel_action(p_kind: String) -> void:
+	if _sel_bubble == null or not is_instance_valid(_sel_bubble):
+		return
+	var rec = _sel_bubble.rec
+	match p_kind:
+		"reply":
+			emit_signal("reply_requested", rec)
+		"react":
+			_open_reaction_picker(rec)
+		"edit":
+			emit_signal("edit_requested", rec)
+		"retract":
+			emit_signal("retract_requested", rec)
+		"forward":
+			emit_signal("forward_requested", rec)
+	_exit_selection()
+
+# Barra de reactores rápidos (set corto) ancorada bajo la burbuja.
+func _open_reaction_picker(p_rec: Dictionary) -> void:
+	if _react_popup == null:
+		_react_popup = PopupPanel.new()
+		var row = HBoxContainer.new()
+		row.add_constant_override("separation", 4)
+		for e in ["👍", "❤️", "😂", "😮", "😢", "🙏"]:
+			var b = Button.new()
+			b.text = e
+			b.focus_mode = Control.FOCUS_NONE
+			b.rect_min_size = Vector2(40, 40)
+			b.connect("pressed", self, "_on_react_pick", [e, p_rec])
+			row.add_child(b)
+		var m = MarginContainer.new()
+		for side in ["left", "right", "top", "bottom"]:
+			m.add_constant_override("margin_" + side, 6)
+		m.add_child(row)
+		_react_popup.add_child(m)
+		add_child(_react_popup)
+	_react_popup.popup_centered(Vector2(280, 60))
+
+func _on_react_pick(p_emoji: String, p_rec: Dictionary) -> void:
+	if _react_popup != null:
+		_react_popup.hide()
+	emit_signal("reaction_toggled", p_rec, p_emoji)
+
+# Muestra la cita del mensaje al que se responde, sobre el composer.
+func set_reply_target(p_rec: Dictionary) -> void:
+	_reply_target = p_rec if p_rec != null else {}
+	if _reply_bar == null:
+		return
+	if _reply_target.empty():
+		_reply_bar.visible = false
+		return
+	var who = _reply_target.get("direction", "in") == "out"
+	_reply_who.text = "Vos" if who else str(_reply_target.get("from", "")).split("@")[0]
+	_reply_text.text = str(_reply_target.get("body", "")).replace("\n", " ").left(120)
+	_reply_bar.visible = true
+
+func reply_target() -> Dictionary:
+	return _reply_target
+
+func clear_reply() -> void:
+	set_reply_target({})
+
+# Reemplaza la cita por el modo edición (mismo slot).
+func set_editing(p_rec: Dictionary, p_text: String) -> void:
+	if p_rec.empty():
+		_edit_target = {}
+		if _reply_bar != null:
+			_reply_bar.visible = false
+		return
+	_edit_target = p_rec
+	_input.text = p_text
+	_fit_input()
+	_update_tail()
+	_reply_who.text = "Editando"
+	_reply_text.text = p_text.replace("\n", " ").left(120)
+	if _reply_bar != null:
+		_reply_bar.visible = true
+	_input.grab_focus()
+
+func edit_target() -> Dictionary:
+	return _edit_target
 
 func _on_select_all() -> void:
 	if _sel_bubble != null and is_instance_valid(_sel_bubble):
@@ -1282,6 +1551,7 @@ func _open_room_menu() -> void:
 	_room_menu.add_item("Cambiar tema", 11)
 	if _can_admin():
 		_room_menu.add_separator()
+		_room_menu.add_item("Convertir en canal (solo admins publican)", 22)
 		_room_menu.add_item("Ajustes de sala", 20)
 	if _room_affiliation == "owner":
 		_room_menu.add_item("Destruir sala", 21)
@@ -1297,6 +1567,8 @@ func _on_room_menu(p_id: int) -> void:
 			emit_signal("room_settings_requested")
 		21:
 			emit_signal("room_destroy_requested")
+		22:
+			emit_signal("room_channel_requested")
 
 func _toggle_occupants() -> void:
 	if _occ_popup.visible:
@@ -1409,6 +1681,25 @@ func apply_correction(p_rec: Dictionary) -> void:
 			return
 	_messages.append(p_rec)
 	_append_bubble(p_rec, true)
+
+# Marca un mensaje como eliminado (XEP-0424): la burbuja queda atenuada.
+func apply_retraction(p_target_id: String) -> void:
+	for i in range(_messages.size()):
+		if str(_messages[i].get("id", "")) == p_target_id:
+			_messages[i]["retracted"] = true
+			_messages[i]["body"] = ""
+			if _bub(i) != null:
+				_bub(i).refresh()
+			return
+
+# Reemplaza el set de reacciones (XEP-0444) de un mensaje.
+func set_reactions_by_id(p_target_id: String, p_emojis: Array) -> void:
+	for i in range(_messages.size()):
+		if str(_messages[i].get("id", "")) == p_target_id:
+			_messages[i]["reactions"] = p_emojis
+			if _bub(i) != null:
+				_bub(i).refresh()
+			return
 
 # Marca ✓✓ (XEP-0184) en la burbuja propia con ese id.
 func mark_delivered(p_id: String) -> void:
@@ -1859,9 +2150,25 @@ func _fit_input() -> void:
 	_input.rect_size.y = 0
 	_hint.visible = _input.text == ""
 
+func _on_reply_close() -> void:
+	_reply_target = {}
+	_edit_target = {}
+	if _reply_bar != null:
+		_reply_bar.visible = false
+
 func _on_send() -> void:
 	var text = _input.text.strip_edges()
 	if text == "" or _peer == "":
+		return
+	# Edición: reemplaza el mensaje objetivo en vez de enviar uno nuevo.
+	if not _edit_target.empty():
+		var erec = _edit_target
+		_edit_target = {}
+		_reply_bar.visible = false
+		_input.text = ""
+		_fit_input()
+		_update_tail()
+		emit_signal("edit_submitted", _peer, erec, text)
 		return
 	_input.text = ""
 	_fit_input()
@@ -1869,5 +2176,12 @@ func _on_send() -> void:
 	if juice != null:
 		juice.play("send")
 	_clear_unread()
+	# Respuesta citada (XEP-0461).
+	if not _reply_target.empty():
+		var t = _reply_target
+		_reply_target = {}
+		_reply_bar.visible = false
+		emit_signal("reply_submitted", _peer, text, t)
+		return
 	emit_signal("message_submitted", _peer, text)
 

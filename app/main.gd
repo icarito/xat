@@ -33,6 +33,7 @@ const Media = preload("res://addons/xat_xmpp/xmpp/media.gd")
 const MediaUtil = preload("res://addons/xat_xmpp/ui/media_util.gd")
 const MediaLightbox = preload("res://addons/xat_xmpp/ui/media_lightbox.gd")
 const Notifier = preload("res://addons/xat_xmpp/ui/notifier.gd")
+const ForwardDialog = preload("res://addons/xat_xmpp/ui/forward_dialog.gd")
 const FontZoom = preload("res://addons/xat_xmpp/ui/font_zoom.gd")
 const Push = preload("res://addons/xat_xmpp/xmpp/push.gd")
 const FilePicker = preload("res://addons/xat_xmpp/ui/file_picker.gd")
@@ -59,6 +60,7 @@ var _mind_pinned := false # abierto a mano en pantallas angostas
 var _roster_hidden := false # desktop: roster colapsado (más ancho para el chat)
 var _mind_hidden := false   # desktop: mente colapsada a mano
 var _roster_toggle
+var _search_toggle
 var _header_orb
 var _header_avatar
 var _show_roster := true # vista de un panel: qué se ve
@@ -104,6 +106,8 @@ var _playing_path := ""
 var _playing_id := ""
 var _playing_active := false
 var _rec_pending_peer := ""
+var _forward_rec := {}
+var _forward_dialog
 var _native_media = null          # singleton XatMedia (selector/cámara nativa)
 var _pending_media_peer := ""     # peer que espera el resultado del selector
 var _pending_avatar := false      # el selector está eligiendo la foto de perfil
@@ -145,6 +149,8 @@ func _ready() -> void:
 	session.connect("presence_changed", self, "_on_presence_changed")
 	session.connect("message_received", self, "_on_message_received")
 	session.connect("message_corrected", self, "_on_message_corrected")
+	session.connect("message_retracted", self, "_on_message_retracted")
+	session.connect("reactions_changed", self, "_on_reactions_changed")
 	session.connect("chat_state_received", self, "_on_chat_state")
 	session.connect("history_fetched", self, "_on_history_fetched")
 	session.connect("command_form", self, "_on_command_form")
@@ -207,6 +213,13 @@ func _ready() -> void:
 	_split.add_child(_chat)
 	_chat.set_juice(juice)
 	_chat.connect("message_submitted", self, "_on_message_submitted")
+	_chat.connect("reply_submitted", self, "_on_reply_submitted")
+	_chat.connect("edit_submitted", self, "_on_edit_submitted")
+	_chat.connect("reply_requested", self, "_on_reply_requested")
+	_chat.connect("edit_requested", self, "_on_edit_requested")
+	_chat.connect("retract_requested", self, "_on_retract_requested")
+	_chat.connect("forward_requested", self, "_on_forward_requested")
+	_chat.connect("reaction_toggled", self, "_on_reaction_toggled")
 	_chat.connect("action_selected", self, "_on_action_selected")
 	_chat.connect("quick_selected", self, "_on_quick_selected")
 	_chat.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -227,6 +240,13 @@ func _ready() -> void:
 	_roster_toggle.hint_tooltip = "Mostrar/ocultar contactos"
 	_roster_toggle.connect("pressed", self, "_toggle_roster")
 	_chat.header_slot.add_child(_roster_toggle)
+	_search_toggle = Button.new()
+	_search_toggle.text = "🔍"
+	_search_toggle.flat = true
+	_search_toggle.focus_mode = Control.FOCUS_NONE
+	_search_toggle.hint_tooltip = "Buscar en la conversación"
+	_search_toggle.connect("pressed", self, "_on_search_toggle")
+	_chat.header_slot.add_child(_search_toggle)
 	_header_avatar = AvatarBadge.new(34.0)
 	_chat.header_slot.add_child(_header_avatar)
 	_header_orb = AgentOrb.new()
@@ -259,6 +279,7 @@ func _ready() -> void:
 	_chat.connect("room_leave_requested", self, "_on_room_leave_requested")
 	_chat.connect("room_invite_requested", self, "_on_room_invite_requested")
 	_chat.connect("room_settings_requested", self, "_on_room_settings_requested")
+	_chat.connect("room_channel_requested", self, "_on_room_channel_requested")
 	_chat.connect("room_subject_requested", self, "_on_room_subject_requested")
 	_chat.connect("room_destroy_requested", self, "_on_room_destroy_requested")
 	_chat.connect("occupant_action", self, "_on_occupant_action")
@@ -659,6 +680,12 @@ func _on_muc_error(p_room: String, p_condition: String) -> void:
 	juice.play("alert")
 	juice.toast(msg, P.ERROR)
 
+func _on_search_toggle() -> void:
+	if _chat.search_open():
+		_chat._close_search()
+	else:
+		_chat.open_search()
+
 func _on_muc_invite(p_room: String, p_from: String, p_reason: String) -> void:
 	_roster.add_invite(p_room, p_from, p_reason)
 	juice.play("alert")
@@ -701,6 +728,14 @@ func _on_invite_submitted(p_jid: String, p_reason: String) -> void:
 		juice.toast("Invitación enviada a %s" % p_jid)
 	else:
 		juice.toast("No se pudo invitar", P.ERROR)
+
+func _on_room_channel_requested() -> void:
+	if _peer == "" or not session.is_room(_peer):
+		return
+	if session.muc_make_channel(_peer, true) == 0:
+		juice.toast("Sala convertida en canal")
+	else:
+		juice.toast("No se pudo convertir en canal", P.ERROR)
 
 func _on_room_settings_requested() -> void:
 	if _peer == "" or not session.is_room(_peer):
@@ -778,6 +813,8 @@ func _on_occupant_action(p_room: String, p_nick: String, p_jid: String, p_action
 	else:
 		juice.toast("La acción falló", P.ERROR)
 
+# --- Responder / editar / eliminar / reenviar / reaccionar ---
+
 func _on_message_submitted(p_bare: String, p_text: String) -> void:
 	if session.is_room(p_bare):
 		var rrc = session.send_groupchat(p_bare, p_text)
@@ -813,6 +850,130 @@ func _on_message_submitted(p_bare: String, p_text: String) -> void:
 		"commands": [],
 		"quick_responses": [],
 	})
+
+# --- Responder / editar / eliminar / reenviar / reaccionar ---
+
+# El peer de una conversación: en sala es la sala; en 1:1, el bare del otro.
+func _rec_peer(p_rec: Dictionary) -> String:
+	if _peer != "" and session.is_room(_peer):
+		return _peer
+	var d = str(p_rec.get("direction", "in"))
+	return _bare(str(p_rec.get("to", ""))) if d == "out" else _bare(str(p_rec.get("from", "")))
+
+func _rec_stanza_id(p_rec: Dictionary) -> String:
+	# El id con el que el peer referencia este mensaje (origin-id si lo hay).
+	return str(p_rec.get("id", ""))
+
+func _on_reply_requested(p_rec: Dictionary) -> void:
+	_chat.set_reply_target(p_rec)
+	_chat.focus_composer()
+
+func _on_edit_requested(p_rec: Dictionary) -> void:
+	if str(p_rec.get("direction", "")) != "out":
+		return
+	_chat.set_editing(p_rec, str(p_rec.get("body", "")))
+
+func _on_reply_submitted(p_bare: String, p_text: String, p_target: Dictionary) -> void:
+	var target_id = _rec_stanza_id(p_target)
+	if target_id == "":
+		_on_message_submitted(p_bare, p_text)
+		return
+	var quote = str(p_target.get("body", ""))
+	if session.is_room(p_bare):
+		session.send_groupchat(p_bare, p_text)
+	else:
+		session.send_reply(p_bare, p_text, target_id, quote)
+	_roster.touch(p_bare, _now_iso())
+	juice.play("send")
+	juice.haptic("tick")
+	_chat.add_message({
+		"from": session.bare(), "to": p_bare, "body": p_text, "direction": "out",
+		"timestamp": _now_iso(), "id": session.last_sent_id, "commands": [], "quick_responses": [],
+		"reply_to": target_id, "reply_quote": quote,
+	})
+
+func _on_edit_submitted(p_bare: String, p_target: Dictionary, p_text: String) -> void:
+	var target_id = _rec_stanza_id(p_target)
+	if target_id == "":
+		return
+	session.send_edit(p_bare, p_text, target_id)
+	_chat.apply_correction({"replace_id": target_id, "body": p_text, "from": session.bare()})
+	juice.haptic("tick")
+
+func _on_retract_requested(p_rec: Dictionary) -> void:
+	if str(p_rec.get("direction", "")) != "out":
+		return
+	var target_id = _rec_stanza_id(p_rec)
+	if target_id == "":
+		return
+	var peer = _rec_peer(p_rec)
+	session.send_retract(peer, target_id)
+	_chat.apply_retraction(target_id)
+	juice.haptic("success")
+
+# Reenvío: elegir destinatario y reenviar el cuerpo (con marca de reenviado).
+func _on_forward_requested(p_rec: Dictionary) -> void:
+	_forward_rec = p_rec
+	var contacts := []
+	for bare in session.roster_model.bare_jids():
+		var it = session.roster_model.get_item(bare)
+		contacts.append({"jid": str(bare), "name": str(it.get("name", "")) if it != null else ""})
+	if _forward_dialog == null:
+		_forward_dialog = ForwardDialog.new()
+		_forward_dialog.connect("submitted", self, "_on_forward_target")
+		add_child(_forward_dialog)
+	_forward_dialog.open(contacts)
+
+func _on_forward_target(p_bare: String) -> void:
+	if _forward_rec.empty() or p_bare == "":
+		return
+	var rec = _forward_rec
+	_forward_rec = {}
+	var body = str(rec.get("body", ""))
+	var fwd_rec = rec.duplicate()
+	fwd_rec["forwarded"] = true
+	if session.is_room(p_bare):
+		session.send_groupchat(p_bare, body)
+	else:
+		session.send_message(p_bare, body)
+	_roster.touch(p_bare, _now_iso())
+	juice.play("send")
+	juice.haptic("tick")
+	if _peer == p_bare:
+		_chat.add_message({
+			"from": session.bare(), "to": p_bare, "body": body, "direction": "out",
+			"timestamp": _now_iso(), "id": session.last_sent_id, "commands": [], "quick_responses": [],
+			"forwarded": true,
+		})
+	juice.toast("Reenviado a %s" % _display_name(p_bare))
+
+func _on_reaction_toggled(p_rec: Dictionary, p_emoji: String) -> void:
+	var peer = _rec_peer(p_rec)
+	var target_id = _rec_stanza_id(p_rec)
+	if target_id == "":
+		return
+	# Alterna el emoji en el set local y persiste el set completo (XEP-0444).
+	var current = p_rec.get("reactions", [])
+	var mine = p_rec.get("my_reactions", [])
+	var next = []
+	for e in current:
+		next.append(str(e))
+	if mine.has(p_emoji):
+		next.erase(p_emoji)
+		mine.erase(p_emoji)
+	else:
+		if not next.has(p_emoji):
+			next.append(p_emoji)
+		mine.append(p_emoji)
+	session.send_reaction(peer, target_id, next)
+	_chat.set_reactions_by_id(target_id, next)
+	juice.haptic("tick")
+
+func _on_message_retracted(p_bare: String, p_target_id: String) -> void:
+	_chat.apply_retraction(p_target_id)
+
+func _on_reactions_changed(p_bare: String, p_target_id: String, p_emojis: Array) -> void:
+	_chat.set_reactions_by_id(p_target_id, p_emojis)
 
 func _on_message_received(p_rec: Dictionary) -> void:
 	# Salientes (carbons/MAM propios): el peer es `to`.

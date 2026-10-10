@@ -11,6 +11,8 @@ signal roster_changed()
 signal presence_changed(bare_jid)
 signal message_received(rec)
 signal message_corrected(rec)
+signal message_retracted(bare_jid, target_id)
+signal reactions_changed(bare_jid, target_id, emojis)
 signal delivery_received(id, bare_jid)
 signal chat_state_received(bare_jid, state)
 signal actions_received(bare_jid, rec)
@@ -215,6 +217,43 @@ func send_message(p_to_bare: String, p_body: String) -> int:
 func send_chat_state(p_to_bare: String, p_state: String) -> int:
 	return _transport.send(Message.build_chat_state(p_to_bare, p_state).to_xml())
 
+# --- Editar / eliminar / responder / reaccionar (XEP-0308, 0424, 0461, 0444) ---
+
+# Edita un mensaje propio. `p_target_id` es el id del mensaje a reemplazar
+# (stanza id / origin id que enviamos en su momento).
+func send_edit(p_to_bare: String, p_body: String, p_target_id: String) -> int:
+	if p_target_id == "" or not is_connected_to_server():
+		return -1
+	var mid = _new_id("c")
+	var rc = _transport.send(Message.build_correction(p_to_bare, p_body, p_target_id, mid).to_xml())
+	if rc == 0 and store != null and store.available():
+		store.update_by_request_id(p_to_bare, p_target_id, p_body)
+	return rc
+
+# Elimina un mensaje propio (retractación).
+func send_retract(p_to_bare: String, p_target_id: String) -> int:
+	if p_target_id == "" or not is_connected_to_server():
+		return -1
+	return _transport.send(Message.build_retraction(p_to_bare, p_target_id, _new_id("r")).to_xml())
+
+# Responde citando un mensaje (XEP-0461). `p_reply_to` = id del mensaje citado.
+func send_reply(p_to_bare: String, p_body: String, p_reply_to: String, p_quote: String = "") -> int:
+	if p_reply_to == "" or not is_connected_to_server():
+		return -1
+	var mid = _new_id("m")
+	var rc = _transport.send(Message.build_reply(p_to_bare, p_body, p_reply_to, p_quote, mid, _new_id("o")).to_xml())
+	if rc == 0:
+		last_sent_id = mid
+		if store != null and store.available():
+			store.record_message({"bare_jid": p_to_bare, "body": p_body, "direction": "out", "ts": _now_iso(), "request_id": mid})
+	return rc
+
+# Reacciona a un mensaje (XEP-0444). Reemplaza el set completo de emojis.
+func send_reaction(p_to_bare: String, p_target_id: String, p_emojis: Array) -> int:
+	if p_target_id == "" or not is_connected_to_server():
+		return -1
+	return _transport.send(Message.build_reactions(p_to_bare, p_target_id, p_emojis, _new_id("re")).to_xml())
+
 # --- Salas (XEP-0045) ---
 
 # Entra a una sala `room_bare` con `nick` y la persiste (autojoin por defecto).
@@ -349,6 +388,15 @@ func muc_submit_config(p_room_bare: String, p_fields: Array) -> int:
 	if not is_connected_to_server():
 		return -1
 	return _transport.send(Muc.build_owner_config_submit(Presence.bare_of(p_room_bare), _new_id("mucownerset"), p_fields).to_xml())
+
+# Convertir la sala en "canal": sólo los miembros entran y sólo quienes tienen
+# voz pueden publicar (moderada). Es el equivalente XMPP a un canal de difusión.
+func muc_make_channel(p_room_bare: String, p_on: bool = true) -> int:
+	var fields = [
+		{"var": "muc#roomconfig_moderatedroom", "type": "boolean", "values": ["1" if p_on else "0"]},
+		{"var": "muc#roomconfig_membersonly", "type": "boolean", "values": ["1" if p_on else "0"]},
+	]
+	return muc_submit_config(p_room_bare, fields)
 
 func muc_destroy(p_room_bare: String, p_reason: String = "") -> int:
 	if not is_connected_to_server():
@@ -1010,6 +1058,19 @@ func _on_message(p_stanza) -> void:
 		if store != null and store.available():
 			store.update_by_request_id(_bare_of(rec["from"]), rec["replace_id"], rec["body"])
 		emit_signal("message_corrected", rec)
+		return
+
+	# Retractación 0424: marca el mensaje como eliminado.
+	if rec["retract_id"] != "":
+		emit_signal("message_retracted", _bare_of(rec["from"]), rec["retract_id"])
+		return
+
+	# Reacciones 0444: reemplaza el set de emojis del mensaje objetivo.
+	if not (rec["reactions"] as Array).empty() or p_stanza.get_child("reactions", NS.REACTIONS) != null:
+		var rt = str(rec.get("reactions_target", ""))
+		if rt == "":
+			rt = str(rec.get("id", ""))
+		emit_signal("reactions_changed", _bare_of(rec["from"]), rt, rec["reactions"])
 		return
 
 	# Carbons de mensajes propios: registrar (dedupe por ventana) y reflejar en

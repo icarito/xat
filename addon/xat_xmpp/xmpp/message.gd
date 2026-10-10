@@ -32,6 +32,12 @@ static func parse(p_message) -> Dictionary:
 		"replace_id": "",
 		"origin_id": "",
 		"stanza_id": "",
+		"retract_id": "",
+		"reply_to": "",
+		"reply_quote": "",
+		"fallback": "",
+		"reactions": [],
+		"reactions_target": "",
 		"is_mam": false,
 		"mam_id": "",
 		"mam_queryid": "",
@@ -102,6 +108,19 @@ static func parse(p_message) -> Dictionary:
 			out["received_id"] = child.get_attr("id", "")
 		elif ns == NS.CORRECT and child.name == "replace":
 			out["replace_id"] = child.get_attr("id", "")
+		elif ns == NS.RETRACT and child.name == "retract":
+			out["retract_id"] = child.get_attr("id", "")
+		elif ns == NS.REPLY and child.name == "reply":
+			out["reply_to"] = child.get_attr("id", "")
+			var rq = child.get_child("quote")
+			if rq != null:
+				out["reply_quote"] = rq.get_text()
+		elif ns == NS.FALLBACK and child.name == "fallback":
+			out["fallback"] = child.get_attr("for", "")
+		elif ns == NS.REACTIONS and child.name == "reactions":
+			out["reactions_target"] = child.get_attr("id", "")
+			for r in child.get_children("reaction"):
+				out["reactions"].append(r.get_text())
 		elif ns == NS.SID and child.name == "origin-id":
 			out["origin_id"] = child.get_attr("id", "")
 		elif ns == NS.SID and child.name == "stanza-id":
@@ -209,6 +228,67 @@ static func build_correction(p_to: String, p_body: String, p_target_id: String, 
 	rep.set_attr("xmlns", NS.CORRECT)
 	rep.set_attr("id", p_target_id)
 	m.add_child_stanza(rep)
+	return m
+
+# Elimina un mensaje propio (XEP-0424). El body es un fallback para clientes sin
+# soporte (regla del XEP: texto plano explicando que se eliminó). Sin body, la
+# stanza es un evento para el peer que soporta retract.
+static func build_retraction(p_to: String, p_target_id: String, p_new_id: String = "", p_fallback: String = "Este mensaje fue eliminado"):
+	var m = Stanza.new("message")
+	m.set_attr("to", p_to)
+	m.set_attr("type", "chat")
+	if p_new_id != "":
+		m.set_attr("id", p_new_id)
+	var retract = Stanza.new("retract")
+	retract.set_attr("xmlns", NS.RETRACT)
+	retract.set_attr("id", p_target_id)
+	m.add_child_stanza(retract)
+	if p_fallback != "":
+		var body = Stanza.new("body")
+		body.append_text(p_fallback)
+		m.add_child_stanza(body)
+	var fb = Stanza.new("fallback")
+	fb.set_attr("xmlns", NS.FALLBACK)
+	fb.set_attr("for", NS.RETRACT)
+	m.add_child_stanza(fb)
+	return m
+
+# Respuesta a un mensaje (XEP-0461) con fallback XEP-0428.
+static func build_reply(p_to: String, p_body: String, p_reply_to: String, p_quote: String = "", p_id: String = "", p_origin_id: String = ""):
+	var m = build_chat(p_to, p_body, p_id, p_origin_id)
+	var rep = Stanza.new("reply")
+	rep.set_attr("xmlns", NS.REPLY)
+	rep.set_attr("to", p_to)
+	rep.set_attr("id", p_reply_to)
+	if p_quote != "":
+		var q = Stanza.new("quote")
+		q.append_text(p_quote)
+		rep.add_child_stanza(q)
+	m.add_child_stanza(rep)
+	# Fallback: cita la línea original para clientes sin 0461.
+	if p_quote != "":
+		var fb = Stanza.new("fallback")
+		fb.set_attr("xmlns", NS.FALLBACK)
+		fb.set_attr("for", NS.REPLY)
+		m.add_child_stanza(fb)
+	return m
+
+# Reacciones (XEP-0444): reemplaza el set completo de emojis de un mensaje con
+# una lista; vacía, las quita.
+static func build_reactions(p_to: String, p_target_id: String, p_emojis: Array, p_id: String = ""):
+	var m = Stanza.new("message")
+	m.set_attr("to", p_to)
+	m.set_attr("type", "chat")
+	if p_id != "":
+		m.set_attr("id", p_id)
+	var re = Stanza.new("reactions")
+	re.set_attr("xmlns", NS.REACTIONS)
+	re.set_attr("id", p_target_id)
+	for e in p_emojis:
+		var r = Stanza.new("reaction")
+		r.append_text(str(e))
+		re.add_child_stanza(r)
+	m.add_child_stanza(re)
 	return m
 
 # Adjunto (XEP-0363 + XEP-0066): el link va en el body (para clientes sin OOB)

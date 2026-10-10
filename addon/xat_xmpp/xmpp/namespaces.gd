@@ -12,6 +12,13 @@ const RECEIPTS := "urn:xmpp:receipts"
 const CARBONS := "urn:xmpp:carbons:2"
 const FORWARD := "urn:xmpp:forward:0"
 const CORRECT := "urn:xmpp:message-correct:0"
+# Eliminación de mensajes (XEP-0424) y respuestas (XEP-0461).
+const RETRACT := "urn:xmpp:message-retract:1"
+const REPLY := "urn:xmpp:reply:0"
+# Reacciones (XEP-0444).
+const REACTIONS := "urn:xmpp:reactions:0"
+# Referencias a otros mensajes (XEP-0428, fallback de 0461).
+const FALLBACK := "urn:xmpp:fallback:0"
 const MAM := "urn:xmpp:mam:2"
 const RSM := "http://jabber.org/protocol/rsm"
 const DATA_FORMS := "jabber:x:data"

@@ -94,6 +94,20 @@ func _init():
 	var media2 = Message.parse(Message.build_media("agente@h", "https://up.x/v.ogg", "hola", "s3"))
 	check(media2["oob_url"] == "https://up.x/v.ogg" and media2["body"] == "hola\nhttps://up.x/v.ogg" and media2["oob_desc"] == "hola", "builder media pie")
 
+	# Respuestas (XEP-0461).
+	var NSy = load("res://addons/xat_xmpp/xmpp/namespaces.gd")
+	var rep = Message.parse(Message.build_reply("agente@h", "claro", "m1", "¿vamos?", "m2"))
+	check(rep["reply_to"] == "m1" and rep["reply_quote"] == "¿vamos?" and rep["body"] == "claro", "builder reply")
+	check(rep["fallback"] == NSy.REPLY, "reply con fallback 0428")
+	# Eliminación (XEP-0424).
+	var ret = Message.parse(Message.build_retraction("agente@h", "m1", "r1"))
+	check(ret["retract_id"] == "m1", "builder retraction")
+	check(ret["fallback"] == NSy.RETRACT and ret["body"] != "", "retraction con fallback")
+	# Reacciones (XEP-0444).
+	var rea = Message.parse(Message.build_reactions("agente@h", "m1", ["👍", "❤️"]))
+	check(rea["reactions"] == ["👍", "❤️"] and rea["reactions_target"] == "m1", "builder reactions")
+	check(Message.parse(Message.build_reactions("agente@h", "m1", [])).reactions.empty(), "reactions vacío quita")
+
 	if _fail == 0:
 		print("MESSAGE_CHECK_OK")
 	quit()

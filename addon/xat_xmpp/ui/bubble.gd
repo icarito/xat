@@ -66,6 +66,15 @@ var _audio_wave
 var _audio_info: Label
 var _audio_active := false
 var _spacer: Control
+var _reply_box: PanelContainer
+var _reply_quote: Label
+var _reply_accent: ColorRect
+var _reactions_row: HBoxContainer
+var _search_hl := false
+
+func set_search_highlight(p_on: bool) -> void:
+	_search_hl = p_on
+	_style()
 var _panel: PanelContainer
 var _label: RichTextLabel
 var _meta: Label
@@ -122,6 +131,25 @@ func _init() -> void:
 	_inner = VBoxContainer.new()
 	_inner.mouse_filter = Control.MOUSE_FILTER_PASS
 	_inner.add_constant_override("separation", 6)
+	# Cita del mensaje respondido (XEP-0461).
+	_reply_box = PanelContainer.new()
+	_reply_box.visible = false
+	_reply_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_reply_box.add_stylebox_override("panel", XatTheme.box(Palette.BG1, 6, 8, 4))
+	var reply_row = HBoxContainer.new()
+	reply_row.add_constant_override("separation", 6)
+	_reply_accent = ColorRect.new()
+	_reply_accent.rect_min_size = Vector2(3, 0)
+	_reply_accent.color = Palette.AGENT_EDGE
+	reply_row.add_child(_reply_accent)
+	_reply_quote = Label.new()
+	_reply_quote.clip_text = true
+	_reply_quote.max_lines_visible = 2
+	_reply_quote.add_color_override("font_color", Palette.TEXT_DIM)
+	_reply_quote.add_font_override("font", XatTheme.font(Palette.FONT_REGULAR, Palette.FONT_SIZE - 3))
+	reply_row.add_child(_reply_quote)
+	_reply_box.add_child(reply_row)
+	_inner.add_child(_reply_box)
 	_media_host = VBoxContainer.new()
 	_media_host.mouse_filter = Control.MOUSE_FILTER_PASS
 	_media_host.add_constant_override("separation", 4)
@@ -140,6 +168,11 @@ func _init() -> void:
 	_metarow.add_constant_override("separation", 4)
 	_metarow.add_child(_meta)
 	_metarow.add_child(_ticks)
+	# Chips de reacciones (XEP-0444).
+	_reactions_row = HBoxContainer.new()
+	_reactions_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_reactions_row.add_constant_override("separation", 3)
+	_reactions_row.visible = false
 	# Chip de remitente (sala): sobre la burbuja, oprimible -> @mención.
 	_sender_btn = Button.new()
 	_sender_btn.visible = false
@@ -150,6 +183,7 @@ func _init() -> void:
 	_sender_btn.connect("pressed", self, "_on_sender_pressed")
 	col.add_child(_sender_btn)
 	col.add_child(_panel)
+	col.add_child(_reactions_row)
 	col.add_child(_metarow)
 	var pad = Control.new()
 	pad.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -300,7 +334,19 @@ func refresh() -> void:
 	# Un motor anterior sigue mostrando Unicode normal. No sustituir por imágenes
 	# si no sabe devolver su secuencia original al seleccionar/copiar.
 	_emoji = EmojiInline.new(int(_font.get_height())) if _label.has_method("add_inline_image") else null
+	_render_reply()
+	_render_reactions()
 	var attach = rec.get("attach", {})
+	if bool(rec.get("retracted", false)):
+		# Mensaje eliminado (XEP-0424): texto atenuado en cursiva.
+		_clear_media()
+		_label.visible = true
+		_label.bbcode_text = "[i][color=#8b93a7]Mensaje eliminado[/color][/i]"
+		_fit_w = -1.0
+		_fit()
+		_style()
+		_update_meta()
+		return
 	if attach is Dictionary and not (attach as Dictionary).empty():
 		var url = str(attach.get("url", ""))
 		_render_media(attach)
@@ -317,6 +363,41 @@ func refresh() -> void:
 	_update_meta()
 
 # --- Media del adjunto ---
+
+# Muestra la cita del mensaje respondido (XEP-0461/0428).
+func _render_reply() -> void:
+	if _reply_box == null:
+		return
+	var quote = str(rec.get("reply_quote", ""))
+	if quote == "":
+		_reply_box.visible = false
+		return
+	_reply_quote.text = quote.replace("\n", " ")
+	_reply_box.visible = true
+
+# Chips de reacciones (XEP-0444): emoji + total.
+func _render_reactions() -> void:
+	if _reactions_row == null:
+		return
+	for c in _reactions_row.get_children():
+		_reactions_row.remove_child(c)
+		c.queue_free()
+	var rs = rec.get("reactions", [])
+	if not (rs is Array) or rs.empty():
+		_reactions_row.visible = false
+		return
+	# Cuenta por emoji (el modelo puede repetir de varias personas).
+	var counts := {}
+	for e in rs:
+		counts[str(e)] = int(counts.get(str(e), 0)) + 1
+	for e in counts.keys():
+		var chip = Label.new()
+		chip.text = str(e) if counts[e] == 1 else "%s %d" % [e, counts[e]]
+		chip.add_color_override("font_color", Palette.TEXT)
+		chip.add_stylebox_override("normal", XatTheme.box(Palette.BG2, 10, 6, 2))
+		chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_reactions_row.add_child(chip)
+	_reactions_row.visible = true
 
 func _clear_media() -> void:
 	if _media_host == null:
@@ -480,6 +561,10 @@ func _style() -> void:
 	var s = XatTheme.box(Palette.USER if out else Palette.BG2, Palette.RADIUS, 12, 8)
 	if not out:
 		XatTheme.with_border(s, Color(Palette.AGENT_EDGE.r, Palette.AGENT_EDGE.g, Palette.AGENT_EDGE.b, 0.35))
+	if _search_hl:
+		# Resalta la burbuja durante la búsqueda.
+		s.set_border_width_all(2)
+		s.border_color = Palette.PENDING
 	if _last:
 		if out:
 			s.corner_radius_bottom_right = Palette.RADIUS_SMALL
