@@ -23,6 +23,14 @@ func _init():
 	_setup(s_a, Store, bare_a)
 	_setup(s_b, Store, bare_b)
 	check(s_a.omemo_available() and s_b.omemo_available(), "OMEMO habilitado en ambas sesiones")
+	# El nodo compartido de bundles debe conservar varios dispositivos. Prosody
+	# rechaza el publish si max_items difiere de la configuración existente.
+	s_a.publish_omemo()
+	var published = s_a._transport.sent
+	check(published.size() == 2, "PEP publica lista y bundle")
+	check(str(published[0]).find("urn:xmpp:omemo:2:devices") >= 0 and str(published[0]).find("<value>1</value>") >= 0, "device-list conserva un item")
+	check(str(published[1]).find("urn:xmpp:omemo:2:bundles") >= 0 and str(published[1]).find("<value>100</value>") >= 0, "bundles conservan varios dispositivos")
+	published.clear()
 
 	# Descubrimiento (PEP): cada lado conoce lista y bundle del otro.
 	s_a._omemo_engine.set_peer_devices(bare_b, [s_b.omemo_device_id()])
