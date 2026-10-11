@@ -133,6 +133,7 @@ var _own_avatar_type := "image/png"
 
 func _ready() -> void:
 	set_process(false) # el zoom se aplica coalescido on-demand
+	set_process_input(true) # zoom (Ctrl+rrueda/±): explícito, no depender del auto-enable
 	# El back de Android navega dentro de la app; _notification decide cuándo
 	# salir (set_quit_on_go_back) para que no cierre en medio de una conversación.
 	if OS.get_name() == "Android":
@@ -2120,7 +2121,7 @@ func _input(p_event) -> void:
 		if p_event.scancode == KEY_V and p_event.shift:
 			_on_paste_image()
 			get_tree().set_input_as_handled()
-		elif p_event.scancode in [KEY_EQUAL, KEY_KP_ADD]:
+		elif p_event.scancode in [KEY_EQUAL, KEY_PLUS, KEY_KP_ADD]:
 			_zoom(1)
 		elif p_event.scancode in [KEY_MINUS, KEY_KP_SUBTRACT]:
 			_zoom(-1)
@@ -2140,13 +2141,14 @@ func _zoom(p_dir: int) -> void:
 	get_tree().set_input_as_handled()
 
 func _process(_delta: float) -> void:
-	if _playing_active and _audio.playing:
-		_sync_audio_ui()
-		return
-	# Zoom objetivo pendiente (coalescing de Ctrl+rueda/teclas).
+	# Zoom pendiente (coalescido). Se aplica ANTES del audio para que reproducir
+	# voz/sticker no bloquee el zoom (antes el early-return de audio lo frenaba).
 	var fz = get_node_or_null("/root/FontZoom")
 	if fz != null and not is_equal_approx(fz.scale, _zoom_target):
 		set_zoom(_zoom_target)
+		return
+	if _playing_active and _audio.playing:
+		_sync_audio_ui()
 		return
 	set_process(false)
 
