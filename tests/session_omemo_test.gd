@@ -31,6 +31,9 @@ func _init():
 	check(str(published[0]).find("urn:xmpp:omemo:2:devices") >= 0 and str(published[0]).find("<value>1</value>") >= 0, "device-list conserva un item")
 	check(str(published[1]).find("urn:xmpp:omemo:2:bundles") >= 0 and str(published[1]).find("<value>100</value>") >= 0, "bundles conservan varios dispositivos")
 	published.clear()
+	s_a.publish_omemo([{"id": 12345, "label": "Android"}])
+	check(str(published[0]).find("id=\"12345\"") >= 0 and str(published[0]).find("id=\"%d\"" % s_a.omemo_device_id()) >= 0, "device-list conserva otro recurso propio")
+	published.clear()
 
 	# Descubrimiento (PEP): cada lado conoce lista y bundle del otro.
 	s_a._omemo_engine.set_peer_devices(bare_b, [s_b.omemo_device_id()])

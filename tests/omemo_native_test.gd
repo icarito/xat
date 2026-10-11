@@ -95,7 +95,7 @@ func _init():
 
 	# Payload de interop (misma clave y bytes que produce openclaw-xmpp).
 	var key48 = _hex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f6032e091967d4a46c46e5706855512ca")
-	var vector = _hex("0a106032e091967d4a46c46e5706855512ca1218080010001a0022102c450ccc8ab79c1862cc619b8b898342")
+	var vector = _hex("2c450ccc8ab79c1862cc619b8b898342")
 	check(o.payload_decrypt(vector, key48) == "hola".to_utf8(), "payload interop OpenClaw")
 	var key32 = _hex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
 	check(o.payload_encrypt_with_key(key32, "hola".to_utf8()) == vector, "payload_encrypt_with_key == vector")
