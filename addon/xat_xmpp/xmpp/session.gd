@@ -1166,6 +1166,16 @@ func _on_stanza(xml: String) -> void:
 
 # --- Mensajería ---
 
+# En MUC no anónima, la sesión OMEMO pertenece al JID real del ocupante.
+func _omemo_sender_bare(p_rec: Dictionary) -> String:
+	var from = str(p_rec.get("from", ""))
+	if str(p_rec.get("type", "")) != "groupchat":
+		return _bare_of(from)
+	var room = _bare_of(from)
+	var nick = _resource_of(from)
+	var occupant = _muc_state.get(room, {}).get(nick, {})
+	return _bare_of(str(occupant.get("jid", "")))
+
 func _on_message(p_stanza) -> void:
 	if p_stanza.get_child("event", NS.PEP) != null:
 		_on_pep_event(p_stanza)
@@ -1181,12 +1191,13 @@ func _on_message(p_stanza) -> void:
 	if enc_el != null:
 		rec["encrypted"] = true
 		if omemo_available():
-			var omemo_res = _omemo_engine.decrypt(_bare_of(p_stanza.get_attr("from", "")), enc_el)
+			var sender_bare = _omemo_sender_bare(rec)
+			var omemo_res = _omemo_engine.decrypt(sender_bare, enc_el) if sender_bare != "" else {"ok": false, "error": "sin_jid_real"}
 			if omemo_res["ok"]:
 				rec["body"] = omemo_res["body"]
 				rec["omemo_sender_device"] = omemo_res["sender_device"]
 			else:
-				emit_signal("log_message", 1, "OMEMO decrypt failed from %s device %s: %s" % [_bare_of(p_stanza.get_attr("from", "")), str(Omemo.parse_encrypted(enc_el)["sid"]), str(omemo_res.get("error", "desconocido"))])
+				emit_signal("log_message", 1, "OMEMO decrypt failed from %s device %s: %s" % [str(rec["from"]), str(Omemo.parse_encrypted(enc_el)["sid"]), str(omemo_res.get("error", "desconocido"))])
 				if rec["body"] == "":
 					rec["body"] = OMEMO_PLACEHOLDER
 		elif rec["body"] == "":
