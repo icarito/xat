@@ -373,6 +373,10 @@ func _ready() -> void:
 	_update_view = UpdateView.new()
 	add_child(_update_view)
 	_update_view.setup(_updater, _app_version())
+	# Chequeo silencioso al arrancar, sólo en builds exportados (no en el editor).
+	# Es diferido: HTTPRequest usa hilos y no bloquea el startup.
+	if OS.has_feature("standalone"):
+		_updater.call_deferred("check", _app_version())
 	_invite_dialog = InviteDialog.new()
 	add_child(_invite_dialog)
 	_invite_dialog.connect("submitted", self, "_on_invite_submitted")

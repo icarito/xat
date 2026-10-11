@@ -2,11 +2,14 @@ extends Node
 
 # Actualizaciones in-app desde los GitHub Releases de xat.
 #   check()            -> consulta releases/latest y compara versiones
-#   download()         -> baja el .apk a user://updates/ con progreso
-#   install(path)      -> abre el instalador del sistema (XatMedia.install_apk)
+#   download()         -> baja el asset de esta plataforma a user://updates/
+#   install(path)      -> Android: instalador nativo (XatMedia.install_apk)
+#                         Linux: reemplaza el binario en ejecución
 #
-# La instalación sólo existe en Android (plugin nativo del fork). En escritorio
-# `can_install()` es false y la vista ofrece abrir la descarga en el navegador.
+# El asset se elige por plataforma (apk / ipa / macos.zip / linux). En Android
+# la instalación la abre el plugin nativo del fork; en Linux se hace un
+# auto-reemplazo del binario; en macOS/iOS `can_install()` es false y la vista
+# abre el paquete descargado.
 
 signal update_available(info)
 signal up_to_date(version)
@@ -63,22 +66,14 @@ func _on_check_done(result: int, code: int, _headers, body: PoolByteArray) -> vo
 	var rel = parsed.result
 	var tag = str(rel.get("tag_name", ""))
 	var ver = tag.trim_prefix("v")
-	var url := ""
-	var size := 0
-	var name := ""
-	for a in rel.get("assets", []):
-		var an = str(a.get("name", ""))
-		if an.ends_with(".apk"):
-			url = str(a.get("browser_download_url", ""))
-			size = int(a.get("size", 0))
-			name = an
-			break
-	if ver == "" or url == "":
-		emit_signal("check_failed", "el release no tiene APK")
+	var asset = _platform_asset(rel.get("assets", []))
+	if ver == "" or asset.empty():
+		emit_signal("check_failed", "el release no trae binario para %s" % OS.get_name())
 		return
 	latest = {
 		"version": ver, "tag": tag, "notes": str(rel.get("body", "")),
-		"url": url, "size": size, "name": name,
+		"url": str(asset.get("url", "")), "size": int(asset.get("size", 0)),
+		"name": str(asset.get("name", "")), "kind": str(asset.get("kind", "")),
 		"published_at": str(rel.get("published_at", "")),
 	}
 	if _is_newer(ver, current_version):
@@ -95,6 +90,9 @@ func download() -> void:
 	dir.make_dir_recursive("user://updates")
 	_body_size = int(latest.get("size", 0))
 	downloading = true
+	# HTTPRequest necesita `download_file` ANTES de request() para escribir a
+	# disco; si no, deja el cuerpo en memoria y el archivo nunca existe.
+	_dl.download_file = _dl_path
 	var err = _dl.request(str(latest["url"]), ["User-Agent: " + UA])
 	if err != OK:
 		downloading = false
@@ -120,17 +118,101 @@ func _on_dl_done(result: int, code: int, _headers, _body: PoolByteArray) -> void
 	# `download_file` dejó el archivo en user://updates/<name>.
 	emit_signal("downloaded", ProjectSettings.globalize_path(_dl_path))
 
-# --- Instalación (Android nativo) ---
+# --- Instalación ---
 
 func can_install() -> bool:
+	# Android: instalador nativo (XatMedia). Linux: auto-reemplazo del binario.
 	# Los JNISingleton exponen métodos sólo vía call(); has_method da false.
-	return Engine.has_singleton("XatMedia")
+	return Engine.has_singleton("XatMedia") or _linux_self_update()
 
 func install(p_path: String) -> bool:
-	if p_path == "" or not Engine.has_singleton("XatMedia"):
+	if p_path == "":
 		return false
-	var m = Engine.get_singleton("XatMedia")
-	return bool(m.call("install_apk", p_path))
+	if Engine.has_singleton("XatMedia"):
+		var m = Engine.get_singleton("XatMedia")
+		return bool(m.call("install_apk", p_path))
+	if _linux_self_update():
+		return _install_linux(p_path)
+	return false
+
+# --- Actualización en Linux (escritorio) ---
+
+# Sólo tiene sentido en un build exportado (no en el editor, donde el
+# ejecutable es el propio Godot).
+func _linux_self_update() -> bool:
+	if OS.get_name() != "Linux" or not OS.has_feature("standalone"):
+		return false
+	return OS.get_executable_path() != ""
+
+# Reemplaza el binario en ejecución con la descarga ya copiada en p_path.
+func _install_linux(p_path: String) -> bool:
+	var exe = OS.get_executable_path()
+	if exe == "":
+		return false
+	return _replace_binary(p_path, exe)
+
+# Copia p_src sobre p_dest de forma atómica: staging en el mismo directorio y
+# rename encima. En Linux el rename sobre un binario en uso es permitido; el
+# proceso sigue con el inodo viejo hasta reiniciar.
+func _replace_binary(p_src: String, p_dest: String) -> bool:
+	var d = Directory.new()
+	var staging = p_dest.get_base_dir() + "/." + p_dest.get_file() + ".new"
+	if d.copy(p_src, staging) != OK:
+		return false
+	# chmod +x best-effort: algunos sistemas no traen chmod en PATH.
+	OS.execute("chmod", ["+x", staging], true)
+	if d.rename(staging, p_dest) != OK:
+		d.remove(staging)
+		return false
+	return true
+
+# Elige el asset del release para la plataforma actual. p_platform permite
+# forzarla en tests (por defecto OS.get_name()).
+func _platform_asset(p_assets, p_platform := "") -> Dictionary:
+	var plat = p_platform if p_platform != "" else OS.get_name()
+	var want = "linux"
+	match plat:
+		"Android":
+			want = "android"
+		"iOS":
+			want = "ios"
+		"macOS", "OSX":
+			want = "macos"
+		"Windows", "UWP":
+			want = "windows"
+	for a in p_assets:
+		if not (a is Dictionary):
+			continue
+		var name = str(a.get("name", ""))
+		if _asset_kind(name) == want:
+			return {
+				"url": str(a.get("browser_download_url", "")),
+				"size": int(a.get("size", 0)),
+				"name": name,
+				"kind": want,
+			}
+	return {}
+
+# Clasifica el nombre de un asset por plataforma ("" si no se reconoce).
+func _asset_kind(p_name: String) -> String:
+	var n = p_name.to_lower()
+	if n.ends_with(".apk"):
+		return "android"
+	if n.ends_with(".ipa"):
+		return "ios"
+	if n.ends_with(".dmg") or n.ends_with(".pkg"):
+		return "macos"
+	if n.ends_with(".exe") or n.ends_with(".msi"):
+		return "windows"
+	if n.ends_with(".zip"):
+		if "macos" in n or "osx" in n:
+			return "macos"
+		if "windows" in n:
+			return "windows"
+		return ""
+	if "linux" in n:
+		return "linux"
+	return ""
 
 # Semver simple: ¿a es más nueva que b? (compara partes numéricas).
 func _is_newer(a: String, b: String) -> bool:

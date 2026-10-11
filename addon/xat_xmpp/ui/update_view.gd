@@ -174,13 +174,26 @@ func _on_progress(p_done: int, p_total: int) -> void:
 
 func _on_downloaded(p_path: String) -> void:
 	_bar.value = 100
+	var kind = str(_info.get("kind", ""))
 	if _updater != null and _updater.call("can_install"):
-		_status.text = "Abriendo el instalador…"
-		if not bool(_updater.call("install", p_path)):
+		_status.text = "Aplicando la actualización…"
+		if bool(_updater.call("install", p_path)):
+			if kind == "linux":
+				_status.text = "Actualizado a %s. Reiniciá xat para usar la nueva versión." % _info.get("version", "?")
+			else:
+				_status.text = "Abriendo el instalador…"
+		elif kind == "linux":
+			_status.text = "No se pudo reemplazar el binario. Copialo a mano desde:\n%s" % p_path
+		else:
 			_status.text = "No se pudo abrir el instalador. Abrí el APK manualmente:\n%s" % p_path
+	elif kind == "linux":
+		# Sin auto-reemplazo (editor o destino no escribible): abrir la carpeta.
+		OS.shell_open(p_path.get_base_dir())
+		_status.text = "Binario descargado en:\n%s" % p_path
 	else:
-		# Escritorio u otras plataformas: no hay instalador; abrir la descarga.
-		_status.text = "APK descargado: %s" % p_path
+		# macOS / otras plataformas: abrir el paquete descargado.
+		OS.shell_open(p_path)
+		_status.text = "Descarga lista: %s" % p_path
 
 func _on_dl_failed(p_reason: String) -> void:
 	_bar.visible = false
