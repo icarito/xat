@@ -155,6 +155,7 @@ func _ready() -> void:
 	session.name = "Session"
 	add_child(session)
 	session.connect("state_changed", self, "_on_state_changed")
+	session.connect("register_result", self, "_on_register_result")
 	session.connect("roster_changed", self, "_on_roster_changed")
 	session.connect("presence_changed", self, "_on_presence_changed")
 	session.connect("message_received", self, "_on_message_received")
@@ -191,6 +192,7 @@ func _ready() -> void:
 	_account.anchor_bottom = 1.0
 	add_child(_account)
 	_account.connect("connect_requested", self, "_on_connect_requested")
+	_account.connect("register_requested", self, "_on_register_requested")
 
 	_credentials = Credentials.new()
 	var saved = _credentials.load_with_env(Credentials.DEFAULT_PATH)
@@ -443,6 +445,19 @@ func _on_connect_requested(p_cfg: Dictionary) -> void:
 		_account.set_status("No se pudo iniciar la conexión (código %d)." % rc)
 		if _startup_splash != null:
 			_startup_splash.finish("error")
+
+func _on_register_requested(p_cfg: Dictionary) -> void:
+	var rc = session.register_account(p_cfg["jid"], p_cfg["pass"], p_cfg.get("host", ""), p_cfg.get("port", 5222), p_cfg.get("cafile", ""))
+	if rc < 0:
+		_account.set_status("Este binario no soporta el registro en banda (XEP-0077).")
+	elif rc != 0:
+		_account.set_status("No se pudo iniciar el registro (código %d)." % rc)
+
+func _on_register_result(p_ok: bool, p_message: String) -> void:
+	if p_ok:
+		_account.set_status("Cuenta creada. Ya podés conectar.")
+	else:
+		_account.set_status("No se pudo crear la cuenta: %s" % p_message)
 
 func _on_state_changed(p_state: int) -> void:
 	print("xat: estado %d" % p_state)

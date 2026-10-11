@@ -9,6 +9,7 @@ extends Node
 signal stanza(xml)
 signal connected(bound_jid)
 signal disconnected(error)
+signal register_result(ok, message)
 signal log_message(level, msg)
 
 var _impl = null
@@ -30,6 +31,8 @@ func _wire() -> void:
 	_impl.connect("connected", self, "_on_connected")
 	_impl.connect("disconnected", self, "_on_disconnected")
 	_impl.connect("log", self, "_on_log")
+	if _impl.has_signal("register_result"):
+		_impl.connect("register_result", self, "_on_register_result")
 
 func available() -> bool:
 	return _impl != null
@@ -49,6 +52,19 @@ func close() -> void:
 	if _impl != null:
 		_impl.close()
 
+# XEP-0077: registro en banda (pre-auth). El resultado llega por
+# `register_result(ok, message)`.
+func register_account(jid: String, password: String, host: String = "", port: int = 5222, cafile: String = "") -> int:
+	if _impl == null:
+		return -1
+	if not is_inside_tree():
+		_wire()
+	elif not _wired:
+		_wire()
+	if not _impl.has_method("register_account"):
+		return -2
+	return _impl.register_account(jid, password, host, port, cafile)
+
 func send(xml: String) -> int:
 	if _impl == null:
 		return -1
@@ -65,6 +81,9 @@ func _on_connected(bound_jid: String) -> void:
 
 func _on_disconnected(error: int) -> void:
 	emit_signal("disconnected", error)
+
+func _on_register_result(ok: bool, message: String) -> void:
+	emit_signal("register_result", ok, message)
 
 func _on_log(level: int, msg: String) -> void:
 	emit_signal("log_message", level, msg)

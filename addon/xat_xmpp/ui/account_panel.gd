@@ -41,7 +41,7 @@ func _make_form() -> VBoxContainer:
 	_cafile = _row(v, "CA (opcional)", "/etc/ssl/certs/ca-certificates.crt")
 	# Registro en banda (XEP-0077): sólo se muestra si el servidor lo ofrece.
 	_email = _row(v, "Correo (registro)", "")
-	_email.visible = false
+	_email.visible = true
 	v.add_child(HSeparator.new())
 	_button = Button.new()
 	_button.text = "Conectar"
@@ -49,7 +49,7 @@ func _make_form() -> VBoxContainer:
 	v.add_child(_button)
 	_register_btn = Button.new()
 	_register_btn.text = "Crear cuenta nueva"
-	_register_btn.visible = false
+	_register_btn.visible = true
 	_register_btn.connect("pressed", self, "_on_register")
 	v.add_child(_register_btn)
 	_status = Label.new()
@@ -151,3 +151,11 @@ func _on_connect() -> void:
 		return
 	set_status("")
 	emit_signal("connect_requested", cfg)
+
+func _on_register() -> void:
+	var cfg = config()
+	if cfg["jid"] == "" or cfg["pass"] == "":
+		set_status("JID y contraseña son obligatorios para crear la cuenta.")
+		return
+	set_status("Creando cuenta…")
+	emit_signal("register_requested", cfg)
