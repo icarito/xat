@@ -13,12 +13,22 @@ const COLOR_DOWN := Color("ff5c7a")
 const COLOR_UNKNOWN := Color("8b93a7")
 const COLOR_HIBERNATED := Color("7e91b5")
 
+# Debajo de este ancho se usa la disposición compacta (móvil en portrait):
+# tarjetas en grilla de 2, filas apiladas en vez de tabla y márgenes chicos.
+const COMPACT_WIDTH := 640.0
+
 var _content
 var _operations_content
 var _freshness
 var _node := ""
 var _summary_values := {}
 var _cost_rows
+
+var _margin: MarginContainer
+var _layout: VBoxContainer
+var _compact := false
+var _built := false
+var _snapshot := {}
 
 func _ready() -> void:
 	visible = false
@@ -29,52 +39,98 @@ func _ready() -> void:
 	backdrop.anchor_right = 1.0
 	backdrop.anchor_bottom = 1.0
 	add_child(backdrop)
-	var margin = MarginContainer.new()
-	margin.anchor_right = 1.0
-	margin.anchor_bottom = 1.0
-	margin.add_constant_override("margin_left", 28)
-	margin.add_constant_override("margin_right", 28)
-	margin.add_constant_override("margin_top", 22)
-	margin.add_constant_override("margin_bottom", 22)
-	add_child(margin)
-	var layout = VBoxContainer.new()
-	layout.add_constant_override("separation", 14)
-	margin.add_child(layout)
-	_build_header(layout)
-	_build_overview(layout)
-	_build_content(layout)
+	_margin = MarginContainer.new()
+	_margin.anchor_right = 1.0
+	_margin.anchor_bottom = 1.0
+	add_child(_margin)
+	_layout = VBoxContainer.new()
+	_layout.add_constant_override("separation", 14)
+	_margin.add_child(_layout)
+	_compact = _is_compact()
+	_apply_margins()
+	_build()
 	show_snapshot({})
+	connect("resized", self, "_on_resized")
+
+func _is_compact() -> bool:
+	var w = rect_size.x
+	if w <= 0.0:
+		w = get_viewport_rect().size.x
+	return w > 0.0 and w < COMPACT_WIDTH
+
+func _apply_margins() -> void:
+	var h := 12 if _compact else 28
+	var v := 10 if _compact else 22
+	_margin.add_constant_override("margin_left", h)
+	_margin.add_constant_override("margin_right", h)
+	_margin.add_constant_override("margin_top", v)
+	_margin.add_constant_override("margin_bottom", v)
+
+func _on_resized() -> void:
+	var compact := _is_compact()
+	if compact == _compact:
+		return
+	# Al rotar o cambiar de tamaño, rearmar la disposición y repintar.
+	_compact = compact
+	_apply_margins()
+	_build()
+	show_snapshot(_snapshot)
+
+# Reconstruye header/overview/contenido según el modo actual.
+func _build() -> void:
+	for child in _layout.get_children():
+		_layout.remove_child(child)
+		child.queue_free()
+	_summary_values = {}
+	_layout.add_constant_override("separation", 10 if _compact else 14)
+	_build_header(_layout)
+	_build_overview(_layout)
+	_build_content(_layout)
+	_built = true
 
 func _build_header(p_layout: VBoxContainer) -> void:
-	var header = HBoxContainer.new()
-	header.add_constant_override("separation", 14)
-	p_layout.add_child(header)
 	var title_box = VBoxContainer.new()
 	title_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	title_box.add_constant_override("separation", 1)
-	header.add_child(title_box)
-	var eyebrow = _label("FLEET  /  XMPP MONITORING", P.AGENT_EDGE, P.FONT_MEDIUM, 11)
-	title_box.add_child(eyebrow)
-	var title = _label("Fleet monitor", P.TEXT, P.FONT_BOLD, 24)
-	title_box.add_child(title)
+	title_box.add_child(_label("FLEET  /  XMPP MONITORING", P.AGENT_EDGE, P.FONT_MEDIUM, 11))
+	title_box.add_child(_label("Fleet monitor", P.TEXT, P.FONT_BOLD, 19 if _compact else 24))
 	_freshness = _label("WAITING", P.TEXT_DIM, P.FONT_MONO, 11)
-	_freshness.align = Label.ALIGN_RIGHT
 	_freshness.valign = Label.VALIGN_CENTER
 	_freshness.clip_text = true
 	_freshness.hint_tooltip = "Projection freshness"
-	_freshness.rect_min_size.x = 210
-	header.add_child(_freshness)
 	var source = Button.new()
 	source.text = "Source"
 	source.hint_tooltip = "Configurar publicador y nodo PubSub"
 	source.focus_mode = Control.FOCUS_NONE
 	source.connect("pressed", self, "_on_source")
-	header.add_child(source)
 	var close = Button.new()
 	close.text = "Close  ×"
 	close.focus_mode = Control.FOCUS_NONE
 	close.connect("pressed", self, "_on_close")
-	header.add_child(close)
+	if _compact:
+		var header = HBoxContainer.new()
+		header.add_constant_override("separation", 10)
+		header.add_child(title_box)
+		p_layout.add_child(header)
+		var bar = HBoxContainer.new()
+		bar.add_constant_override("separation", 8)
+		_freshness.align = Label.ALIGN_LEFT
+		_freshness.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		bar.add_child(_freshness)
+		bar.add_child(source)
+		bar.add_child(close)
+		p_layout.add_child(bar)
+	else:
+		var header = HBoxContainer.new()
+		header.add_constant_override("separation", 14)
+		_freshness.align = Label.ALIGN_RIGHT
+		_freshness.rect_min_size.x = 210
+		_freshness.size_flags_horizontal = Control.SIZE_SHRINK_END
+		header.add_child(title_box)
+		header.add_child(_freshness)
+		header.add_child(source)
+		header.add_child(close)
+		p_layout.add_child(header)
 	_add_rule(p_layout)
 
 func _open_url(p_url: String) -> void:
@@ -84,17 +140,32 @@ func _on_source() -> void:
 	emit_signal("source_requested")
 
 func _build_overview(p_layout: VBoxContainer) -> void:
-	var row = HBoxContainer.new()
-	row.add_constant_override("separation", 10)
-	p_layout.add_child(row)
-	_add_stat_card(row, "READY", "0", COLOR_READY, "ready")
-	_add_stat_card(row, "DEGRADED", "0", COLOR_DEGRADED, "degraded")
-	_add_stat_card(row, "UNKNOWN", "0", COLOR_UNKNOWN, "unknown")
-	_add_stat_card(row, "HIBERNATED", "0", COLOR_HIBERNATED, "hibernated")
+	if _compact:
+		var grid = GridContainer.new()
+		grid.columns = 2
+		grid.add_constant_override("hseparation", 8)
+		grid.add_constant_override("vseparation", 8)
+		_add_stat_card(grid, "READY", "0", COLOR_READY, "ready")
+		_add_stat_card(grid, "DEGRADED", "0", COLOR_DEGRADED, "degraded")
+		_add_stat_card(grid, "UNKNOWN", "0", COLOR_UNKNOWN, "unknown")
+		_add_stat_card(grid, "HIBERNATED", "0", COLOR_HIBERNATED, "hibernated")
+		p_layout.add_child(grid)
+		p_layout.add_child(_build_cost_card())
+	else:
+		var row = HBoxContainer.new()
+		row.add_constant_override("separation", 10)
+		_add_stat_card(row, "READY", "0", COLOR_READY, "ready")
+		_add_stat_card(row, "DEGRADED", "0", COLOR_DEGRADED, "degraded")
+		_add_stat_card(row, "UNKNOWN", "0", COLOR_UNKNOWN, "unknown")
+		_add_stat_card(row, "HIBERNATED", "0", COLOR_HIBERNATED, "hibernated")
+		row.add_child(_build_cost_card())
+		p_layout.add_child(row)
+
+func _build_cost_card():
 	var cost_card = _card(Color("332a19"))
 	cost_card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	cost_card.rect_min_size.x = 300
-	row.add_child(cost_card)
+	if not _compact:
+		cost_card.rect_min_size.x = 300
 	var cost_layout = VBoxContainer.new()
 	cost_layout.add_constant_override("separation", 3)
 	cost_card.add_child(cost_layout)
@@ -102,11 +173,13 @@ func _build_overview(p_layout: VBoxContainer) -> void:
 	_cost_rows = VBoxContainer.new()
 	_cost_rows.add_constant_override("separation", 1)
 	cost_layout.add_child(_cost_rows)
+	return cost_card
 
-func _add_stat_card(p_parent: HBoxContainer, p_title: String, p_value: String, p_color: Color, p_key: String) -> void:
+func _add_stat_card(p_parent: Container, p_title: String, p_value: String, p_color: Color, p_key: String) -> void:
 	var card = _card(Color("151b24"))
 	card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	card.rect_min_size.x = 115
+	if not _compact:
+		card.rect_min_size.x = 115
 	p_parent.add_child(card)
 	var body = HBoxContainer.new()
 	body.add_constant_override("separation", 10)
@@ -129,15 +202,17 @@ func _build_content(p_layout: VBoxContainer) -> void:
 	_operations_content = VBoxContainer.new()
 	_operations_content.add_constant_override("separation", 5)
 	p_layout.add_child(_operations_content)
-	var heading = HBoxContainer.new()
-	heading.add_child(_label("FLEET INVENTORY", P.TEXT, P.FONT_BOLD, 13))
-	var spacer = Control.new()
-	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	heading.add_child(spacer)
-	heading.add_child(_label("IDENTITY  ·  TYPE  ·  HEALTH  ·  LIFECYCLE", P.TEXT_DIM, P.FONT_MONO, 10))
-	p_layout.add_child(heading)
-	var column_head = _entity_columns(true)
-	p_layout.add_child(column_head)
+	if _compact:
+		p_layout.add_child(_label("FLEET INVENTORY", P.TEXT, P.FONT_BOLD, 13))
+	else:
+		var heading = HBoxContainer.new()
+		heading.add_child(_label("FLEET INVENTORY", P.TEXT, P.FONT_BOLD, 13))
+		var spacer = Control.new()
+		spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		heading.add_child(spacer)
+		heading.add_child(_label("IDENTITY  ·  TYPE  ·  HEALTH  ·  LIFECYCLE", P.TEXT_DIM, P.FONT_MONO, 10))
+		p_layout.add_child(heading)
+		p_layout.add_child(_entity_columns(true))
 	var scroll = ScrollContainer.new()
 	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	scroll.scroll_horizontal_enabled = false
@@ -148,10 +223,13 @@ func _build_content(p_layout: VBoxContainer) -> void:
 	scroll.add_child(_content)
 
 func show_snapshot(p_snapshot: Dictionary) -> void:
+	_snapshot = p_snapshot
 	if _content == null: return
 	for child in _content.get_children():
+		_content.remove_child(child)
 		child.queue_free()
 	for child in _operations_content.get_children():
+		_operations_content.remove_child(child)
 		child.queue_free()
 	var stale = bool(p_snapshot.get("stale", false))
 	var generated = str(p_snapshot.get("generated_at", ""))
@@ -194,48 +272,91 @@ func _entity_row(p_entity: Dictionary):
 	var card = _card(Color("151b24"))
 	card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	var row = HBoxContainer.new()
-	row.add_constant_override("separation", 12)
+	row.add_constant_override("separation", 10 if _compact else 12)
 	card.add_child(row)
 	var rail = ColorRect.new()
 	rail.color = color
 	rail.rect_min_size = Vector2(4, 42)
 	row.add_child(rail)
-	var identity = VBoxContainer.new()
-	identity.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	identity.add_constant_override("separation", 0)
-	row.add_child(identity)
 	var team = str(p_entity.get("team", "Unassigned"))
 	var instance_id = str(p_entity.get("id", ""))
 	var entity_label = str(p_entity.get("label", team))
-	var title = _label(entity_label, P.TEXT, P.FONT_MEDIUM, 13)
-	title.clip_text = true
-	title.hint_tooltip = entity_label + " · " + team
-	identity.add_child(title)
-	var subtitle_text = instance_id
 	var jid = str(p_entity.get("jid", ""))
-	var subtitle = _label(_ellipsize(subtitle_text if subtitle_text != "" else "—", 30), P.TEXT_DIM, P.FONT_MONO, 10)
-	subtitle.clip_text = true
-	subtitle.hint_tooltip = subtitle_text + (" · " + jid if jid != "" else "")
-	identity.add_child(subtitle)
 	var kind = str(p_entity.get("entity-kind", "entity")).to_upper()
-	row.add_child(_pill(kind, Color("202a36"), P.AGENT_EDGE, 110))
-	row.add_child(_pill(_entity_state_title(p_entity, status), _state_tint(status), color, 145))
+	var state_title = _entity_state_title(p_entity, status)
 	var lifecycle = str(p_entity.get("lifecycle", "—")).replace("_", " ").to_upper()
-	row.add_child(_pill(lifecycle, Color("1c222d"), P.TEXT_DIM, 125))
 	var brain_url = Snapshot.safe_url(str(p_entity.get("brain-url", "")))
-	if brain_url != "":
-		var brain = Button.new()
-		brain.text = "Brain"
-		brain.hint_tooltip = "Abrir el cerebro del agente (fleet-wiki)"
-		brain.focus_mode = Control.FOCUS_NONE
-		brain.connect("pressed", self, "_open_url", [brain_url])
-		row.add_child(brain)
+	if _compact:
+		# Portrait: identidad arriba y las etiquetas en grilla de 2.
+		var col = VBoxContainer.new()
+		col.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		col.add_constant_override("separation", 5)
+		row.add_child(col)
+		col.add_child(_entity_identity(p_entity, entity_label, instance_id, jid, team))
+		var grid = GridContainer.new()
+		grid.columns = 2
+		grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		grid.add_constant_override("hseparation", 6)
+		grid.add_constant_override("vseparation", 4)
+		grid.add_child(_pill(kind, Color("202a36"), P.AGENT_EDGE, 0))
+		grid.add_child(_pill(state_title, _state_tint(status), color, 0))
+		grid.add_child(_pill(lifecycle, Color("1c222d"), P.TEXT_DIM, 0))
+		if brain_url != "":
+			grid.add_child(_brain_button(brain_url))
+		col.add_child(grid)
+	else:
+		var identity = _entity_identity(p_entity, entity_label, instance_id, jid, team)
+		identity.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		row.add_child(identity)
+		row.add_child(_pill(kind, Color("202a36"), P.AGENT_EDGE, 110))
+		row.add_child(_pill(state_title, _state_tint(status), color, 145))
+		row.add_child(_pill(lifecycle, Color("1c222d"), P.TEXT_DIM, 125))
+		if brain_url != "":
+			row.add_child(_brain_button(brain_url))
 	card.hint_tooltip = "%s · %s · %s" % [team, instance_id, jid]
 	return card
+
+func _entity_identity(p_entity: Dictionary, p_label: String, p_instance: String, p_jid: String, p_team: String):
+	var identity = VBoxContainer.new()
+	identity.add_constant_override("separation", 0)
+	var title = _label(p_label, P.TEXT, P.FONT_MEDIUM, 13)
+	title.clip_text = true
+	title.hint_tooltip = p_label + " · " + p_team
+	identity.add_child(title)
+	var subtitle_text = p_instance
+	var subtitle = _label(_ellipsize(subtitle_text if subtitle_text != "" else "—", 30), P.TEXT_DIM, P.FONT_MONO, 10)
+	subtitle.clip_text = true
+	subtitle.hint_tooltip = subtitle_text + (" · " + p_jid if p_jid != "" else "")
+	identity.add_child(subtitle)
+	return identity
+
+func _brain_button(p_url: String) -> Button:
+	var brain = Button.new()
+	brain.text = "Brain"
+	brain.hint_tooltip = "Abrir el cerebro del agente (fleet-wiki)"
+	brain.focus_mode = Control.FOCUS_NONE
+	brain.connect("pressed", self, "_open_url", [p_url])
+	return brain
 
 func _operation_row(p_operation: Dictionary):
 	var card = _card(Color("111720"))
 	card.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var fields = p_operation.get("fields", {})
+	var detail = []
+	for key in fields.keys():
+		detail.append("%s  %s" % [str(key).replace("_", " ").to_upper(), fields[key]])
+	var detail_text = "     ·     ".join(detail)
+	if _compact:
+		# Portrait: título y detalle en vertical, con ajuste de línea.
+		var col = VBoxContainer.new()
+		col.add_constant_override("separation", 3)
+		card.add_child(col)
+		col.add_child(_label(str(p_operation.get("instance", "Fleet operation")), P.TEXT, P.FONT_MEDIUM, 12))
+		var values = _label(detail_text, P.TEXT_DIM, P.FONT_MONO, 10)
+		values.autowrap = true
+		values.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		col.add_child(values)
+		return card
 	var row = HBoxContainer.new()
 	row.add_constant_override("separation", 12)
 	card.add_child(row)
@@ -243,15 +364,10 @@ func _operation_row(p_operation: Dictionary):
 	title.rect_min_size.x = 200
 	title.clip_text = true
 	row.add_child(title)
-	var fields = p_operation.get("fields", {})
-	var detail = []
-	for key in fields.keys():
-		detail.append("%s  %s" % [str(key).replace("_", " ").to_upper(), fields[key]])
-	var values = _label("     ·     ".join(detail), P.TEXT_DIM, P.FONT_MONO, 10)
+	var values = _label(_ellipsize(detail_text, 100), P.TEXT_DIM, P.FONT_MONO, 10)
 	values.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	values.clip_text = true
-	values.hint_tooltip = "     ·     ".join(detail)
-	values.text = _ellipsize(values.text, 100)
+	values.hint_tooltip = detail_text
 	row.add_child(values)
 	return card
 
@@ -294,6 +410,9 @@ func _pill(p_text: String, p_bg: Color, p_fg: Color, p_width: float):
 	var panel = PanelContainer.new()
 	panel.rect_min_size = Vector2(p_width, 30)
 	panel.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	if p_width <= 0.0:
+		# En modo compacto la píldora ocupa su celda de la grilla.
+		panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	var style = StyleBoxFlat.new()
 	style.bg_color = p_bg
 	style.corner_radius_top_left = 5
