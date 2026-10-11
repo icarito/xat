@@ -135,7 +135,6 @@ func stop(p_discard: bool = false) -> Dictionary:
 	var pcm: PoolByteArray = sample.data if sample.format == AudioStreamSample.FORMAT_16_BITS else PoolByteArray()
 	var channels = 2 if sample.stereo else 1
 	var rate = int(sample.mix_rate)
-	pcm = normalize_pcm16(pcm)
 	_job = {
 		"pcm": pcm,
 		"channels": channels,
@@ -162,7 +161,9 @@ func _encode_worker(p_job) -> Dictionary:
 
 # Puro: downmix+remuestreo a voz, ADPCM y armado del WAV (sin escribir).
 func _encode_pcm(p_job: Dictionary) -> Dictionary:
-	var pcm: PoolByteArray = p_job["pcm"]
+	# La normalización recorre todo el buffer: va acá (thread), no en stop()
+	# (hilo principal), para no congelar la UI al detener una grabación larga.
+	var pcm: PoolByteArray = normalize_pcm16(p_job["pcm"])
 	if pcm.empty():
 		return {"ok": false, "reason": "vacio"}
 	var mono = Media.downmix_resample(pcm, int(p_job["channels"]), int(p_job["rate"]), VOICE_RATE)

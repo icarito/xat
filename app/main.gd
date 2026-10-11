@@ -1995,14 +1995,19 @@ func _on_mind_back() -> void:
 	_mind_pinned = false
 	_update_mind_visibility()
 
-# Atrás del sistema (Android): cierra la mente o vuelve al roster según el panel.
+# Atrás del sistema (Android): navega hacia atrás en orden — diálogo fuente,
+# fleet, lightbox, mente, conversación — y sólo sale desde el roster raíz.
 func _notification(p_what: int) -> void:
 	if p_what == NOTIFICATION_WM_GO_BACK_REQUEST:
 		# Back de Android: navegar hacia atrás; sólo cierra si estamos en el
 		# roster raíz (sin conversación abierta). Se desactiva el cierre
 		# automático en _ready (set_quit_on_go_back(false)), así que aquí se
 		# decide explícitamente.
-		if _lightbox.visible:
+		if _fleet_source_dialog != null and _fleet_source_dialog.visible:
+			_fleet_source_dialog.hide()
+		elif _fleet_monitor != null and _fleet_monitor.visible:
+			_close_fleet_monitor()
+		elif _lightbox.visible:
 			_lightbox.close()
 		elif _mind_pinned:
 			_on_mind_back()
