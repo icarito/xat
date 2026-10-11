@@ -68,7 +68,7 @@ if [ "${XAT_ANDROID_BUILD_TEMPLATE:-0}" = "1" ]; then
 	(cd "$GODOT/platform/android/java" && ./gradlew --no-daemon copyDebugBinaryToBin)
 	cp "$GODOT/bin/android_debug.apk" "$TPL_DIR/android_debug.apk"
 	cp "$GODOT/bin/android_debug.apk" "$TPL_DIR/android_release.apk"
-	printf '%s\n' "$VER" > "$TPL_MARKER"
+	printf 'local:%s\n' "$VER" > "$TPL_MARKER"
 else
 	if [ ! -s "$TPL_DIR/android_debug.apk" ] || [ "$(cat "$TPL_MARKER" 2>/dev/null)" != "$VER" ]; then
 		echo "Bajando plantillas Android del fork ($VER) ..." >&2
