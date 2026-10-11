@@ -212,13 +212,24 @@ func omemo_fingerprint(p_bare: String, p_dev: int) -> String:
 		parts.append("%02X" % ik[i])
 	return ":".join(parts)
 
-# Publica device-list y bundle por PEP. Repetible al reconectar.
-func publish_omemo() -> void:
+# Publica device-list y bundle por PEP, conservando otros recursos de la cuenta.
+func publish_omemo(p_existing_devices: Array = []) -> void:
 	if not omemo_available() or _transport == null:
 		return
-	_transport.send(PubSub.build_publish(_new_id("od"), "", Omemo.NODE_DEVICES, "current", Omemo.build_devices_element(_omemo_device.device_list())).to_xml())
+	var devices = _omemo_device.device_list()
+	for d in p_existing_devices:
+		var id := int(d.get("id", -1))
+		if id <= 0 or id == _omemo_device.device_id():
+			continue
+		devices.append(d)
+	_transport.send(PubSub.build_publish(_new_id("od"), "", Omemo.NODE_DEVICES, "current", Omemo.build_devices_element(devices)).to_xml())
 	var bundle_el = Omemo.build_bundle_element(_omemo_device.bundle())
 	_transport.send(PubSub.build_publish(_new_id("ob"), "", Omemo.NODE_BUNDLES, str(_omemo_device.device_id()), bundle_el, 100).to_xml())
+
+func _request_own_omemo_devices() -> void:
+	var id = _new_id("oq")
+	_omemo_pending_items[id] = {"bare": _bare, "kind": "own_devices"}
+	_transport.send(PubSub.build_items_request(id, _bare, Omemo.NODE_DEVICES).to_xml())
 
 # Pide device-list y bundles del par (se cachean al recibir los items).
 func request_omemo_devices(p_bare: String) -> void:
@@ -1090,7 +1101,7 @@ func _on_connected(bound_jid: String) -> void:
 	discover_muc()
 	# OMEMO: publicar (o refrescar) device-list y bundle propios.
 	if omemo_available():
-		publish_omemo()
+		_request_own_omemo_devices()
 	# XEP-0357: re-registrar el push del dispositivo si ya estaba configurado
 	# (el servidor olvida el token cuando caduca la sesión).
 	if _push_service != "" and _push_token != "":
@@ -1160,8 +1171,10 @@ func _on_message(p_stanza) -> void:
 			if omemo_res["ok"]:
 				rec["body"] = omemo_res["body"]
 				rec["omemo_sender_device"] = omemo_res["sender_device"]
-			elif rec["body"] == "":
-				rec["body"] = OMEMO_PLACEHOLDER
+			else:
+				emit_signal("log_message", 1, "OMEMO decrypt failed from %s device %s: %s" % [_bare_of(p_stanza.get_attr("from", "")), str(Omemo.parse_encrypted(enc_el)["sid"]), str(omemo_res.get("error", "desconocido"))])
+				if rec["body"] == "":
+					rec["body"] = OMEMO_PLACEHOLDER
 		elif rec["body"] == "":
 			rec["body"] = OMEMO_PLACEHOLDER
 	# Adjuntos: OOB explícito o link con extensión conocida en el cuerpo.
@@ -1594,7 +1607,16 @@ func _on_iq(p_stanza) -> void:
 		var oi = _omemo_pending_items.get(iq_id, null)
 		if oi != null:
 			_omemo_pending_items.erase(iq_id)
-			_apply_omemo_items(str(oi["kind"]), str(oi["bare"]), PubSub.parse_items_result(p_stanza)["items"])
+			var items = PubSub.parse_items_result(p_stanza)["items"]
+			if oi["kind"] == "own_devices":
+				var existing := []
+				for it in items:
+					if it["payload"] != null:
+						existing = Omemo.parse_device_list(it["payload"])
+						break
+				publish_omemo(existing)
+			else:
+				_apply_omemo_items(str(oi["kind"]), str(oi["bare"]), items)
 		if _push_ctx.has(iq_id):
 			_handle_push_result(_push_ctx[iq_id], true, "")
 			_push_ctx.erase(iq_id)
@@ -1611,6 +1633,11 @@ func _on_iq(p_stanza) -> void:
 		emit_signal("error_received", {})
 		_handle_pubsub_error(p_stanza)
 		var eid = p_stanza.get_attr("id", "")
+		var oi_error = _omemo_pending_items.get(eid, null)
+		if oi_error != null:
+			_omemo_pending_items.erase(eid)
+			if oi_error["kind"] == "own_devices":
+				publish_omemo()
 		if _push_ctx.has(eid):
 			_handle_push_result(_push_ctx[eid], false, Push.error_condition(p_stanza))
 			_push_ctx.erase(eid)

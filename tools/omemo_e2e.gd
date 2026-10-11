@@ -92,7 +92,7 @@ func _tick() -> void:
 	if _own_dev < 0:
 		return
 	# Enviarse un cifrado a sí mismo una vez que el servidor devolvió nuestro bundle.
-	if not _self_sent and not _s.omemo_peer_devices(_own_bare).empty():
+	if OS.get_environment("XAT_OMEMO_SKIP_SELF") != "1" and not _self_sent and not _s.omemo_peer_devices(_own_bare).empty():
 		_self_sent = true
 		_self_body = "OMEMO e2e self %d" % OS.get_ticks_msec()
 		var rc = _s.send_message(_own_bare, _self_body)
@@ -103,7 +103,10 @@ func _tick() -> void:
 		if not devs.empty():
 			_peer_sent = true
 			_peer_devs = devs
-			var rc2 = _s.send_message(_peer, "OMEMO e2e desde xat (%d)" % OS.get_ticks_msec())
+			var peer_body = OS.get_environment("XAT_OMEMO_PEER_MESSAGE")
+			if peer_body == "":
+				peer_body = "OMEMO e2e desde xat (%d)" % OS.get_ticks_msec()
+			var rc2 = _s.send_message(_peer, peer_body)
 			print("OMEMO-E2E: peer-encrypt -> %s devs=%s rc=%d" % [_peer, str(devs), rc2])
 
 func _on_msg(p_rec) -> void:
@@ -112,10 +115,12 @@ func _on_msg(p_rec) -> void:
 		_self_ok = true
 		print("OMEMO-E2E: SELF OK (descifrado el propio mensaje)")
 	elif _peer != "" and str(p_rec.get("from", "")).begins_with(_peer):
-		_peer_ok = true
+		_peer_ok = body.find("todavía no puede leerlo") < 0
 		print("OMEMO-E2E: PEER REPLAY encrypted=%s body=%s" % [str(p_rec.get("encrypted", false)), body])
 
 func _on_log(_level: int, p_msg: String) -> void:
+	if p_msg.begins_with("OMEMO decrypt failed"):
+		print("OMEMO-E2E: " + p_msg)
 	var low = p_msg.to_lower()
 	if low.find("error") >= 0 or low.find("fail") >= 0 or low.find("not-authorized") >= 0:
 		_logs.append(p_msg)
