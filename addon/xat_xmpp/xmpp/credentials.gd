@@ -25,8 +25,10 @@ func save(p_path: String, p_config: Dictionary) -> bool:
 		return false
 	f.store_string(to_json(p_config))
 	f.close()
-	# Permisos 0600 (contiene la contraseña). Best-effort en Linux.
-	OS.execute("chmod", ["600", ProjectSettings.globalize_path(p_path)])
+	# Permisos 0600 (contiene la contraseña). Best-effort y sólo en escritorio:
+	# en Android/iOS no hay binario `chmod` y no debe spawnearse nada.
+	if OS.get_name() in ["Linux", "macOS"]:
+		OS.execute("chmod", ["600", ProjectSettings.globalize_path(p_path)])
 	return true
 
 func load_config(p_path: String) -> Dictionary:

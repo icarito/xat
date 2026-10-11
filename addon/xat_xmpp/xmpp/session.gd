@@ -7,6 +7,7 @@ extends Node
 # todo esto corre en el hilo principal. SQLite nunca se toca desde libstrophe.
 
 signal state_changed(state)
+signal register_result(ok, message)
 signal roster_changed()
 signal presence_changed(bare_jid)
 signal message_received(rec)
@@ -158,6 +159,8 @@ func _ready() -> void:
 	_transport.connect("connected", self, "_on_connected")
 	_transport.connect("disconnected", self, "_on_disconnected")
 	_transport.connect("log_message", self, "_on_log")
+	if _transport.has_signal("register_result"):
+		_transport.connect("register_result", self, "_on_register_result")
 
 	_reconnect_timer = Timer.new()
 	_reconnect_timer.one_shot = true
@@ -324,6 +327,17 @@ func disconnect_account() -> void:
 	_ping_timer.stop()
 	_transport.close()
 	_set_state(State.DISCONNECTED)
+
+# XEP-0077: crea la cuenta en el servidor (pre-auth). El resultado llega por la
+# señal `register_result(ok, message)`. Devuelve el rc del transporte (<0 si el
+# binario no trae el método).
+func register_account(p_jid: String, p_pass: String, p_host: String = "", p_port: int = 5222, p_cafile: String = "") -> int:
+	if _transport == null:
+		return -1
+	return _transport.register_account(p_jid, p_pass, p_host, p_port, p_cafile)
+
+func _on_register_result(ok: bool, message: String) -> void:
+	emit_signal("register_result", ok, message)
 
 func is_connected_to_server() -> bool:
 	return state == State.CONNECTED
@@ -1152,8 +1166,7 @@ func _on_stanza(xml: String) -> void:
 
 # --- Mensajería ---
 
-# En MUC, `from` es room/nick; la sesión OMEMO pertenece al JID real del
-# ocupante anunciado por la presencia de una sala no anónima.
+# En MUC no anónima, la sesión OMEMO pertenece al JID real del ocupante.
 func _omemo_sender_bare(p_rec: Dictionary) -> String:
 	var from = str(p_rec.get("from", ""))
 	if str(p_rec.get("type", "")) != "groupchat":

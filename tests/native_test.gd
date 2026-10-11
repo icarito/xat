@@ -15,6 +15,8 @@ func _init():
 	check(conn != null and conn is Node, "XmppConnection es Node")
 	if conn != null:
 		check(conn.has_method("open") and conn.has_method("send") and conn.has_method("is_open"), "API de XmppConnection")
+		check(conn.has_method("register_account"), "XEP-0077 register_account en XmppConnection")
+		check(conn.has_signal("register_result"), "señal register_result")
 		check(conn.has_signal("stanza_received") and conn.has_signal("connected") and conn.has_signal("disconnected"), "señales de XmppConnection")
 		check(not conn.is_open(), "no conectado al crear")
 		conn.free()

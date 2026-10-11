@@ -24,6 +24,13 @@ func _init() -> void:
 	main._fleet_source_dialog._node.text = "joework/monitoring/owner"
 	main._fleet_source_dialog._on_confirmed()
 	check(main._fleet_monitoring_jid() == "operator@example.org" and main._fleet_monitor.visible, "guardar abre la vista con el publicador configurado")
+	# Back de Android: navega hacia atrás (no sale de la app).
+	main._configure_fleet_monitor()
+	check(main._fleet_source_dialog.visible and main._fleet_monitor.visible, "diálogo de fuente sobre la vista de flota")
+	main._notification(NOTIFICATION_WM_GO_BACK_REQUEST)
+	check(not main._fleet_source_dialog.visible and main._fleet_monitor.visible, "back cierra primero el diálogo de fuente")
+	main._notification(NOTIFICATION_WM_GO_BACK_REQUEST)
+	check(not main._fleet_monitor.visible, "back cierra la vista de flota")
 	var reloaded = Juice.new()
 	reloaded.settings_path = main.juice.settings_path
 	reloaded.load_settings()

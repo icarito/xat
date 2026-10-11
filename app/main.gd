@@ -155,6 +155,7 @@ func _ready() -> void:
 	session.name = "Session"
 	add_child(session)
 	session.connect("state_changed", self, "_on_state_changed")
+	session.connect("register_result", self, "_on_register_result")
 	session.connect("roster_changed", self, "_on_roster_changed")
 	session.connect("presence_changed", self, "_on_presence_changed")
 	session.connect("message_received", self, "_on_message_received")
@@ -191,6 +192,7 @@ func _ready() -> void:
 	_account.anchor_bottom = 1.0
 	add_child(_account)
 	_account.connect("connect_requested", self, "_on_connect_requested")
+	_account.connect("register_requested", self, "_on_register_requested")
 
 	_credentials = Credentials.new()
 	var saved = _credentials.load_with_env(Credentials.DEFAULT_PATH)
@@ -444,6 +446,19 @@ func _on_connect_requested(p_cfg: Dictionary) -> void:
 		if _startup_splash != null:
 			_startup_splash.finish("error")
 
+func _on_register_requested(p_cfg: Dictionary) -> void:
+	var rc = session.register_account(p_cfg["jid"], p_cfg["pass"], p_cfg.get("host", ""), p_cfg.get("port", 5222), p_cfg.get("cafile", ""))
+	if rc < 0:
+		_account.set_status("Este binario no soporta el registro en banda (XEP-0077).")
+	elif rc != 0:
+		_account.set_status("No se pudo iniciar el registro (código %d)." % rc)
+
+func _on_register_result(p_ok: bool, p_message: String) -> void:
+	if p_ok:
+		_account.set_status("Cuenta creada. Ya podés conectar.")
+	else:
+		_account.set_status("No se pudo crear la cuenta: %s" % p_message)
+
 func _on_state_changed(p_state: int) -> void:
 	print("xat: estado %d" % p_state)
 	match p_state:
@@ -508,7 +523,9 @@ func _on_pubsub_items(p_from: String, p_node: String, p_items: Array) -> void:
 	var payload = p_items[p_items.size() - 1].get("payload", null)
 	if payload == null: return
 	_fleet_snapshot = FleetSnapshot.parse(payload)
-	_fleet_monitor.show_snapshot(_fleet_snapshot)
+	# Sólo repintar si la vista está abierta; el snapshot se guarda igual.
+	if _fleet_monitor.visible:
+		_fleet_monitor.show_snapshot(_fleet_snapshot)
 	_update_mind_visibility()
 
 # Fija el avatar propio ya resuelto (caché) en roster y cabecera.
@@ -523,15 +540,17 @@ func _on_pubsub_event(p_from: String, p_event: Dictionary) -> void:
 	var payload = items[items.size() - 1].get("payload", null)
 	if payload == null: return
 	_fleet_snapshot = FleetSnapshot.parse(payload)
-	_fleet_monitor.show_snapshot(_fleet_snapshot)
+	# Sólo repintar si la vista está abierta; el snapshot se guarda igual.
+	if _fleet_monitor.visible:
+		_fleet_monitor.show_snapshot(_fleet_snapshot)
 	_update_mind_visibility()
 
 func _open_fleet_monitor() -> void:
 	if _fleet_monitoring_jid() == "" or _fleet_monitoring_node() == "":
 		_configure_fleet_monitor()
 		return
-	_fleet_monitor.show_snapshot(_fleet_snapshot)
 	_fleet_monitor.visible = true
+	_fleet_monitor.show_snapshot(_fleet_snapshot)
 
 func _open_brain() -> void:
 	var url = FleetSnapshot.brain_url(_fleet_snapshot, _peer)
@@ -1991,14 +2010,19 @@ func _on_mind_back() -> void:
 	_mind_pinned = false
 	_update_mind_visibility()
 
-# Atrás del sistema (Android): cierra la mente o vuelve al roster según el panel.
+# Atrás del sistema (Android): navega hacia atrás en orden — diálogo fuente,
+# fleet, lightbox, mente, conversación — y sólo sale desde el roster raíz.
 func _notification(p_what: int) -> void:
 	if p_what == NOTIFICATION_WM_GO_BACK_REQUEST:
 		# Back de Android: navegar hacia atrás; sólo cierra si estamos en el
 		# roster raíz (sin conversación abierta). Se desactiva el cierre
 		# automático en _ready (set_quit_on_go_back(false)), así que aquí se
 		# decide explícitamente.
-		if _lightbox.visible:
+		if _fleet_source_dialog != null and _fleet_source_dialog.visible:
+			_fleet_source_dialog.hide()
+		elif _fleet_monitor != null and _fleet_monitor.visible:
+			_close_fleet_monitor()
+		elif _lightbox.visible:
 			_lightbox.close()
 		elif _mind_pinned:
 			_on_mind_back()
