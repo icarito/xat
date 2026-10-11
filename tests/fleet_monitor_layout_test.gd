@@ -18,6 +18,15 @@ func _init():
 	var pw = m._layout.get_combined_minimum_size().x
 	check(pw <= 390.0, "portrait: sin desborde horizontal (min=%d)" % int(pw))
 	check(m._scroll is ScrollContainer and not m._scroll.scroll_horizontal_enabled, "vista envuelta en scroll vertical")
+	# El arrastre táctil debe llegar al ScrollContainer: los contenedores de
+	# contenido no capturan el mouse (sólo los botones).
+	check(m._layout.mouse_filter == Control.MOUSE_FILTER_IGNORE, "layout no captura el gesto")
+	check(m._scroll.mouse_filter == Control.MOUSE_FILTER_STOP, "scroll recibe el gesto")
+	var blocked := false
+	for child in m._content.get_children():
+		if child is Control and child.mouse_filter == Control.MOUSE_FILTER_STOP:
+			blocked = true
+	check(not blocked, "las tarjetas no bloquean el scroll")
 
 	# Escritorio ancho.
 	m.rect_size = Vector2(1200, 800)

@@ -508,7 +508,9 @@ func _on_pubsub_items(p_from: String, p_node: String, p_items: Array) -> void:
 	var payload = p_items[p_items.size() - 1].get("payload", null)
 	if payload == null: return
 	_fleet_snapshot = FleetSnapshot.parse(payload)
-	_fleet_monitor.show_snapshot(_fleet_snapshot)
+	# Sólo repintar si la vista está abierta; el snapshot se guarda igual.
+	if _fleet_monitor.visible:
+		_fleet_monitor.show_snapshot(_fleet_snapshot)
 	_update_mind_visibility()
 
 # Fija el avatar propio ya resuelto (caché) en roster y cabecera.
@@ -523,15 +525,17 @@ func _on_pubsub_event(p_from: String, p_event: Dictionary) -> void:
 	var payload = items[items.size() - 1].get("payload", null)
 	if payload == null: return
 	_fleet_snapshot = FleetSnapshot.parse(payload)
-	_fleet_monitor.show_snapshot(_fleet_snapshot)
+	# Sólo repintar si la vista está abierta; el snapshot se guarda igual.
+	if _fleet_monitor.visible:
+		_fleet_monitor.show_snapshot(_fleet_snapshot)
 	_update_mind_visibility()
 
 func _open_fleet_monitor() -> void:
 	if _fleet_monitoring_jid() == "" or _fleet_monitoring_node() == "":
 		_configure_fleet_monitor()
 		return
-	_fleet_monitor.show_snapshot(_fleet_snapshot)
 	_fleet_monitor.visible = true
+	_fleet_monitor.show_snapshot(_fleet_snapshot)
 
 func _open_brain() -> void:
 	var url = FleetSnapshot.brain_url(_fleet_snapshot, _peer)

@@ -30,6 +30,12 @@ var _layout: VBoxContainer
 var _compact := false
 var _built := false
 var _snapshot := {}
+# Coalescencia de refrescos: no rearmar la vista en cada evento PEP ni mientras
+# el usuario está arrastrando (evita que el scroll se sienta congelado).
+var _last_signature := ""
+var _apply_timer: Timer
+var _touching := false
+var _touch_release_ms := 0
 
 func _ready() -> void:
 	visible = false
@@ -39,6 +45,7 @@ func _ready() -> void:
 	backdrop.color = Color("0b0f15")
 	backdrop.anchor_right = 1.0
 	backdrop.anchor_bottom = 1.0
+	backdrop.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(backdrop)
 	_margin = MarginContainer.new()
 	_margin.anchor_right = 1.0
@@ -52,13 +59,20 @@ func _ready() -> void:
 	_margin.add_child(_scroll)
 	_layout = VBoxContainer.new()
 	_layout.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_layout.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_layout.add_constant_override("separation", 14)
 	_scroll.add_child(_layout)
 	_compact = _is_compact()
 	_apply_margins()
+	_apply_timer = Timer.new()
+	_apply_timer.wait_time = 0.35
+	_apply_timer.one_shot = true
+	_apply_timer.connect("timeout", self, "_on_apply_timeout")
+	add_child(_apply_timer)
 	_build()
 	show_snapshot({})
 	connect("resized", self, "_on_resized")
+	set_process_input(true)
 
 func _is_compact() -> bool:
 	var w = rect_size.x
@@ -82,7 +96,8 @@ func _on_resized() -> void:
 	_compact = compact
 	_apply_margins()
 	_build()
-	show_snapshot(_snapshot)
+	_last_signature = ""
+	_apply_now(_snapshot)
 
 # Reconstruye header/overview/contenido según el modo actual.
 func _build() -> void:
@@ -232,7 +247,22 @@ func _build_content(p_layout: VBoxContainer) -> void:
 
 func show_snapshot(p_snapshot: Dictionary) -> void:
 	_snapshot = p_snapshot
+	# Si el usuario está desplazándose, postergar el rearmado para no cortar el
+	# gesto ni saturar el hilo principal con actualizaciones en ráfaga.
+	if _is_interacting():
+		if _apply_timer != null and _apply_timer.is_stopped():
+			_apply_timer.start()
+		return
+	_apply_now(p_snapshot)
+
+func _apply_now(p_snapshot: Dictionary) -> void:
+	if _apply_timer != null:
+		_apply_timer.stop()
 	if _content == null: return
+	var signature = _signature(p_snapshot)
+	if _built and signature == _last_signature:
+		return
+	_last_signature = signature
 	for child in _content.get_children():
 		_content.remove_child(child)
 		child.queue_free()
@@ -262,6 +292,53 @@ func show_snapshot(p_snapshot: Dictionary) -> void:
 		_content.add_child(_entity_row(entity))
 	if p_snapshot.get("entities", []).empty():
 		_content.add_child(_empty_state("No snapshot received", "PubSub node  ·  " + _node))
+	_ignore_mouse(_layout)
+
+func _on_apply_timeout() -> void:
+	if _is_interacting():
+		_apply_timer.start()
+		return
+	_apply_now(_snapshot)
+
+func _is_interacting() -> bool:
+	return _touching or OS.get_ticks_msec() < _touch_release_ms
+
+func _input(p_event: InputEvent) -> void:
+	if not visible:
+		return
+	if p_event is InputEventScreenDrag:
+		_mark_touch(true)
+	elif p_event is InputEventScreenTouch:
+		_mark_touch(p_event.pressed)
+	elif p_event is InputEventMouseButton and p_event.button_index == BUTTON_LEFT:
+		_mark_touch(p_event.pressed)
+	elif p_event is InputEventMouseMotion and (p_event.button_mask & BUTTON_MASK_LEFT) != 0:
+		_mark_touch(true)
+
+func _mark_touch(p_down: bool) -> void:
+	_touching = p_down
+	if not p_down:
+		_touch_release_ms = OS.get_ticks_msec() + 450
+
+# Sólo los botones capturan el mouse; el resto deja pasar el gesto para que el
+# ScrollContainer reciba el arrastre táctil (si no, las tarjetas lo bloquean).
+func _ignore_mouse(p_node: Node) -> void:
+	for child in p_node.get_children():
+		if child is Button or child is ScrollContainer:
+			pass
+		elif child is Control:
+			child.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		_ignore_mouse(child)
+
+func _signature(p_snapshot: Dictionary) -> String:
+	var parts := [
+		str(p_snapshot.get("generated_at", "")), str(p_snapshot.get("stale", false)),
+		str(p_snapshot.get("entities", []).size()), str(p_snapshot.get("operations", []).size()),
+		str(p_snapshot.get("cost", []).size()),
+	]
+	for entity in p_snapshot.get("entities", []):
+		parts.append("%s:%s:%s" % [str(entity.get("id", "")), str(entity.get("status", "")), str(entity.get("lifecycle", ""))])
+	return "|".join(parts)
 
 func _entity_columns(p_header: bool):
 	var row = HBoxContainer.new()
