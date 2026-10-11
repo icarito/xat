@@ -127,6 +127,7 @@ var _push_retry_ticks := 0
 var _fleet_monitor
 var _fleet_snapshot := {}
 var _fleet_source_dialog
+var _brain_button
 var _own_avatar_id := ""
 var _own_avatar_type := "image/png"
 
@@ -293,6 +294,13 @@ func _ready() -> void:
 	fleet_button.hint_tooltip = "Monitoreo de flota por XEP-0060"
 	fleet_button.connect("pressed", self, "_open_fleet_monitor")
 	_chat.header_slot.add_child(fleet_button)
+	# Cerebro (fleet-wiki) del agente del chat activo, si la proyección lo declara.
+	_brain_button = Button.new()
+	_brain_button.text = "Brain"
+	_brain_button.hint_tooltip = "Abrir el cerebro del agente (fleet-wiki)"
+	_brain_button.visible = false
+	_brain_button.connect("pressed", self, "_open_brain")
+	_chat.header_slot.add_child(_brain_button)
 	connect("resized", self, "_update_mind_visibility")
 	connect("resized", self, "_apply_mobile_stretch")
 	connect("resized", self, "_update_safe_area")
@@ -499,6 +507,7 @@ func _on_pubsub_items(p_from: String, p_node: String, p_items: Array) -> void:
 	if payload == null: return
 	_fleet_snapshot = FleetSnapshot.parse(payload)
 	_fleet_monitor.show_snapshot(_fleet_snapshot)
+	_update_mind_visibility()
 
 # Fija el avatar propio ya resuelto (caché) en roster y cabecera.
 func _on_avatar_ready(p_bare: String, p_tex) -> void:
@@ -513,6 +522,7 @@ func _on_pubsub_event(p_from: String, p_event: Dictionary) -> void:
 	if payload == null: return
 	_fleet_snapshot = FleetSnapshot.parse(payload)
 	_fleet_monitor.show_snapshot(_fleet_snapshot)
+	_update_mind_visibility()
 
 func _open_fleet_monitor() -> void:
 	if _fleet_monitoring_jid() == "" or _fleet_monitoring_node() == "":
@@ -520,6 +530,11 @@ func _open_fleet_monitor() -> void:
 		return
 	_fleet_monitor.show_snapshot(_fleet_snapshot)
 	_fleet_monitor.visible = true
+
+func _open_brain() -> void:
+	var url = FleetSnapshot.brain_url(_fleet_snapshot, _peer)
+	if url != "":
+		OS.shell_open(url)
 
 func _close_fleet_monitor() -> void:
 	_fleet_monitor.visible = false
@@ -1631,6 +1646,7 @@ func _update_mind_visibility() -> void:
 	# El mini-orbe del header aparece cuando la mente no cabe, o siempre en un
 	# solo panel (móvil/landscape) para poder abrirla.
 	_header_orb.visible = is_agent and (single or rect_size.x < MIND_MIN_WIDTH or _mind_hidden)
+	_brain_button.visible = FleetSnapshot.brain_url(_fleet_snapshot, _peer) != ""
 	# El ☰ sólo tiene sentido cuando hay roster que colapsar (desktop, 2 paneles).
 	if _roster_toggle != null:
 		_roster_toggle.visible = not single

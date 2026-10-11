@@ -15,6 +15,11 @@ func _init() -> void:
 	check(states == ["ready", "degraded", "down", "unknown", "hibernated"], "projection health and hibernation states are preserved distinctly")
 	check(parsed["operations"].size() == 1 and parsed["operations"][0]["fields"]["queue_depth"] == "3", "operational fields are parsed")
 	check(parsed["cost"].size() == 1 and parsed["cost"][0]["value"] == "12.50", "cost metrics are parsed")
+	var brain_xml = '<monitoring xmlns="urn:joework:monitoring:2"><instance id="claudio-w/bob"><jid>bob@hablar.fuentelibre.org</jid><brain-url>https://hablar.fuentelibre.org/fleet-wiki/bob/</brain-url></instance><instance id="x"><jid>x@h.org</jid><brain-url>file:///etc/passwd</brain-url></instance></monitoring>'
+	var brain = Snapshot.parse(Stanza.parse(brain_xml))
+	check(Snapshot.brain_url(brain, "Bob@hablar.fuentelibre.org") == "https://hablar.fuentelibre.org/fleet-wiki/bob/", "brain url resolves by chat JID")
+	check(Snapshot.brain_url(brain, "x@h.org") == "", "non-https brain urls are ignored")
+	check(Snapshot.brain_url(brain, "nobody@h.org") == "" and Snapshot.brain_url(parsed, "") == "", "no brain url without a matching entity")
 	OS.exit_code = 1 if _failed else 0
 	quit()
 

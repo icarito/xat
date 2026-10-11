@@ -36,6 +36,20 @@ static func parse(p_root) -> Dictionary:
 		out["stale"] = true
 	return out
 
+# Brain (fleet-wiki) link that the projection declares for the entity whose JID
+# matches the active chat. Only https URLs are opened, never local paths.
+static func brain_url(p_snapshot: Dictionary, p_jid: String) -> String:
+	var jid = p_jid.to_lower()
+	if jid == "":
+		return ""
+	for entity in p_snapshot.get("entities", []):
+		if str(entity.get("jid", "")).to_lower() == jid:
+			return safe_url(str(entity.get("brain-url", "")))
+	return ""
+
+static func safe_url(p_url: String) -> String:
+	return p_url if p_url.begins_with("https://") else ""
+
 static func _parse_instance(p_instance) -> Dictionary:
 	var out := {}
 	for key in p_instance.attrs.keys():

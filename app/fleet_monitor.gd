@@ -5,6 +5,7 @@ signal source_requested
 
 const P = preload("res://addons/xat_xmpp/ui/palette.gd")
 const XatTheme = preload("res://addons/xat_xmpp/ui/xat_theme.gd")
+const Snapshot = preload("res://fleet_snapshot.gd")
 
 const COLOR_READY := Color("4ade80")
 const COLOR_DEGRADED := Color("ffb547")
@@ -75,6 +76,9 @@ func _build_header(p_layout: VBoxContainer) -> void:
 	close.connect("pressed", self, "_on_close")
 	header.add_child(close)
 	_add_rule(p_layout)
+
+func _open_url(p_url: String) -> void:
+	OS.shell_open(p_url)
 
 func _on_source() -> void:
 	emit_signal("source_requested")
@@ -218,6 +222,14 @@ func _entity_row(p_entity: Dictionary):
 	row.add_child(_pill(_entity_state_title(p_entity, status), _state_tint(status), color, 145))
 	var lifecycle = str(p_entity.get("lifecycle", "—")).replace("_", " ").to_upper()
 	row.add_child(_pill(lifecycle, Color("1c222d"), P.TEXT_DIM, 125))
+	var brain_url = Snapshot.safe_url(str(p_entity.get("brain-url", "")))
+	if brain_url != "":
+		var brain = Button.new()
+		brain.text = "Brain"
+		brain.hint_tooltip = "Abrir el cerebro del agente (fleet-wiki)"
+		brain.focus_mode = Control.FOCUS_NONE
+		brain.connect("pressed", self, "_open_url", [brain_url])
+		row.add_child(brain)
 	card.hint_tooltip = "%s · %s · %s" % [team, instance_id, jid]
 	return card
 
