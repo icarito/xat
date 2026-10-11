@@ -25,6 +25,7 @@ var _summary_values := {}
 var _cost_rows
 
 var _margin: MarginContainer
+var _scroll: ScrollContainer
 var _layout: VBoxContainer
 var _compact := false
 var _built := false
@@ -43,9 +44,16 @@ func _ready() -> void:
 	_margin.anchor_right = 1.0
 	_margin.anchor_bottom = 1.0
 	add_child(_margin)
+	# Toda la vista scrollea en vertical (el header scrollea con el contenido).
+	_scroll = ScrollContainer.new()
+	_scroll.anchor_right = 1.0
+	_scroll.anchor_bottom = 1.0
+	_scroll.scroll_horizontal_enabled = false
+	_margin.add_child(_scroll)
 	_layout = VBoxContainer.new()
+	_layout.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_layout.add_constant_override("separation", 14)
-	_margin.add_child(_layout)
+	_scroll.add_child(_layout)
 	_compact = _is_compact()
 	_apply_margins()
 	_build()
@@ -213,14 +221,14 @@ func _build_content(p_layout: VBoxContainer) -> void:
 		heading.add_child(_label("IDENTITY  ·  TYPE  ·  HEALTH  ·  LIFECYCLE", P.TEXT_DIM, P.FONT_MONO, 10))
 		p_layout.add_child(heading)
 		p_layout.add_child(_entity_columns(true))
-	var scroll = ScrollContainer.new()
-	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	scroll.scroll_horizontal_enabled = false
-	p_layout.add_child(scroll)
+	# El inventario va en el flujo de la página (el scroll es el de arriba).
 	_content = VBoxContainer.new()
 	_content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_content.add_constant_override("separation", 5)
-	scroll.add_child(_content)
+	p_layout.add_child(_content)
+	var tail = Control.new()
+	tail.rect_min_size.y = 8 if _compact else 16
+	p_layout.add_child(tail)
 
 func show_snapshot(p_snapshot: Dictionary) -> void:
 	_snapshot = p_snapshot

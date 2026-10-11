@@ -17,6 +17,7 @@ func _init():
 	check(m._compact, "portrait 390px: modo compacto")
 	var pw = m._layout.get_combined_minimum_size().x
 	check(pw <= 390.0, "portrait: sin desborde horizontal (min=%d)" % int(pw))
+	check(m._scroll is ScrollContainer and not m._scroll.scroll_horizontal_enabled, "vista envuelta en scroll vertical")
 
 	# Escritorio ancho.
 	m.rect_size = Vector2(1200, 800)
