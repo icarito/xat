@@ -19,6 +19,11 @@ REV="$(git -C "$GODOT" rev-parse HEAD 2>/dev/null) $(git -C "$FORK" rev-parse HE
 
 if [ ! -x "$BIN" ] || [ "$(cat "$STAMP" 2>/dev/null)" != "$REV" ]; then
 	echo "xat: sin build al día ($REV) -> compilando con tools/build.sh"
+	# Aviso de escritorio (best-effort): el build puede tardar varios minutos
+	# y, lanzado desde el .desktop, no hay terminal que lo explique.
+	if command -v notify-send >/dev/null 2>&1 && { [ -n "$DISPLAY" ] || [ -n "$WAYLAND_DISPLAY" ]; }; then
+		notify-send -a xat "xat" "Recompilando el motor (build desactualizado). Puede tardar unos minutos…" >/dev/null 2>&1 || true
+	fi
 	GODOT="$GODOT" FORK="$FORK" sh "$XAT/tools/build.sh"
 	printf '%s\n' "$REV" > "$STAMP"
 fi

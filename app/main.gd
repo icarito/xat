@@ -345,7 +345,9 @@ func _ready() -> void:
 	if OS.get_name() == "Android":
 		OS.request_permissions()
 	# Móvil: el teclado virtual tapa el composer; se sigue su altura.
-	if OS.has_feature("mobile"):
+	# No usar OS.has_feature("mobile"): el platform frt del fork lo declara
+	# siempre, incluso en Linux de escritorio (ver chat_panel._is_mobile).
+	if OS.get_name() in ["Android", "iOS"]:
 		_kb_timer = Timer.new()
 		_kb_timer.wait_time = 0.25
 		_kb_timer.autostart = true

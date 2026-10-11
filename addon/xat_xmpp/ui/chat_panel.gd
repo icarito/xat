@@ -776,7 +776,11 @@ func _on_camera() -> void:
 func _is_mobile() -> bool:
 	if _mobile_override >= 0:
 		return _mobile_override == 1
-	return OS.has_feature("mobile")
+	# OJO: no usar OS.has_feature("mobile"). El platform frt del fork lo declara
+	# SIEMPRE (plataforma/frt/frt_godot.cc: `feature == "mobile" || feature == "etc"`),
+	# así que en Linux de escritorio daba true y desactivaba Enter-para-enviar.
+	# OS.get_name() sí distingue ("Android"/"iOS" en móvil).
+	return OS.get_name() in ["Android", "iOS"]
 
 func _juice_haptic(p_kind: String) -> void:
 	if juice != null:

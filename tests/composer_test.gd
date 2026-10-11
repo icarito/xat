@@ -67,6 +67,10 @@ func _init():
 	p.connect("message_submitted", self, "_on_msg")
 	p.connect("voice_toggle", self, "_on_toggle")
 	p.connect("voice_cancel", self, "_on_cancel")
+	# Regresión: el platform frt del fork declara OS.has_feature("mobile")=true
+	# también en Linux; _is_mobile() debe dar false en escritorio con auto.
+	p._mobile_override = -1
+	check(not p._is_mobile(), "escritorio: _is_mobile() false con auto")
 	p._mobile_override = 0
 	p.set_peer("a@h")
 
