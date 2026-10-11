@@ -221,7 +221,7 @@ func publish_omemo() -> void:
 		return
 	_transport.send(PubSub.build_publish(_new_id("od"), "", Omemo.NODE_DEVICES, "current", Omemo.build_devices_element(_omemo_device.device_list())).to_xml())
 	var bundle_el = Omemo.build_bundle_element(_omemo_device.bundle())
-	_transport.send(PubSub.build_publish(_new_id("ob"), "", Omemo.NODE_BUNDLES, str(_omemo_device.device_id()), bundle_el, 1).to_xml())
+	_transport.send(PubSub.build_publish(_new_id("ob"), "", Omemo.NODE_BUNDLES, str(_omemo_device.device_id()), bundle_el, 100).to_xml())
 
 # Pide device-list y bundles del par (se cachean al recibir los items).
 func request_omemo_devices(p_bare: String) -> void:
