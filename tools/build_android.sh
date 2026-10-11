@@ -37,18 +37,21 @@ mkdir -p "$WORK/editor" "$WORK/data/godot/templates" "$WORK/config/godot" "$XAT/
 # --- Editor headless del fork (versión == plantilla) ---
 if [ -z "${EDITOR:-}" ]; then
 	EDITOR="$WORK/editor/godot-xat-editor"
-	if [ ! -x "$EDITOR" ]; then
+	EDITOR_MARKER="$WORK/editor/.xat-release"
+	if [ ! -x "$EDITOR" ] || [ "$(cat "$EDITOR_MARKER" 2>/dev/null)" != "$VER" ]; then
 		echo "Bajando editor headless del fork ($VER) ..." >&2
 		gh release download "$VER" --repo "$FORK_REPO" \
 			--pattern 'godot.box3d.linux.x86_64.headless_xmpp' --dir "$WORK/editor" --clobber
 		mv "$WORK/editor/godot.box3d.linux.x86_64.headless_xmpp" "$EDITOR"
 		chmod +x "$EDITOR"
+		printf '%s\n' "$VER" > "$EDITOR_MARKER"
 	fi
 fi
 TPL_VER="$("$EDITOR" --version 2>/dev/null | sed 's/\.official.*//; s/\.custom_build.*//')"
 [ -n "$TPL_VER" ] || { echo "no pude derivar la versión de $EDITOR" >&2; exit 1; }
 TPL_DIR="$WORK/data/godot/templates/$TPL_VER"
 mkdir -p "$TPL_DIR"
+TPL_MARKER="$TPL_DIR/.xat-release"
 
 # --- Plantilla Android ---
 if [ "${XAT_ANDROID_BUILD_TEMPLATE:-0}" = "1" ]; then
@@ -65,13 +68,15 @@ if [ "${XAT_ANDROID_BUILD_TEMPLATE:-0}" = "1" ]; then
 	(cd "$GODOT/platform/android/java" && ./gradlew --no-daemon copyDebugBinaryToBin)
 	cp "$GODOT/bin/android_debug.apk" "$TPL_DIR/android_debug.apk"
 	cp "$GODOT/bin/android_debug.apk" "$TPL_DIR/android_release.apk"
+	printf '%s\n' "$VER" > "$TPL_MARKER"
 else
-	if [ ! -s "$TPL_DIR/android_debug.apk" ]; then
+	if [ ! -s "$TPL_DIR/android_debug.apk" ] || [ "$(cat "$TPL_MARKER" 2>/dev/null)" != "$VER" ]; then
 		echo "Bajando plantillas Android del fork ($VER) ..." >&2
 		gh release download "$VER" --repo "$FORK_REPO" \
 			--pattern 'android_debug_xmpp.apk' --pattern 'android_release_xmpp.apk' --dir "$TPL_DIR" --clobber
 		mv "$TPL_DIR/android_debug_xmpp.apk" "$TPL_DIR/android_debug.apk"
 		mv "$TPL_DIR/android_release_xmpp.apk" "$TPL_DIR/android_release.apk"
+		printf '%s\n' "$VER" > "$TPL_MARKER"
 	fi
 fi
 
