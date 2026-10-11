@@ -101,6 +101,10 @@ var _more: Button
 var _anim: Timer  # fuerza redibujo del shimmer (low_processor_mode lo congela)
 var _file_dialog: FileDialog
 var _smooth = SmoothScroll.new()
+# Animación de "seguir al final": desliza en vez de saltar. `_animating` evita
+# que el value_changed del scroll pise `_pinned` mientras corre el tween.
+var _scroll_tween: Tween
+var _animating := false
 var _picker # FilePicker nativo (escritorio)
 var _attach_btn            # IconButton: adjuntar
 var _compose: MarginContainer
@@ -1178,6 +1182,7 @@ func _in_composer(p_pos: Vector2) -> bool:
 # Detiene la inercia de scroll suave (p. ej. al iniciar un arrastre táctil).
 func _cancel_smooth() -> void:
 	_smooth.cancel()
+	_cancel_scroll_tween()
 	set_process(false)
 
 # Scroll de rueda/trackpad suave (ver smooth_scroll.gd). Devuelve true si
@@ -1194,6 +1199,7 @@ func _handle_wheel(p_event) -> bool:
 	if not get_global_rect().has_point(p_event.position):
 		return false
 	get_tree().set_input_as_handled()
+	_cancel_scroll_tween()
 	_smooth.kick(dy)
 	set_process(true)
 	return true
@@ -1893,7 +1899,7 @@ func _end_render(keep) -> void:
 	if _unread_idx >= 0 and _unread_node != null:
 		_to_marker()
 	else:
-		_to_bottom()
+		_to_bottom(true)
 
 # Construye las burbujas por tandas de RENDER_CHUNK, cediendo el frame entre
 # tandas. Si un render más nuevo arranca (otro contacto/MAM), `_render_seq`
@@ -2001,11 +2007,64 @@ func _follow() -> void:
 	if _pinned:
 		_to_bottom()
 
-func _to_bottom() -> void:
+func _to_bottom(p_instant: bool = false) -> void:
 	yield(get_tree(), "idle_frame")
 	yield(get_tree(), "idle_frame")
-	if not _hold:
-		_scroll.scroll_vertical = int(_scroll.get_v_scrollbar().max_value)
+	if _hold or _scroll == null:
+		return
+	var sb = _scroll.get_v_scrollbar()
+	var target = int(sb.max_value - sb.page)
+	# Al abrir/cambiar de chat saltamos directo (no animar un scroll largo).
+	if p_instant:
+		_cancel_scroll_tween()
+		_scroll.scroll_vertical = target
+		_pinned = true
+		_refresh_jump()
+		return
+	_scroll_to(target)
+
+# Desliza el scroll hasta `p_target`. Si ya estamos abajo o el salto es mínimo,
+# posiciona directo (sin animación perceptible).
+func _scroll_to(p_target: int) -> void:
+	if _scroll == null:
+		return
+	var from = _scroll.scroll_vertical
+	if p_target <= from:
+		_cancel_scroll_tween()
+		_scroll.scroll_vertical = p_target
+		_pinned = true
+		_refresh_jump()
+		return
+	_cancel_scroll_tween()
+	_animating = true
+	_scroll_tween = Tween.new()
+	add_child(_scroll_tween)
+	# Duración proporcional al recorrido: corta para un mensaje nuevo pegado
+	# abajo, más larga si venimos de lejos (p. ej. tras enviar desde arriba).
+	var dur = clamp(0.08 + float(p_target - from) / 2600.0, 0.08, 0.28)
+	_scroll_tween.interpolate_property(_scroll, "scroll_vertical", from, p_target, dur, Tween.TRANS_CUBIC, Tween.EASE_OUT)
+	_scroll_tween.connect("tween_all_completed", self, "_on_scroll_tween_done")
+	_scroll_tween.start()
+
+func _on_scroll_tween_done() -> void:
+	_animating = false
+	if _scroll_tween != null and is_instance_valid(_scroll_tween):
+		_scroll_tween.queue_free()
+	_scroll_tween = null
+	# La burbuja nueva puede seguir "asentándose" (su propia animación cambia
+	# alturas): clavar en el fondo real para no quedar unos px arriba.
+	if _scroll != null:
+		var sb = _scroll.get_v_scrollbar()
+		_scroll.scroll_vertical = int(sb.max_value - sb.page)
+	_pinned = true
+	_refresh_jump()
+
+func _cancel_scroll_tween() -> void:
+	_animating = false
+	if _scroll_tween != null and is_instance_valid(_scroll_tween):
+		_scroll_tween.kill()
+		_scroll_tween.queue_free()
+	_scroll_tween = null
 
 func _to_marker() -> void:
 	_hold = true
@@ -2026,6 +2085,10 @@ func _on_scrolled(p_value: float) -> void:
 	# Desplazar sale del modo selección (el texto ya no está donde se tocó).
 	if _sel_bubble != null:
 		_exit_selection()
+	# Mientras corre el tween de "seguir al final" el destino es el fondo: no
+	# dejar que los pasos intermedios ensucien `_pinned` ni el contador.
+	if _animating:
+		return
 	var sb = _scroll.get_v_scrollbar()
 	_pinned = near_bottom(p_value, sb.max_value, sb.page)
 	if _pinned:

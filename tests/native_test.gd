@@ -9,6 +9,7 @@ func _init():
 	check(ClassDB.class_exists("XmppConnection"), "clase XmppConnection")
 	check(ClassDB.class_exists("SQLiteBinding"), "clase SQLiteBinding")
 	check(ClassDB.class_exists("SQLiteQuery"), "clase SQLiteQuery")
+	check(ClassDB.class_exists("XatOmemo"), "clase XatOmemo")
 
 	var conn = ClassDB.instance("XmppConnection")
 	check(conn != null and conn is Node, "XmppConnection es Node")

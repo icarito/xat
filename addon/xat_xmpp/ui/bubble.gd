@@ -79,6 +79,7 @@ var _panel: PanelContainer
 var _label: RichTextLabel
 var _meta: Label
 var _ticks: Control  # ✓ / ✓✓ dibujados (la fuente no trae el glifo)
+var _lock: Control   # candado (OMEMO) dibujado, por el mismo motivo
 var _metarow: HBoxContainer
 var _tween: Tween
 var _font: Font
@@ -163,9 +164,14 @@ func _init() -> void:
 	_ticks = Control.new()
 	_ticks.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_ticks.connect("draw", self, "_draw_ticks")
+	_lock = Control.new()
+	_lock.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_lock.rect_min_size = Vector2(11, 11)
+	_lock.connect("draw", self, "_draw_lock")
 	_metarow = HBoxContainer.new()
 	_metarow.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_metarow.add_constant_override("separation", 4)
+	_metarow.add_child(_lock)
 	_metarow.add_child(_meta)
 	_metarow.add_child(_ticks)
 	# Chips de reacciones (XEP-0444).
@@ -584,17 +590,26 @@ func _update_meta() -> void:
 		parts.append("editado")
 	var txt = " · ".join(parts)
 	var out = rec.get("direction", "in") == "out"
+	var encrypted = bool(rec.get("encrypted", false))
 	_meta.text = txt
 	_ticks.visible = out
 	_ticks.rect_min_size = Vector2(20 if rec.get("delivered", false) else 12, 10)
 	_ticks.update()
-	_metarow.visible = _last and (txt != "" or out)
+	_lock.visible = encrypted
+	_lock.update()
+	_metarow.visible = _last and (txt != "" or out or encrypted)
 
 func _draw_ticks() -> void:
 	var col = Palette.AGENT_EDGE if rec.get("delivered", false) else Palette.TEXT_DIM
 	for k in range(2 if rec.get("delivered", false) else 1):
 		var o = Vector2(k * 7, 0)
 		_ticks.draw_polyline(PoolVector2Array([Vector2(1, 6) + o, Vector2(4, 9) + o, Vector2(10, 2) + o]), col, 1.5, true)
+
+# Candado de OMEMO: pequeño y discreto, dibujado (sin depender del glifo fuente).
+func _draw_lock() -> void:
+	var col = Palette.AGENT_EDGE
+	_lock.draw_rect(Rect2(2, 5, 8, 6), col, true)
+	_lock.draw_arc(Vector2(6, 5), 2.6, PI, TAU, 12, col, 1.4, true)
 
 static func _short_time(p_iso: String) -> String:
 	return p_iso.substr(11, 5) if p_iso.length() >= 16 else ""

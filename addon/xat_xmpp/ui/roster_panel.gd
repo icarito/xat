@@ -385,6 +385,8 @@ func _icon_toggle(p_glyph: String, p_key: String, p_tip: String) -> IconButton:
 	var b = IconButton.new()
 	b.setup(p_glyph, 40, P.TEXT_DIM, p_tip)
 	b.toggle_mode = true
+	if p_glyph == "sound":
+		b.set_off_glyph("sound_off")
 	b.add_stylebox_override("normal", XatTheme.box(P.BG2, 10, 4, 4))
 	b.add_stylebox_override("focus", XatTheme.box(P.BG2, 10, 4, 4))
 	b.add_stylebox_override("hover", XatTheme.box(P.BG2.lightened(0.12), 10, 4, 4))

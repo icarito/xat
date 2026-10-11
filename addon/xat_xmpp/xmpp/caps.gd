@@ -20,7 +20,7 @@ const AGENT_FEATURES := [
 # valida y un ver desconocido hace que pregunte disco#info al resource. Hay que
 # subirlo a mano cuando cambian los features (si no, el caché no se invalida).
 const XAT_NODE := "https://github.com/icarito/xat"
-const XAT_VER := "v2-xat-telemetry-hooks-avatar-chatstates"
+const XAT_VER := "v3-xat-omemo-telemetry-hooks-avatar-chatstates"
 const XAT_FEATURES := [
 	NS.DISCO_INFO,
 	NS.COMMANDS,
@@ -30,6 +30,9 @@ const XAT_FEATURES := [
 	NS.HOOKS_PROGRESS + "+notify",
 	NS.AVATAR_METADATA + "+notify",
 	NS.CHATSTATES,
+	"urn:xmpp:omemo:2",
+	"urn:xmpp:omemo:2:devices+notify",
+	"urn:xmpp:omemo:2:bundles+notify",
 ]
 
 # <c xmlns='...caps' hash='sha-1' node ver/> para la presencia inicial.

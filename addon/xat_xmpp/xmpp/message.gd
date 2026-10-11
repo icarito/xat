@@ -202,6 +202,28 @@ static func build_chat(p_to: String, p_body: String, p_id: String = "", p_origin
 	m.add_child_stanza(body)
 	return m
 
+# Mensaje de chat cifrado con OMEMO: sin <body> (el contenido va en <encrypted>,
+# que agrega la sesión), con chatstate/recibo/origin-id como un chat normal.
+static func build_omemo(p_to: String, p_id: String = "", p_origin_id: String = "", p_request_receipt: bool = true):
+	var m = Stanza.new("message")
+	m.set_attr("to", p_to)
+	m.set_attr("type", "chat")
+	if p_id != "":
+		m.set_attr("id", p_id)
+	var active = Stanza.new("active")
+	active.set_attr("xmlns", NS.CHATSTATES)
+	m.add_child_stanza(active)
+	if p_request_receipt:
+		var req = Stanza.new("request")
+		req.set_attr("xmlns", NS.RECEIPTS)
+		m.add_child_stanza(req)
+	if p_origin_id != "":
+		var oid = Stanza.new("origin-id")
+		oid.set_attr("xmlns", NS.SID)
+		oid.set_attr("id", p_origin_id)
+		m.add_child_stanza(oid)
+	return m
+
 static func build_chat_state(p_to: String, p_state: String):
 	var m = Stanza.new("message")
 	m.set_attr("to", p_to)

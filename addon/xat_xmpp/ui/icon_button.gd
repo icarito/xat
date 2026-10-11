@@ -8,6 +8,9 @@ extends Button
 const Palette = preload("res://addons/xat_xmpp/ui/palette.gd")
 
 var glyph := "mic"
+# Glifo alterno para toggles apagados (p. ej. sonido → "sound_off"). Si está
+# vacío, el toggle sólo cambia de color al apagarse.
+var glyph_off := ""
 var icon_color := Palette.TEXT
 
 var _glyph_size := 22.0
@@ -20,6 +23,8 @@ func setup(p_glyph: String, p_size: int, p_color: Color, p_tip: String) -> void:
 	_glyph_size = float(p_size) * 0.56
 	focus_mode = Control.FOCUS_NONE
 	mouse_filter = Control.MOUSE_FILTER_STOP
+	if not is_connected("toggled", self, "_on_toggled"):
+		connect("toggled", self, "_on_toggled")
 	update()
 
 func set_glyph(p_glyph: String) -> void:
@@ -28,13 +33,33 @@ func set_glyph(p_glyph: String) -> void:
 	glyph = p_glyph
 	update()
 
+func set_off_glyph(p_glyph: String) -> void:
+	glyph_off = p_glyph
+	update()
+
+func _on_toggled(_p_pressed: bool) -> void:
+	update()
+
 func set_icon_color(p_color: Color) -> void:
 	icon_color = p_color
 	update()
 
 func _draw() -> void:
-	var c = rect_size * 0.5
-	_glyph(glyph, c, _glyph_size * 0.5, icon_color)
+	_glyph(active_glyph(), rect_size * 0.5, _glyph_size * 0.5, icon_color)
+
+# Glifo efectivo según el estado del toggle (apagado usa `glyph_off` si existe).
+func active_glyph() -> String:
+	if toggle_mode and not pressed and glyph_off != "":
+		return glyph_off
+	return glyph
+
+# Cuerpo del altavoz (compartido por "sound" y "sound_off").
+func _speaker(c: Vector2, r: float, col: Color, w: float) -> void:
+	draw_polyline(PoolVector2Array([
+		c + Vector2(-r * 0.62, -r * 0.28), c + Vector2(-r * 0.28, -r * 0.28),
+		c + Vector2(r * 0.02, -r * 0.66), c + Vector2(r * 0.02, r * 0.66),
+		c + Vector2(-r * 0.28, r * 0.28), c + Vector2(-r * 0.62, r * 0.28),
+		c + Vector2(-r * 0.62, -r * 0.28)]), col, w, true)
 
 func _glyph(g: String, c: Vector2, r: float, col: Color) -> void:
 	var w = max(1.5, r * 0.2)
@@ -76,13 +101,31 @@ func _glyph(g: String, c: Vector2, r: float, col: Color) -> void:
 			draw_line(c + Vector2(-r * 0.5, -r * 0.5), c + Vector2(r * 0.5, r * 0.5), col, w, true)
 			draw_line(c + Vector2(-r * 0.5, r * 0.5), c + Vector2(r * 0.5, -r * 0.5), col, w, true)
 		"sound":
-			draw_polyline(PoolVector2Array([
-				c + Vector2(-r * 0.62, -r * 0.28), c + Vector2(-r * 0.28, -r * 0.28),
-				c + Vector2(r * 0.02, -r * 0.66), c + Vector2(r * 0.02, r * 0.66),
-				c + Vector2(-r * 0.28, r * 0.28), c + Vector2(-r * 0.62, r * 0.28),
-				c + Vector2(-r * 0.62, -r * 0.28)]), col, w, true)
+			_speaker(c, r, col, w)
 			draw_arc(c + Vector2(r * 0.08, 0), r * 0.4, -PI * 0.32, PI * 0.32, 14, col, w, true)
 			draw_arc(c + Vector2(r * 0.08, 0), r * 0.68, -PI * 0.32, PI * 0.32, 16, col, w, true)
+		"sound_off":
+			_speaker(c, r, col, w)
+			draw_line(c + Vector2(-r * 0.62, -r * 0.62), c + Vector2(r * 0.62, r * 0.62), col, w, true)
+		"fleet":
+			# Red de nodos: flota de agentes monitoreada por pubsub.
+			var n0 = c + Vector2(0, -r * 0.66)
+			var n1 = c + Vector2(-r * 0.62, r * 0.5)
+			var n2 = c + Vector2(r * 0.62, r * 0.5)
+			draw_line(n0, c, col, w * 0.8, true)
+			draw_line(n1, c, col, w * 0.8, true)
+			draw_line(n2, c, col, w * 0.8, true)
+			draw_circle(n0, r * 0.2, col)
+			draw_circle(n1, r * 0.2, col)
+			draw_circle(n2, r * 0.2, col)
+			draw_circle(c, r * 0.24, col)
+		"brain":
+			# Dos hemisferios con surco central y circunvoluciones.
+			draw_arc(c + Vector2(-r * 0.32, 0), r * 0.5, 0.0, TAU, 26, col, w, true)
+			draw_arc(c + Vector2(r * 0.32, 0), r * 0.5, 0.0, TAU, 26, col, w, true)
+			draw_line(c + Vector2(0, -r * 0.5), c + Vector2(0, r * 0.5), col, w * 0.8, true)
+			draw_arc(c + Vector2(-r * 0.32, 0), r * 0.22, PI * 0.2, PI * 1.5, 12, col, w * 0.7, true)
+			draw_arc(c + Vector2(r * 0.32, 0), r * 0.22, -PI * 0.5, PI * 0.8, 12, col, w * 0.7, true)
 		"vibrate":
 			draw_rect(Rect2(c + Vector2(-r * 0.32, -r * 0.68), Vector2(r * 0.64, r * 1.36)), col, false, w, true)
 			draw_line(c + Vector2(-r * 0.55, -r * 0.42), c + Vector2(-r * 0.74, -r * 0.18), col, w, true)

@@ -76,6 +76,10 @@ const HttpTransfer = preload("res://addons/xat_xmpp/xmpp/http_transfer.gd")
 const Muc = preload("res://addons/xat_xmpp/xmpp/muc.gd")
 const Forms = preload("res://addons/xat_xmpp/xmpp/forms.gd")
 const Push = preload("res://addons/xat_xmpp/xmpp/push.gd")
+const Omemo = preload("res://addons/xat_xmpp/xmpp/omemo.gd")
+const OmemoStore = preload("res://addons/xat_xmpp/xmpp/omemo_store.gd")
+const OmemoDevice = preload("res://addons/xat_xmpp/xmpp/omemo_device.gd")
+const OmemoEngine = preload("res://addons/xat_xmpp/xmpp/omemo_session.gd")
 
 const OMEMO_PLACEHOLDER := "🔒 Mensaje cifrado con OMEMO: xat todavía no puede leerlo."
 const RESOURCE_BASE := "xat"
@@ -91,6 +95,13 @@ var agent_model = AgentState.new()
 var avatars := {} # bare -> ImageTexture (XEP-0084)
 var _avatar_req := {} # iq id -> {bare, path}
 var store = null
+
+# --- OMEMO (XEP-0384) ---
+signal omemo_ready()
+var _omemo_store = null
+var _omemo_device = null
+var _omemo_engine = null
+var _omemo_pending_items := {} # iq id -> {bare, kind}
 
 var _transport = null
 var _jid = ""
@@ -138,6 +149,7 @@ func _ready() -> void:
 	store = Store.new()
 	if store.available():
 		store.open(HISTORY_DB)
+	enable_omemo()
 
 	_transport = Transport.new()
 	_transport.name = "Transport"
@@ -162,6 +174,119 @@ func _ready() -> void:
 	var saved_push = Push.load(Push.STORE_PATH)
 	_push_service = str(saved_push.get("service", ""))
 	_push_token = str(saved_push.get("node", ""))
+
+# --- OMEMO (XEP-0384) ---
+
+# Habilitar OMEMO reutiliza el mismo SQLite del historial para el estado de
+# llaves y sesiones. Idempotente.
+func enable_omemo() -> bool:
+	if _omemo_engine != null:
+		return true
+	if not ClassDB.class_exists("XatOmemo") or store == null or not store.available():
+		return false
+	_omemo_store = OmemoStore.new(store.binding())
+	if not _omemo_store.ensure_schema():
+		return false
+	_omemo_device = OmemoDevice.new(_omemo_store)
+	if not _omemo_device.ensure_created():
+		return false
+	_omemo_engine = OmemoEngine.new(_omemo_store, _omemo_device)
+	emit_signal("omemo_ready")
+	return true
+
+func omemo_available() -> bool:
+	return _omemo_engine != null and _omemo_engine.available()
+
+func omemo_device_id() -> int:
+	return _omemo_device.device_id() if _omemo_device != null else -1
+
+func omemo_peer_devices(p_bare: String) -> Array:
+	return _omemo_engine.peer_devices(p_bare) if _omemo_engine != null else []
+
+func omemo_fingerprint(p_bare: String, p_dev: int) -> String:
+	if _omemo_engine == null:
+		return ""
+	var ik: PoolByteArray = _omemo_engine.trust_key(p_bare, p_dev)
+	var parts := []
+	for i in range(ik.size()):
+		parts.append("%02X" % ik[i])
+	return ":".join(parts)
+
+# Publica device-list y bundle por PEP. Repetible al reconectar.
+func publish_omemo() -> void:
+	if not omemo_available() or _transport == null:
+		return
+	_transport.send(PubSub.build_publish(_new_id("od"), "", Omemo.NODE_DEVICES, "current", Omemo.build_devices_element(_omemo_device.device_list())).to_xml())
+	var bundle_el = Omemo.build_bundle_element(_omemo_device.bundle())
+	_transport.send(PubSub.build_publish(_new_id("ob"), "", Omemo.NODE_BUNDLES, str(_omemo_device.device_id()), bundle_el, 1).to_xml())
+
+# Pide device-list y bundles del par (se cachean al recibir los items).
+func request_omemo_devices(p_bare: String) -> void:
+	if not omemo_available() or _transport == null or p_bare == "":
+		return
+	for kind in ["devices", "bundles"]:
+		var id = _new_id("oq")
+		_omemo_pending_items[id] = {"bare": p_bare, "kind": kind}
+		var node = Omemo.NODE_DEVICES if kind == "devices" else Omemo.NODE_BUNDLES
+		_transport.send(PubSub.build_items_request(id, p_bare, node).to_xml())
+
+func request_omemo_bundles(p_bare: String) -> void:
+	if not omemo_available() or _transport == null or p_bare == "":
+		return
+	var id = _new_id("oq")
+	_omemo_pending_items[id] = {"bare": p_bare, "kind": "bundles"}
+	_transport.send(PubSub.build_items_request(id, p_bare, Omemo.NODE_BUNDLES).to_xml())
+
+func _on_omemo_devices_event(p_bare: String, p_payload) -> void:
+	if not omemo_available() or p_payload == null:
+		return
+	var ids := []
+	for d in Omemo.parse_device_list(p_payload):
+		ids.append(int(d["id"]))
+	_omemo_engine.set_peer_devices(p_bare, ids)
+	request_omemo_bundles(p_bare)
+
+func _on_omemo_bundle_event(p_bare: String, p_node: String, p_item_id: String, p_payload) -> void:
+	if not omemo_available() or p_payload == null:
+		return
+	var dev := int(p_item_id) if p_item_id.is_valid_integer() else -1
+	if dev < 0 and p_node.find(":") >= 0:
+		var suffix = p_node.split(":")[-1]
+		if suffix.is_valid_integer():
+			dev = int(suffix)
+	if dev < 0:
+		return
+	var fields = _omemo_bundle_fields(Omemo.parse_bundle(p_payload))
+	if not fields.empty():
+		_omemo_engine.set_peer_bundle(p_bare, dev, fields)
+
+# Aplica un resultado de items (IQ get de PEP) a la caché OMEMO.
+func _apply_omemo_items(p_kind: String, p_bare: String, p_items: Array) -> void:
+	if not omemo_available():
+		return
+	if p_kind == "devices":
+		for it in p_items:
+			if it["payload"] != null:
+				_on_omemo_devices_event(p_bare, it["payload"])
+				return
+		return
+	for it in p_items:
+		if it["payload"] != null:
+			_on_omemo_bundle_event(p_bare, "", str(it["id"]), it["payload"])
+
+func _omemo_bundle_fields(p_parsed: Dictionary) -> Dictionary:
+	if p_parsed["identity_b64"] == "" or p_parsed["spk"]["b64"] == "":
+		return {}
+	var prekeys := []
+	for pk in p_parsed["prekeys"]:
+		prekeys.append({"id": pk["id"], "pub": Marshalls.base64_to_raw(pk["b64"])})
+	return {
+		"ik": Marshalls.base64_to_raw(p_parsed["identity_b64"]),
+		"spk": Marshalls.base64_to_raw(p_parsed["spk"]["b64"]),
+		"spk_id": p_parsed["spk"]["id"],
+		"spk_sig": Marshalls.base64_to_raw(p_parsed["spk_sig_b64"]),
+		"prekeys": prekeys,
+	}
 
 # --- API pública ---
 
@@ -196,6 +321,19 @@ func bare() -> String:
 	return _bare
 
 func send_message(p_to_bare: String, p_body: String) -> int:
+	# OMEMO: si conocemos los dispositivos del par, cifrar (una sola stanza, sin
+	# partir: el SCE envelope admite el cuerpo entero).
+	if omemo_available() and not _omemo_engine.peer_bundles(p_to_bare).empty():
+		var enc = _omemo_engine.encrypt(_bare, p_to_bare, p_body)
+		if enc["ok"]:
+			var emid = _new_id("m")
+			last_sent_id = emid
+			var estanza = Message.build_omemo(p_to_bare, emid, _new_id("o"), true)
+			estanza.add_child_stanza(enc["element"])
+			var erc = _transport.send(estanza.to_xml())
+			if erc == 0 and store != null and store.available():
+				store.record_message({"bare_jid": p_to_bare, "body": p_body, "direction": "out", "ts": _now_iso(), "request_id": emid, "encrypted": true})
+			return erc
 	# Cuerpos largos se parten respetando XMPP_MAX_BODY; sólo el primero pide
 	# recibo (el resto son continuación).
 	var parts = Normalize.split_for_limit(p_body)
@@ -950,6 +1088,9 @@ func _on_connected(bound_jid: String) -> void:
 			if bool(r.get("autojoin", true)):
 				join_room(str(r.get("bare_jid", "")), str(r.get("nick", "")))
 	discover_muc()
+	# OMEMO: publicar (o refrescar) device-list y bundle propios.
+	if omemo_available():
+		publish_omemo()
 	# XEP-0357: re-registrar el push del dispositivo si ya estaba configurado
 	# (el servidor olvida el token cuando caduca la sesión).
 	if _push_service != "" and _push_token != "":
@@ -1009,11 +1150,20 @@ func _on_message(p_stanza) -> void:
 		_on_mam_fin(p_stanza)
 		return
 	var rec = Message.parse(p_stanza)
-	# OMEMO (0384) no soportado todavía: en vez de descartar en silencio un
-	# mensaje cifrado sin body, mostrar que llegó y por qué no se lee.
-	if rec["body"] == "" and (p_stanza.get_child("encrypted", "urn:xmpp:omemo:2") != null or p_stanza.get_child("encrypted", "eu.siacs.conversations.axolotl") != null):
-		rec["body"] = OMEMO_PLACEHOLDER
+	# OMEMO (0384): intentar descifrar; si no se puede, mostrar un aviso en vez
+	# de descartar en silencio un mensaje cifrado sin body.
+	var enc_el = Omemo.encrypted_child(p_stanza)
+	if enc_el != null:
 		rec["encrypted"] = true
+		if omemo_available():
+			var omemo_res = _omemo_engine.decrypt(_bare_of(p_stanza.get_attr("from", "")), enc_el)
+			if omemo_res["ok"]:
+				rec["body"] = omemo_res["body"]
+				rec["omemo_sender_device"] = omemo_res["sender_device"]
+			elif rec["body"] == "":
+				rec["body"] = OMEMO_PLACEHOLDER
+		elif rec["body"] == "":
+			rec["body"] = OMEMO_PLACEHOLDER
 	# Adjuntos: OOB explícito o link con extensión conocida en el cuerpo.
 	_apply_media(rec)
 	# Invitación a sala (mediada XEP-0045 §7.8 o directa XEP-0249). Sólo si no
@@ -1121,6 +1271,13 @@ func _on_pep_event(p_stanza) -> void:
 		return
 	if ev["node"] == NS.TELEMETRY:
 		emit_signal("agent_state_changed", bare, agent_model.apply_telemetry(bare, Pep.parse_telemetry(ev)))
+		return
+	# OMEMO: device list y bundles del par.
+	if ev["node"] == Omemo.NODE_DEVICES:
+		_on_omemo_devices_event(bare, ev["payload"])
+		return
+	if ev["node"] == Omemo.NODE_BUNDLES or ev["node"].begins_with(Omemo.NODE_BUNDLES + ":"):
+		_on_omemo_bundle_event(bare, ev["node"], ev["item_id"], ev["payload"])
 		return
 	var hook = Pep.parse_hook(ev)
 	if not hook.empty():
@@ -1434,6 +1591,10 @@ func _on_iq(p_stanza) -> void:
 		if p_stanza.get_child("pubsub", NS.PUBSUB) != null:
 			_on_avatar_data(p_stanza)
 		var iq_id = p_stanza.get_attr("id", "")
+		var oi = _omemo_pending_items.get(iq_id, null)
+		if oi != null:
+			_omemo_pending_items.erase(iq_id)
+			_apply_omemo_items(str(oi["kind"]), str(oi["bare"]), PubSub.parse_items_result(p_stanza)["items"])
 		if _push_ctx.has(iq_id):
 			_handle_push_result(_push_ctx[iq_id], true, "")
 			_push_ctx.erase(iq_id)

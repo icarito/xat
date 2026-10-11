@@ -40,6 +40,10 @@ func _init() -> void:
 func available() -> bool:
 	return _available
 
+# Expone el binding SQLite para compartir la misma base (p. ej. el estado OMEMO).
+func binding():
+	return _db
+
 func open(p_path: String) -> int:
 	if not _available:
 		return -1
@@ -87,7 +91,7 @@ func _column_names() -> Array:
 func record_message(p_rec: Dictionary) -> bool:
 	if not _available:
 		return false
-	var q = _db.prepare("INSERT OR IGNORE INTO messages(bare_jid,body,direction,timestamp,mam_id,quick_responses,commands,request_id,attachment,sender) VALUES(?,?,?,?,?,?,?,?,?,?)")
+	var q = _db.prepare("INSERT OR IGNORE INTO messages(bare_jid,body,direction,timestamp,mam_id,quick_responses,commands,request_id,attachment,sender,was_encrypted) VALUES(?,?,?,?,?,?,?,?,?,?,?)")
 	if q == null:
 		return false
 	q.bind_text(1, str(p_rec.get("bare_jid", "")))
@@ -116,6 +120,7 @@ func record_message(p_rec: Dictionary) -> bool:
 		q.bind_null(10)
 	else:
 		q.bind_text(10, sender)
+	q.bind_int(11, 1 if p_rec.get("encrypted", false) else 0)
 	q.step()
 	q.finalize()
 	var inserted = _db.changes() > 0
@@ -283,6 +288,7 @@ func _decode_row(r: Dictionary) -> Dictionary:
 		"request_id": r.get("request_id", ""),
 		"attach": _unjson_obj(r.get("attachment", "")),
 		"sender": r.get("sender", ""),
+		"encrypted": int(r.get("was_encrypted", 0)) != 0,
 	}
 
 # --- Salas (XEP-0045) ---

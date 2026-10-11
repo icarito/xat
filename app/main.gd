@@ -289,15 +289,11 @@ func _ready() -> void:
 	_fleet_source_dialog = FleetSourceDialog.new()
 	_fleet_source_dialog.connect("source_saved", self, "_on_fleet_source_saved")
 	add_child(_fleet_source_dialog)
-	var fleet_button = Button.new()
-	fleet_button.text = "Fleet"
-	fleet_button.hint_tooltip = "Monitoreo de flota por XEP-0060"
+	var fleet_button = _header_icon_button("fleet", "Monitoreo de flota por XEP-0060")
 	fleet_button.connect("pressed", self, "_open_fleet_monitor")
 	_chat.header_slot.add_child(fleet_button)
 	# Cerebro (fleet-wiki) del agente del chat activo, si la proyección lo declara.
-	_brain_button = Button.new()
-	_brain_button.text = "Brain"
-	_brain_button.hint_tooltip = "Abrir el cerebro del agente (fleet-wiki)"
+	_brain_button = _header_icon_button("brain", "Abrir el cerebro del agente (fleet-wiki)")
 	_brain_button.visible = false
 	_brain_button.connect("pressed", self, "_open_brain")
 	_chat.header_slot.add_child(_brain_button)
@@ -1779,6 +1775,16 @@ func _sidebar_action(p_icon: String, p_tip: String) -> Button:
 		b.add_stylebox_override(st, XatTheme.box(bg, 10, 4, 6))
 	return b
 
+# Botón de icono compacto y plano para la cabecera del chat (flota, cerebro),
+# con el mismo estilo vectorial que el resto de iconos.
+func _header_icon_button(p_glyph: String, p_tip: String) -> IconButton:
+	var b = IconButton.new()
+	b.setup(p_glyph, 34, P.TEXT_DIM, p_tip)
+	b.flat = true
+	b.connect("mouse_entered", self, "_on_icon_hover", [b, true])
+	b.connect("mouse_exited", self, "_on_icon_hover", [b, false])
+	return b
+
 func _sidebar_icon_action(p_glyph: String, p_tip: String) -> IconButton:
 	var b = IconButton.new()
 	b.setup(p_glyph, 44, P.TEXT_DIM, p_tip)
@@ -1794,6 +1800,8 @@ func _sidebar_icon_toggle(p_glyph: String, p_tip: String, p_key: String) -> Icon
 	var b = IconButton.new()
 	b.setup(p_glyph, 46, P.TEXT_DIM, p_tip)
 	b.toggle_mode = true
+	if p_glyph == "sound":
+		b.set_off_glyph("sound_off")
 	# Fondo tenue cuando está encendido + glifo en acento: se distingue del apagado.
 	b.add_stylebox_override("normal", XatTheme.box(P.BG2, 10, 4, 4))
 	b.add_stylebox_override("focus", XatTheme.box(P.BG2, 10, 4, 4))

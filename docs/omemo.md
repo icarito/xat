@@ -1,7 +1,33 @@
 # xat — SPEC de cifrado OMEMO (XEP-0384)
 
-Estado: **no implementado**. Este documento junta lo aprendido para hacerlo
-bien. Mientras tanto rige la política interina (abajo).
+Estado: **casi completo**. Implementado y testeado:
+
+- Modelo puro en GDScript (`addon/xat_xmpp/xmpp/omemo.gd`, test `tests/omemo_test.gd`):
+  parsing/serialización de `<encrypted>`, listas de dispositivos, bundles, envelope
+  SCE (XEP-0420), `OMEMOMessage`/`OMEMOAuthenticatedMessage`/`OMEMOKeyExchange`, con
+  los formatos de cable contrastados contra `openclaw-xmpp`.
+- Cripto nativa en el overlay del fork (`modules/xmpp/omemo_crypto.*`,
+  `omemo_dr.*`, `omemo_node.*`): Monocypher (X25519 + Ed25519/RFC 8032),
+  HKDF-SHA-256/AES-256-CBC/HMAC-SHA-256 con mbedTLS, capa de payload de OMEMO 2,
+  **X3DH** y el **Double Ratchet** (AEAD de mensaje, ratchet DH + de mensajes,
+  claves salteadas, estado serializable).
+- Material de llaves (`omemo_store.gd`, `omemo_device.gd`): identidad, signed
+  prekey con rotación, pool de prekeys, todo persistido en el mismo SQLite.
+- PEP (`pubsub.gd`, `omemo.gd`): publicación de device-list y bundle
+  (`urn:xmpp:omemo:2:devices` / `:bundles`) y su consumo.
+- Sesión (`omemo_session.gd` + `session.gd`): cifra al enviar si conoce los
+  dispositivos del par, descifra al recibir, publica el bundle al conectar,
+  anuncia caps (`urn:xmpp:omemo:2`).
+
+Verificación: suite headless en verde, incluidos
+`tests/omemo_native_test.gd`, `tests/omemo_device_test.gd`, `tests/omemo_pep_test.gd`,
+`tests/omemo_session_test.gd` y `tests/session_omemo_test.gd`; e interop contra
+las librerías de referencia (`tests/interop/omemo_*_interop.sh`): identidad
+(xeddsa), X3DH (`x3dh`) y Double Ratchet (`twomemo`/`doubleratchet`).
+
+Falta: UI de confianza (candado por burbuja y fingerprints), la prueba e2e
+contra el Prosody propio (requiere una cuenta provisionada; el servidor no
+ofrece registro en banda) y el release.
 
 ## Por qué hace falta
 
@@ -57,6 +83,10 @@ Nodos PEP (2.0): `urn:xmpp:omemo:2:devices` (lista de dispositivos, item
 
 - **Nativo**, en `modules/xmpp` del fork (no GDScript): la cripto no se
   escribe en un lenguaje sin tiempos constantes ni tipos de bytes adecuados.
+- **Modelo puro (hecho)**: `addon/xat_xmpp/xmpp/omemo.gd` parsea/arma
+  `<encrypted>` (v2 y legacy), listas de dispositivos, bundles, el envelope SCE
+  y el protobuf `OMEMOMessage`/`OMEMOAuthenticatedMessage`. Lo usa la capa de
+  sesión en `session.gd:1012` (hoy sólo muestra el aviso interino).
 - Primitivas: el mbedTLS del motor da AES-CBC, HMAC-SHA-256, HKDF, SHA-512;
   **no** trae Ed25519. Vendorizar **monocypher** (pequeño, BSD/CC0, X25519 +
   EdDSA/Ed25519 + conversión) en `modules/xmpp/thirdparty/`. No escribir

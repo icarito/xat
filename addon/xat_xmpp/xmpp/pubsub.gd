@@ -45,6 +45,45 @@ static func build_subscribe(p_id: String, p_to: String, p_node: String, p_subscr
 	iq.add_child_stanza(pubsub)
 	return iq
 
+# Publica (o reemplaza) un item en un nodo, con publish-options. `p_payload` es
+# un Stanza (el payload del item). PEP: p_to = "" publica en el propio JID.
+static func build_publish(p_id: String, p_to: String, p_node: String, p_item_id: String, p_payload, p_max_items: int = 1, p_access_model: String = "open"):
+	var iq = Stanza.new("iq")
+	iq.set_attr("type", "set")
+	iq.set_attr("id", p_id)
+	if p_to != "":
+		iq.set_attr("to", p_to)
+	var pubsub = Stanza.new("pubsub")
+	pubsub.set_attr("xmlns", NS.PUBSUB)
+	var publish = Stanza.new("publish")
+	publish.set_attr("node", p_node)
+	var item = Stanza.new("item")
+	if p_item_id != "":
+		item.set_attr("id", p_item_id)
+	item.add_child_stanza(p_payload)
+	publish.add_child_stanza(item)
+	pubsub.add_child_stanza(publish)
+	var options = Stanza.new("publish-options")
+	var x = Stanza.new("x")
+	x.set_attr("xmlns", NS.DATA_FORMS)
+	x.set_attr("type", "submit")
+	_add_field(x, "FORM_TYPE", NS.PUBSUB_PUBLISH_OPTIONS, "hidden")
+	_add_field(x, "pubsub#access_model", p_access_model, "text-single")
+	_add_field(x, "pubsub#max_items", str(p_max_items), "text-single")
+	options.add_child_stanza(x)
+	pubsub.add_child_stanza(options)
+	iq.add_child_stanza(pubsub)
+	return iq
+
+static func _add_field(p_x, p_name: String, p_value: String, p_type: String) -> void:
+	var field = Stanza.new("field")
+	field.set_attr("var", p_name)
+	field.set_attr("type", p_type)
+	var value = Stanza.new("value")
+	value.append_text(p_value)
+	field.add_child_stanza(value)
+	p_x.add_child_stanza(field)
+
 # Resultado: {node, items:[{id, stanza, payload}]}. Conserva stanzas completos
 # para que el consumidor pueda leer payloads específicos sin perder extensiones.
 static func parse_items_result(p_iq) -> Dictionary:

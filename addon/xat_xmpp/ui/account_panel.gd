@@ -4,6 +4,7 @@ extends PanelContainer
 # configuración y muestra el estado; no guarda credenciales por sí sola.
 
 signal connect_requested(cfg)
+signal register_requested(cfg)
 
 const XatXmpp = preload("res://addons/xat_xmpp/xat_xmpp.gd")
 
@@ -12,8 +13,10 @@ var _pass: LineEdit
 var _host: LineEdit
 var _port: LineEdit
 var _cafile: LineEdit
+var _email: LineEdit
 var _status: Label
 var _button: Button
+var _register_btn: Button
 
 func _init() -> void:
 	name = "AccountPanel"
@@ -36,11 +39,19 @@ func _make_form() -> VBoxContainer:
 	_host = _row(v, "Servidor", "hablar.fuentelibre.org")
 	_port = _row(v, "Puerto", "5222")
 	_cafile = _row(v, "CA (opcional)", "/etc/ssl/certs/ca-certificates.crt")
+	# Registro en banda (XEP-0077): sólo se muestra si el servidor lo ofrece.
+	_email = _row(v, "Correo (registro)", "")
+	_email.visible = false
 	v.add_child(HSeparator.new())
 	_button = Button.new()
 	_button.text = "Conectar"
 	_button.connect("pressed", self, "_on_connect")
 	v.add_child(_button)
+	_register_btn = Button.new()
+	_register_btn.text = "Crear cuenta nueva"
+	_register_btn.visible = false
+	_register_btn.connect("pressed", self, "_on_register")
+	v.add_child(_register_btn)
 	_status = Label.new()
 	_status.autowrap = true
 	v.add_child(_status)
@@ -101,7 +112,24 @@ func config() -> Dictionary:
 		"host": _host.text.strip_edges(),
 		"port": int(_port.text) if _port.text.is_valid_integer() else 5222,
 		"cafile": _cafile.text.strip_edges(),
+		"email": _email.text.strip_edges(),
 	}
+
+# Muestra u oculta la sección de registro en banda según el servidor la anuncie.
+func set_register_supported(p_supported: bool) -> void:
+	_email.visible = p_supported
+	_register_btn.visible = p_supported
+
+# Campos estándar de XEP-0077 derivados de lo que el usuario completó.
+func registration_fields() -> Dictionary:
+	var cfg = config()
+	var jid: String = cfg["jid"]
+	var at = jid.find("@")
+	var username = jid.substr(0, at) if at > 0 else jid
+	var fields = {"username": username, "password": cfg["pass"]}
+	if str(cfg["email"]) != "":
+		fields["email"] = cfg["email"]
+	return fields
 
 # Precarga desde una config guardada (no pisa la contraseña si viene vacía).
 func prefill(p_cfg: Dictionary) -> void:

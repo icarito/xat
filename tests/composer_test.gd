@@ -40,6 +40,13 @@ func _init():
 	check(ib.glyph == "mic" and ib.rect_min_size == Vector2(48, 48), "icon_button: setup")
 	ib.set_glyph("send")
 	check(ib.glyph == "send", "icon_button: cambia glifo")
+	# Toggle de sonido: apagado dibuja el glifo "mute" alterno.
+	ib.toggle_mode = true
+	ib.set_off_glyph("sound_off")
+	ib.pressed = true
+	check(ib.active_glyph() == "send", "icon_button: encendido usa el glifo base")
+	ib.pressed = false
+	check(ib.active_glyph() == "sound_off", "icon_button: apagado usa el glifo mute")
 
 	var wv = Waveform.new()
 	root.add_child(wv)

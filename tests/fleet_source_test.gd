@@ -14,7 +14,7 @@ func _init() -> void:
 	main.juice.settings["fleet_monitor_node"] = "joework/monitoring/owner"
 	var button_found = false
 	for child in main._chat.header_slot.get_children():
-		if child is Button and child.text == "Fleet":
+		if child.get("glyph") == "fleet":
 			button_found = true
 	check(button_found, "Fleet está disponible en el cliente normal")
 	main._open_fleet_monitor()
