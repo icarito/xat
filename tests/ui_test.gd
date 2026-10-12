@@ -124,9 +124,14 @@ func _init():
 	])
 	check(m._chat._messages.size() == 2, "set_history_deferred: modelo listo al instante")
 
-	# Salas (MUC): sección en el roster, unread e invitaciones.
+	# Salas (MUC): pestaña Salas del roster, unread e invitaciones.
 	m._roster.set_rooms(["sala@conference.h"])
-	check(m._roster._rooms_header.visible and m._roster._rooms_box.get_child_count() == 1, "roster: sección Salas")
+	check(m._roster._rooms_box.visible and m._roster._rooms_box.get_child_count() == 1, "roster: pestaña Salas con la sala")
+	check(m._roster._tab_rooms.text.find("Salas (1)") >= 0, "roster: pestaña muestra el conteo")
+	m._roster._set_tab(1)
+	check(m._roster._rooms_scroll.visible and not m._roster._scroll.visible, "roster: swipe/tab cambia de página")
+	m._roster._set_tab(0)
+	check(m._roster._scroll.visible and not m._roster._rooms_scroll.visible, "roster: vuelve a Contactos")
 	check(m._roster._rooms_box.get_child(0).get_meta("bare") == "sala@conference.h", "roster: fila de sala")
 	m._roster.set_unread("sala@conference.h", 2)
 	check(str(m._roster._find_row("sala@conference.h").get_meta("status").text).find("nuevo") >= 0, "roster: unread en sala")

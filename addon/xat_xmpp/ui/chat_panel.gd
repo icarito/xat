@@ -2062,7 +2062,7 @@ func _on_scroll_tween_done() -> void:
 func _cancel_scroll_tween() -> void:
 	_animating = false
 	if _scroll_tween != null and is_instance_valid(_scroll_tween):
-		_scroll_tween.kill()
+		_scroll_tween.stop_all()
 		_scroll_tween.queue_free()
 	_scroll_tween = null
 

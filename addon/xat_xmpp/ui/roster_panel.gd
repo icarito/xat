@@ -31,7 +31,6 @@ var _selected := ""
 var _box: VBoxContainer
 var _rooms := [] # salas (bare) persistidas
 var _rooms_box: VBoxContainer
-var _rooms_header: Label
 var _rooms_activity := {} # sala -> timestamp ISO del último mensaje (orden)
 var _scroll: ScrollContainer
 var _grid_scroll: ScrollContainer
@@ -51,10 +50,22 @@ var _id_btn: Button
 var _id_avatar
 var _id_name: Label
 
+# Pestañas Contactos | Salas (arrastrables con swipe en táctil).
+var _tabbar_margin: MarginContainer
+var _tabbar: HBoxContainer
+var _tab_contacts: Button
+var _tab_rooms: Button
+var _rooms_scroll: ScrollContainer
+var _rooms_empty: Label
+var _tab := 0
+var _touch_start := Vector2.ZERO
+var _touch_active := false
+var _swipe_consumed := false
+
 # La lista es una columna de ancho fijo, centrada en el panel: los avatares
 # quedan alineados entre filas (no pegados al borde izquierdo a pantalla completa).
-const COLUMN_MAX := 360.0
-const COLUMN_MARGIN := 16.0
+const COLUMN_MAX := 320.0
+const COLUMN_MARGIN := 18.0
 
 func _init() -> void:
 	name = "RosterPanel"
@@ -72,6 +83,20 @@ func _init() -> void:
 	req_margin.add_constant_override("margin_right", COLUMN_MARGIN)
 	req_margin.add_child(_req_box)
 	root.add_child(req_margin)
+	# Pestañas Contactos | Salas (cada panel con su título).
+	_tabbar_margin = MarginContainer.new()
+	_tabbar_margin.add_constant_override("margin_left", COLUMN_MARGIN)
+	_tabbar_margin.add_constant_override("margin_right", COLUMN_MARGIN)
+	_tabbar_margin.add_constant_override("margin_top", 8)
+	root.add_child(_tabbar_margin)
+	_tabbar = HBoxContainer.new()
+	_tabbar.add_constant_override("separation", 4)
+	_tabbar_margin.add_child(_tabbar)
+	_tab_contacts = _tab_button("Contactos", 0)
+	_tabbar.add_child(_tab_contacts)
+	_tab_rooms = _tab_button("Salas", 1)
+	_tabbar.add_child(_tab_rooms)
+	# Página Contactos.
 	var sc = ScrollContainer.new()
 	_scroll = sc
 	sc.scroll_horizontal_enabled = false
@@ -79,6 +104,48 @@ func _init() -> void:
 	sc.connect("scroll_started", self, "_on_scroll_started")
 	sc.connect("scroll_ended", self, "_on_scroll_ended")
 	root.add_child(sc)
+	var top = MarginContainer.new()
+	top.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	top.add_constant_override("margin_left", COLUMN_MARGIN)
+	top.add_constant_override("margin_right", COLUMN_MARGIN)
+	top.add_constant_override("margin_top", 6)
+	top.add_constant_override("margin_bottom", 6)
+	sc.add_child(top)
+	_box = VBoxContainer.new()
+	_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_box.mouse_filter = Control.MOUSE_FILTER_IGNORE # deja pasar el arrastre táctil entre filas
+	_box.add_constant_override("separation", 2)
+	top.add_child(_box)
+	# Página Salas (XEP-0045): sus propias salas guardadas, con título.
+	_rooms_scroll = ScrollContainer.new()
+	_rooms_scroll.scroll_horizontal_enabled = false
+	_rooms_scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_rooms_scroll.visible = false
+	root.add_child(_rooms_scroll)
+	var rooms_top = MarginContainer.new()
+	rooms_top.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	rooms_top.add_constant_override("margin_left", COLUMN_MARGIN)
+	rooms_top.add_constant_override("margin_right", COLUMN_MARGIN)
+	rooms_top.add_constant_override("margin_top", 6)
+	rooms_top.add_constant_override("margin_bottom", 6)
+	_rooms_scroll.add_child(rooms_top)
+	var rooms_v = VBoxContainer.new()
+	rooms_v.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	rooms_v.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	rooms_v.add_constant_override("separation", 8)
+	rooms_top.add_child(rooms_v)
+	_rooms_empty = Label.new()
+	_rooms_empty.text = "No estás en ninguna sala todavía.\nUsá “Unirse a sala” o aceptá una invitación."
+	_rooms_empty.autowrap = true
+	_rooms_empty.align = Label.ALIGN_CENTER
+	_rooms_empty.add_color_override("font_color", P.TEXT_DIM)
+	_rooms_empty.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	rooms_v.add_child(_rooms_empty)
+	_rooms_box = VBoxContainer.new()
+	_rooms_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_rooms_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_rooms_box.add_constant_override("separation", 2)
+	rooms_v.add_child(_rooms_box)
 	# Vista multicolumna (landscape): columnas en un HBox con scroll lateral.
 	_grid_scroll = ScrollContainer.new()
 	_grid_scroll.scroll_horizontal_enabled = true
@@ -113,34 +180,8 @@ func _init() -> void:
 	var update_btn = _icon_button("download", "Buscar actualizaciones")
 	update_btn.connect("pressed", self, "_on_update")
 	foot.add_child(update_btn)
-	_box = VBoxContainer.new()
-	_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_box.mouse_filter = Control.MOUSE_FILTER_IGNORE # deja pasar el arrastre táctil entre filas
-	_box.add_constant_override("separation", 2)
-	# Sección "Salas" (XEP-0045), bajo Contactos. Oculta mientras no haya salas.
-	_rooms_header = Label.new()
-	_rooms_header.text = "Salas"
-	_rooms_header.visible = false
-	_rooms_header.add_color_override("font_color", P.TEXT_DIM)
-	_rooms_header.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_rooms_box = VBoxContainer.new()
-	_rooms_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_rooms_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	_rooms_box.add_constant_override("separation", 2)
-	_rooms_box.visible = false
-	var content = VBoxContainer.new()
-	content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	content.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	content.add_constant_override("separation", 2)
-	content.add_child(_box)
-	content.add_child(_rooms_header)
-	content.add_child(_rooms_box)
-	var top = MarginContainer.new()
-	top.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	top.add_constant_override("margin_top", 12)
-	top.add_constant_override("margin_bottom", 6)
-	sc.add_child(top)
-	top.add_child(content)
+	_set_tab(0)
+	set_process_input(true)
 
 # Encabezado del roster: tu identidad (foto + nombre) y las acciones.
 func _make_header() -> HBoxContainer:
@@ -205,6 +246,60 @@ func _make_header() -> HBoxContainer:
 	_room_btn = room
 	h.add_child(room)
 	return h
+
+func _tab_button(p_text: String, p_index: int) -> Button:
+	var b = Button.new()
+	b.text = p_text
+	b.flat = true
+	b.focus_mode = Control.FOCUS_NONE
+	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	b.rect_min_size = Vector2(0, 32)
+	b.add_font_override("font", XatTheme.font(P.FONT_MEDIUM, P.FONT_SIZE - 1))
+	b.connect("pressed", self, "_on_tab", [p_index])
+	return b
+
+func _on_tab(p_index: int) -> void:
+	_set_tab(p_index)
+
+# Cambia la pestaña activa (0 = Contactos, 1 = Salas) y muestra su página.
+func _set_tab(p_index: int) -> void:
+	_tab = int(clamp(p_index, 0, 1))
+	if _tab_contacts != null:
+		_tab_contacts.add_color_override("font_color", P.TEXT if _tab == 0 else P.TEXT_DIM)
+	if _tab_rooms != null:
+		_tab_rooms.add_color_override("font_color", P.TEXT if _tab == 1 else P.TEXT_DIM)
+	if _columns > 1:
+		return
+	if _scroll != null:
+		_scroll.visible = _tab == 0
+	if _rooms_scroll != null:
+		_rooms_scroll.visible = _tab == 1
+
+func _update_tab_labels() -> void:
+	if _tab_contacts != null:
+		_tab_contacts.text = ("Contactos (%d)" % _peers.size()) if not _peers.empty() else "Contactos"
+	if _tab_rooms != null:
+		_tab_rooms.text = ("Salas (%d)" % _rooms.size()) if not _rooms.empty() else "Salas"
+
+# Swipe horizontal (táctil) para cambiar de pestaña: izquierda -> Salas,
+# derecha -> Contactos. En la vista multicolumna (landscape) no aplica.
+func _input(p_event) -> void:
+	if not visible or _columns > 1:
+		return
+	if p_event is InputEventScreenTouch:
+		if p_event.pressed:
+			_touch_start = p_event.position
+			_touch_active = true
+			_swipe_consumed = false
+		else:
+			_touch_active = false
+	elif p_event is InputEventScreenDrag and _touch_active and not _swipe_consumed:
+		var dx = p_event.position.x - _touch_start.x
+		var dy = p_event.position.y - _touch_start.y
+		if abs(dx) > 60.0 and abs(dx) > abs(dy) * 1.5:
+			_swipe_consumed = true
+			_set_tab(1 if dx < 0.0 else 0)
+			get_tree().set_input_as_handled()
 
 # Fija tu identidad en la cabecera (foto de perfil y nombre de la cuenta).
 func set_identity(p_bare: String, p_tex) -> void:
@@ -422,6 +517,7 @@ func _on_update() -> void:
 
 func set_peers(p_bares: Array) -> void:
 	_peers = p_bares
+	_update_tab_labels()
 	_rebuild()
 
 # Rehace las filas descartando la fuente cacheada (p. ej. tras cambiar el zoom).
@@ -546,8 +642,9 @@ func _rebuild_rooms() -> void:
 		_rooms_box.remove_child(c)
 		c.queue_free()
 	var has = not _rooms.empty()
-	_rooms_header.visible = has
+	_rooms_empty.visible = not has
 	_rooms_box.visible = has
+	_update_tab_labels()
 	if not has:
 		return
 	for b in _sorted_rooms():
@@ -561,8 +658,12 @@ func set_columns(p_n: int) -> void:
 		return
 	_columns = p_n
 	var grid = _columns > 1
+	if _tabbar_margin != null:
+		_tabbar_margin.visible = not grid
 	if _scroll != null:
-		_scroll.visible = not grid
+		_scroll.visible = (not grid) and _tab == 0
+	if _rooms_scroll != null:
+		_rooms_scroll.visible = (not grid) and _tab == 1
 	if _grid_scroll != null:
 		_grid_scroll.visible = grid
 	_rebuild()
@@ -653,8 +754,6 @@ func _rebuild_grid() -> void:
 	for c in _grid.get_children():
 		_grid.remove_child(c)
 		c.queue_free()
-	if _rooms_header != null:
-		_rooms_header.visible = false
 	if _rooms_box != null:
 		_rooms_box.visible = false
 	var items := []
