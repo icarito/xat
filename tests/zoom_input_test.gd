@@ -46,6 +46,49 @@ func _init():
 	main._input(plus)
 	check(main._zoom_target > before_plus, "Ctrl++ (KEY_PLUS) también zoomea")
 
+	# macOS: Cmd (meta) también debe zoomear con ± y con rueda.
+	var before_meta = main._zoom_target
+	var cmd = InputEventKey.new()
+	cmd.scancode = KEY_EQUAL
+	cmd.meta = true
+	cmd.pressed = true
+	main._input(cmd)
+	check(main._zoom_target > before_meta, "Cmd+= (meta) zoomea en macOS")
+	var before_meta_wheel = main._zoom_target
+	var mw = InputEventMouseButton.new()
+	mw.button_index = BUTTON_WHEEL_DOWN
+	mw.meta = true
+	mw.pressed = true
+	main._input(mw)
+	check(main._zoom_target < before_meta_wheel, "Cmd+rueda (meta) zoomea en macOS")
+
+	# Trackpad: pan con Ctrl/Cmd zoomea; sin modificador no.
+	var before_pan = main._zoom_target
+	var pan = InputEventPanGesture.new()
+	pan.delta = Vector2(0, 5)
+	pan.control = true
+	main._input(pan)
+	check(main._zoom_target < before_pan, "pan + Ctrl zoomea")
+	var plain_pan = main._zoom_target
+	var pan2 = InputEventPanGesture.new()
+	pan2.delta = Vector2(0, 5)
+	main._input(pan2)
+	check(is_equal_approx(main._zoom_target, plain_pan), "pan sin modificador no zoomea")
+
+	# Botones de la UI (roster y sidebar) y su handler.
+	check(main._roster.has_signal("font_scale_requested"), "roster expone font_scale_requested")
+	check(main._sb_font_smaller != null and main._sb_font_bigger != null, "sidebar tiene botones de tamaño de letra")
+	var before_btn = main._zoom_target
+	main._on_font_scale_requested(1)
+	check(main._zoom_target > before_btn, "botón A+ sube el objetivo")
+	var before_btn2 = main._zoom_target
+	main._on_font_scale_requested(-1)
+	check(main._zoom_target < before_btn2, "botón A− baja el objetivo")
+
+	# El mínimo permite achicar bastante (fuentes gigantes en macOS).
+	main.set_zoom(0.55)
+	check(fz.scale <= 0.56 and fz.scale >= 0.54, "se puede reducir a ~0.55 (antes tope 0.7)")
+
 	main.free()
 	if _fail == 0:
 		print("ZOOM_INPUT_CHECK_OK")

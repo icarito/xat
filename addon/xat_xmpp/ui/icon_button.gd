@@ -61,6 +61,15 @@ func _speaker(c: Vector2, r: float, col: Color, w: float) -> void:
 		c + Vector2(-r * 0.28, r * 0.28), c + Vector2(-r * 0.62, r * 0.28),
 		c + Vector2(-r * 0.62, -r * 0.28)]), col, w, true)
 
+# Letra "A" vectorial (dos patas + travesaño), para los botones de tamaño de letra.
+func _letter_a(c: Vector2, r: float, col: Color, w: float) -> void:
+	var apex = c + Vector2(0, -r * 0.7)
+	var lf = c + Vector2(-r * 0.52, r * 0.42)
+	var rt = c + Vector2(r * 0.52, r * 0.42)
+	draw_line(apex, lf, col, w, true)
+	draw_line(apex, rt, col, w, true)
+	draw_line(c + Vector2(-r * 0.3, -r * 0.02), c + Vector2(r * 0.3, -r * 0.02), col, w, true)
+
 func _glyph(g: String, c: Vector2, r: float, col: Color) -> void:
 	var w = max(1.5, r * 0.2)
 	match g:
@@ -147,6 +156,15 @@ func _glyph(g: String, c: Vector2, r: float, col: Color) -> void:
 			draw_line(c + Vector2(0, -r * 0.72), c + Vector2(0, r * 0.2), col, w, true)
 			draw_polyline(PoolVector2Array([c + Vector2(-r * 0.36, -r * 0.12), c + Vector2(0, r * 0.26), c + Vector2(r * 0.36, -r * 0.12)]), col, w, true)
 			draw_line(c + Vector2(-r * 0.5, r * 0.62), c + Vector2(r * 0.5, r * 0.62), col, w, true)
+		"text_plus":
+			# Letra "A" + signo +: agrandar la letra.
+			_letter_a(c + Vector2(-r * 0.18, 0), r, col, w)
+			draw_line(c + Vector2(r * 0.5, -r * 0.62), c + Vector2(r * 0.5, -r * 0.06), col, w, true)
+			draw_line(c + Vector2(r * 0.22, -r * 0.34), c + Vector2(r * 0.78, -r * 0.34), col, w, true)
+		"text_minus":
+			# Letra "A" + signo −: achicar la letra.
+			_letter_a(c + Vector2(-r * 0.18, 0), r, col, w)
+			draw_line(c + Vector2(r * 0.22, -r * 0.34), c + Vector2(r * 0.78, -r * 0.34), col, w, true)
 		"play":
 			draw_polyline(PoolVector2Array([
 				c + Vector2(-r * 0.45, -r * 0.6), c + Vector2(r * 0.62, 0),

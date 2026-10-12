@@ -11,6 +11,7 @@ signal subscription_accept(bare)
 signal subscription_deny(bare)
 signal avatar_requested()
 signal update_requested()
+signal font_scale_requested(dir) # -1 achicar, +1 agrandar letra
 signal room_invite_accept(room)
 signal room_invite_ignore(room)
 
@@ -180,6 +181,13 @@ func _init() -> void:
 	var update_btn = _icon_button("download", "Buscar actualizaciones")
 	update_btn.connect("pressed", self, "_on_update")
 	foot.add_child(update_btn)
+	# Tamaño de letra: accesible donde los atajos Ctrl/Cmd+± no llegan (macOS).
+	var smaller = _icon_button("text_minus", "Achicar la letra")
+	smaller.connect("pressed", self, "_on_font_smaller")
+	foot.add_child(smaller)
+	var bigger = _icon_button("text_plus", "Agrandar la letra")
+	bigger.connect("pressed", self, "_on_font_bigger")
+	foot.add_child(bigger)
 	_set_tab(0)
 	set_process_input(true)
 
@@ -514,6 +522,12 @@ func _on_avatar() -> void:
 
 func _on_update() -> void:
 	emit_signal("update_requested")
+
+func _on_font_smaller() -> void:
+	emit_signal("font_scale_requested", -1)
+
+func _on_font_bigger() -> void:
+	emit_signal("font_scale_requested", 1)
 
 func set_peers(p_bares: Array) -> void:
 	_peers = p_bares

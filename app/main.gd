@@ -90,6 +90,8 @@ var _sb_act
 var _sb_leave
 var _sb_sound
 var _sb_haptic
+var _sb_font_smaller
+var _sb_font_bigger
 var _sb_profile
 var _sb_about
 var _sb_update
@@ -124,6 +126,7 @@ var _clipboard                   # ClipboardImage (pegar imagen en escritorio)
 var _notifier
 var _push_retry: Timer = null
 var _push_retry_ticks := 0
+var _typing_timer: Timer = null
 var _fleet_monitor
 var _fleet_snapshot := {}
 var _fleet_source_dialog
@@ -148,7 +151,9 @@ func _ready() -> void:
 	# la UI para que las fuentes nazcan ya al tamaño guardado.
 	var fz = get_node_or_null("/root/FontZoom")
 	if fz != null:
-		_zoom_target = float(juice.settings.get("font_scale", 1.0))
+		# Default dependiente de la pantalla (DPI/diagonal) si no hay ajuste
+		# guardado; en HiDPI la UI se veía gigante.
+		_zoom_target = clamp(float(juice.settings.get("font_scale", FontZoom.default_scale())), FontZoom.MIN, FontZoom.MAX)
 		fz.set_scale(_zoom_target)
 	_roster_hidden = bool(juice.settings.get("roster_hidden", false))
 	_mind_hidden = bool(juice.settings.get("mind_hidden", false))
@@ -218,6 +223,7 @@ func _ready() -> void:
 	_roster.connect("subscription_deny", self, "_on_subscription_deny")
 	_roster.connect("avatar_requested", self, "_on_avatar_requested")
 	_roster.connect("update_requested", self, "_on_updates_requested")
+	_roster.connect("font_scale_requested", self, "_on_font_scale_requested")
 	_roster.connect("join_room_requested", self, "_on_join_room_requested")
 	_roster.connect("room_invite_accept", self, "_on_room_invite_accept")
 	_roster.connect("room_invite_ignore", self, "_on_room_invite_ignore")
@@ -236,6 +242,14 @@ func _ready() -> void:
 	_chat.connect("action_selected", self, "_on_action_selected")
 	_chat.connect("quick_selected", self, "_on_quick_selected")
 	_chat.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	# "Escribiendo…" puede quedar colgado si el par nunca manda <active/> (pasa
+	# en salas: el agente anuncia <composing/> y la limpieza se pierde). Un
+	# temporizador lo apaga si no hay refresco.
+	_typing_timer = Timer.new()
+	_typing_timer.one_shot = true
+	_typing_timer.wait_time = 20.0
+	_typing_timer.connect("timeout", self, "_on_typing_timeout")
+	add_child(_typing_timer)
 	_mind = MindPanel.new()
 	_mind.visible = false
 	_split.add_child(_mind)
@@ -615,6 +629,7 @@ func _on_presence_changed(p_bare: String) -> void:
 
 func _on_peer_selected(p_bare: String) -> void:
 	_peer = p_bare
+	_on_typing_timeout()
 	if _notifier != null:
 		_notifier.clear(p_bare)
 	if session.is_room(p_bare):
@@ -670,6 +685,7 @@ func _refresh_rooms() -> void:
 	_roster.set_rooms(rooms)
 
 func _open_room(p_room: String) -> void:
+	_on_typing_timeout()
 	_show_roster = false
 	_header_avatar.visible = false
 	_header_orb.visible = false
@@ -1416,11 +1432,21 @@ func _on_message_corrected(p_rec: Dictionary) -> void:
 		_chat.apply_correction(p_rec)
 
 func _on_chat_state(p_bare: String, p_state: String) -> void:
-	if p_bare == _peer:
-		if p_state == "composing":
-			_chat.set_chat_state("escribiendo…")
-		elif p_state == "active":
-			_chat.set_chat_state("")
+	if p_bare != _peer:
+		return
+	if p_state == "composing":
+		_chat.set_chat_state("escribiendo…")
+		if _typing_timer != null:
+			_typing_timer.start()
+	else:
+		# Cualquier otro estado (active/paused/inactive/gone) cancela.
+		_on_typing_timeout()
+
+func _on_typing_timeout() -> void:
+	if _typing_timer != null:
+		_typing_timer.stop()
+	if _chat != null:
+		_chat.set_chat_state("")
 
 func _on_history_fetched(p_bare: String, p_rows: Array, _p_complete: bool) -> void:
 	if p_bare == _peer and not p_rows.empty():
@@ -1788,6 +1814,17 @@ func _build_sidebar() -> void:
 	toggles.add_child(_sb_sound)
 	_sb_haptic = _sidebar_icon_toggle("vibrate", "Vibración", "haptics_enabled")
 	toggles.add_child(_sb_haptic)
+	# Tamaño de letra: botones porque Ctrl/Cmd+± no siempre llega (macOS).
+	var font_row = HBoxContainer.new()
+	font_row.alignment = BoxContainer.ALIGN_CENTER
+	font_row.add_constant_override("separation", 6)
+	sv.add_child(font_row)
+	_sb_font_smaller = _sidebar_icon_action("text_minus", "Achicar la letra")
+	_sb_font_smaller.connect("pressed", self, "_on_font_scale_requested", [-1])
+	font_row.add_child(_sb_font_smaller)
+	_sb_font_bigger = _sidebar_icon_action("text_plus", "Agrandar la letra")
+	_sb_font_bigger.connect("pressed", self, "_on_font_scale_requested", [1])
+	font_row.add_child(_sb_font_bigger)
 	_init_sidebar_settings()
 	_split.add_child(_sidebar)
 
@@ -2122,12 +2159,22 @@ func _input(p_event) -> void:
 	if p_event is InputEventMouseButton and p_event.pressed and p_event.button_index == BUTTON_LEFT:
 		if _chat != null and not _chat.is_point_on_bubble(p_event.position):
 			_chat.deselect_all()
-	if p_event is InputEventMouseButton and p_event.control and p_event.pressed:
+	# Zoom: Ctrl en Linux/Windows, Cmd en macOS (`meta`).
+	var mod_zoom := false
+	if p_event is InputEventWithModifiers:
+		mod_zoom = p_event.control or p_event.meta
+	if p_event is InputEventMouseButton and mod_zoom and p_event.pressed:
 		if p_event.button_index == BUTTON_WHEEL_UP:
 			_zoom(1)
 		elif p_event.button_index == BUTTON_WHEEL_DOWN:
 			_zoom(-1)
-	elif p_event is InputEventKey and p_event.pressed and not p_event.echo and p_event.control:
+	elif p_event is InputEventPanGesture and mod_zoom:
+		# Trackpad (macOS): dos dedos + Ctrl/Cmd zoomean.
+		if p_event.delta.y > 0.01:
+			_zoom(-1)
+		elif p_event.delta.y < -0.01:
+			_zoom(1)
+	elif p_event is InputEventKey and p_event.pressed and not p_event.echo and mod_zoom:
 		if p_event.scancode == KEY_V and p_event.shift:
 			_on_paste_image()
 			get_tree().set_input_as_handled()
@@ -2149,6 +2196,12 @@ func _zoom(p_dir: int) -> void:
 	_zoom_target = clamp(_zoom_target + float(p_dir) * FontZoom.STEP, FontZoom.MIN, FontZoom.MAX)
 	set_process(true)
 	get_tree().set_input_as_handled()
+
+# Botones de tamaño de letra (roster / sidebar): ajustan el zoom y avisan el %.
+func _on_font_scale_requested(p_dir: int) -> void:
+	_zoom(p_dir)
+	if juice != null:
+		juice.toast("Letra: %d%%" % int(round(_zoom_target * 100.0)))
 
 func _process(_delta: float) -> void:
 	# Zoom pendiente (coalescido). Se aplica ANTES del audio para que reproducir

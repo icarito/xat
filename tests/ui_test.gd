@@ -68,6 +68,24 @@ func _init():
 	m._chat.set_peer("a@h")
 	m._chat.add_message({"from": "a@h", "body": "hola **mundo**", "direction": "in", "timestamp": "2026-01-01T10:00:00Z", "id": "m1", "commands": [], "quick_responses": []})
 	check(m._chat._messages.size() == 1, "mensaje agregado")
+
+	# "Escribiendo…": composing lo enciende; cualquier otro estado (active,
+	# paused, gone) o el timeout lo apagan — antes sólo se limpiaba con active y
+	# en salas quedaba colgado.
+	m._peer = "a@h"
+	m._on_chat_state("a@h", "composing")
+	check(m._chat._typing != "", "composing enciende 'escribiendo'")
+	m._on_chat_state("a@h", "paused")
+	check(m._chat._typing == "", "paused cancela 'escribiendo'")
+	m._on_chat_state("a@h", "composing")
+	m._on_chat_state("a@h", "gone")
+	check(m._chat._typing == "", "gone cancela 'escribiendo'")
+	m._on_chat_state("a@h", "composing")
+	m._on_typing_timeout()
+	check(m._chat._typing == "", "timeout cancela 'escribiendo'")
+	check(m._typing_timer != null and m._typing_timer.one_shot, "temporizador de 'escribiendo' configurado")
+	m._on_chat_state("otro@h", "composing")
+	check(m._chat._typing == "", "chat state de otro peer no afecta")
 	m._chat.set_actions({
 		"commands": [{"jid": "bot@h/res", "node": "cmd:abc:0", "name": "Allow"}],
 		"quick_responses": [{"value": "si", "label": "Sí"}],

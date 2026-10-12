@@ -16,6 +16,10 @@ func _init():
 		return
 
 	var start = fz.scale
+	# Default sugerido según pantalla (DPI/diagonal): acotado y nunca mayor a 1.
+	var FZScript = load("res://addons/xat_xmpp/ui/font_zoom.gd")
+	var ds = FZScript.default_scale()
+	check(ds >= FZScript.MIN and ds <= FZScript.DEFAULT, "default_scale acotado (%.2f)" % ds)
 	main.set_zoom(start + 0.2)
 	check(abs(fz.scale - (start + 0.2)) < 0.001, "set_zoom aplica el factor (%.2f)" % fz.scale)
 	check(main._zoom_target > start, "set_zoom fija el objetivo")

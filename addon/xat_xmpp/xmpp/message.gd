@@ -7,6 +7,7 @@ extends Reference
 
 const Stanza = preload("res://addons/xat_xmpp/xmpp/stanza.gd")
 const NS = preload("res://addons/xat_xmpp/xmpp/namespaces.gd")
+const Muc = preload("res://addons/xat_xmpp/xmpp/muc.gd")
 
 const CHAT_STATES := ["active", "composing", "paused", "inactive", "gone"]
 
@@ -45,6 +46,7 @@ static func parse(p_message) -> Dictionary:
 		"oob_desc": "",
 		"commands": [],
 		"quick_responses": [],
+		"invite": {},
 	}
 	if stanza == null:
 		return out
@@ -132,6 +134,13 @@ static func parse(p_message) -> Dictionary:
 			var oob_desc = child.get_child("desc")
 			if oob_desc != null:
 				out["oob_desc"] = oob_desc.get_text()
+
+	# Invitación a sala: mediada (XEP-0045 §7.8) o directa (XEP-0249). Se parsea
+	# sobre la stanza YA desenvuelta (carbons/MAM), si no las invitaciones
+	# enreviadas por otro recurso se perdían.
+	var inv = Muc.parse_invite(stanza)
+	if str(inv.get("room", "")) != "":
+		out["invite"] = inv
 
 	out["commands"] = parse_inline_commands(stanza)
 	out["quick_responses"] = parse_quick_responses(stanza)

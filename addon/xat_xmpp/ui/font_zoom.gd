@@ -14,9 +14,27 @@ signal scale_changed(scale)
 const UiScale = preload("res://addons/xat_xmpp/ui/ui_scale.gd")
 
 const DEFAULT := 1.0
-const MIN := 0.7
+const MIN := 0.5
 const MAX := 2.4
 const STEP := 0.1
+const REF_DPI := 96.0
+const REF_INCHES := 13.0
+
+# Escala inicial sugerida según la pantalla (se usa sólo si el usuario todavía
+# no eligió un zoom). La ventana de la app tiene un tamaño lógico fijo, así que
+# en pantallas HiDPI/grandes la letra se ve enorme: bajamos un poco. En móvil
+# el propio platform ya escala bien, así que dejamos 1.0.
+static func default_scale() -> float:
+	if OS.get_name() in ["Android", "iOS"]:
+		return DEFAULT
+	var dpi := OS.get_screen_dpi()
+	if dpi <= 0.0:
+		dpi = REF_DPI * max(1.0, OS.get_screen_scale())
+	var rel := pow(dpi / REF_DPI, 0.5) # densidad relativa, suavizada
+	var size := OS.get_screen_size()
+	var diagonal_in := sqrt(size.x * size.x + size.y * size.y) / dpi
+	var by_size := pow(max(diagonal_in, 3.0) / REF_INCHES, 0.25)
+	return clamp(by_size / rel, MIN, DEFAULT)
 
 var scale := DEFAULT
 

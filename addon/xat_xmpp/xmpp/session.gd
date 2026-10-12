@@ -1236,12 +1236,17 @@ func _on_message(p_stanza) -> void:
 			rec["body"] = OMEMO_PLACEHOLDER
 	# Adjuntos: OOB explícito o link con extensión conocida en el cuerpo.
 	_apply_media(rec)
-	# Invitación a sala (mediada XEP-0045 §7.8 o directa XEP-0249). Sólo si no
-	# trae cuerpo: un mensaje normal puede citar un link `jabber:x:conference`.
-	var inv = Muc.parse_invite(p_stanza)
-	if inv["room"] != "" and rec["body"] == "":
-		emit_signal("muc_invite", inv["room"], inv["from"], inv["reason"])
-		return
+	# Invitación a sala (mediada XEP-0045 §7.8 o directa XEP-0249). El parseo
+	# viene de Message.parse, ya desenvuelto de carbons/MAM. Las mediadas suelen
+	# traer un <body> de cortesía: también cuentan como invitación.
+	var inv = rec.get("invite", {})
+	var inv_room = str(inv.get("room", ""))
+	if inv_room.find("@") >= 0:
+		emit_signal("muc_invite", inv_room, str(inv.get("from", "")), str(inv.get("reason", "")))
+		# El body de una mediada es sólo texto de respaldo: no lo mostramos como
+		# burbuja. Una directa con body puede ser un mensaje real además del link.
+		if bool(inv.get("mediated", false)) or rec["body"] == "":
+			return
 	# Salas: mensajes groupchat, vivos o archivados en MAM. Sin recibos ni
 	# chat states; se enrutan por la sala y no tocan el modelo de presencia.
 	if rec["type"] == "groupchat":
@@ -1457,7 +1462,13 @@ func _on_muc_message(rec: Dictionary) -> void:
 	if rec["is_mam"]:
 		_handle_muc_mam(rec, room, nick)
 		return
+	# Chat states de sala (XEP-0085): llegan como groupchat sin body. Se
+	# reenvían con el JID de la sala para que el "escribiendo…" del ocupante se
+	# vea y, sobre todo, se pueda limpiar (<active/>).
 	if rec["body"] == "":
+		var cs = str(rec.get("chat_state", ""))
+		if cs != "" and nick != "" and nick != room_nick(room):
+			emit_signal("chat_state_received", room, cs)
 		return
 	var self_nick = room_nick(room)
 	var mine = nick != "" and nick == self_nick

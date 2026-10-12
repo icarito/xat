@@ -14,6 +14,7 @@ var _msgs := []
 var _hist := []
 var _errors := []
 var _configs := []
+var _states := []
 
 func _init():
 	var SessionScript = load("res://addons/xat_xmpp/xmpp/session.gd")
@@ -27,6 +28,7 @@ func _init():
 	s.connect("history_fetched", self, "_on_hist")
 	s.connect("muc_error", self, "_on_error")
 	s.connect("muc_config_form", self, "_on_config")
+	s.connect("chat_state_received", self, "_on_chat_state")
 	var fake = FakeTransport.new()
 	s._transport = fake
 	s._bare = "me@h"
@@ -158,6 +160,15 @@ func _init():
 	check(_errors.size() == 1 and _errors[0][1] == "item-not-found", "join rechazado -> muc_error")
 	check(not s.is_room("otra@conference.h"), "sala rechazada se descarta")
 
+	# Chat states de sala (XEP-0085): los groupchat sin body se reenvían con el
+	# JID de la sala, para que "escribiendo…" se vea y se pueda cancelar.
+	s._on_stanza('<message type="groupchat" from="sala@conference.h/ana" to="me@h/x"><composing xmlns="http://jabber.org/protocol/chatstates"/></message>')
+	check(_states.size() == 1 and _states[0] == ["sala@conference.h", "composing"], "sala: composing emitido")
+	s._on_stanza('<message type="groupchat" from="sala@conference.h/ana" to="me@h/x"><active xmlns="http://jabber.org/protocol/chatstates"/></message>')
+	check(_states.size() == 2 and _states[1][1] == "active", "sala: active emitido")
+	s._on_stanza('<message type="groupchat" from="sala@conference.h/me" to="me@h/x"><composing xmlns="http://jabber.org/protocol/chatstates"/></message>')
+	check(_states.size() == 2, "sala: chat state propio ignorado")
+
 	# Salida propia: muc_left y deja de ser sala.
 	s._on_stanza('<presence type="unavailable" from="sala@conference.h/me" to="me@h/x"><x xmlns="http://jabber.org/protocol/muc#user"><item role="none" affiliation="owner" jid="me@h/x"/><status code="110"/></x></presence>')
 	check(_left.back() == "sala@conference.h", "muc_left")
@@ -184,6 +195,7 @@ func _on_msg(p_rec): _msgs.append(p_rec)
 func _on_hist(p_bare, p_rows, _complete): _hist.append([p_bare, p_rows])
 func _on_error(p_room, p_condition): _errors.append([p_room, p_condition])
 func _on_config(p_room, p_form): _configs.append([p_room, p_form])
+func _on_chat_state(p_bare, p_state): _states.append([p_bare, p_state])
 
 func check(cond: bool, label: String) -> void:
 	if cond:

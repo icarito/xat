@@ -130,6 +130,7 @@ var _lp: Timer
 var _press := false
 var _press_pos := Vector2.ZERO
 var _press_moved := false
+var _last_drag_pos := Vector2.ZERO
 var _sel_bubble = null
 var _reply_btn: Button
 var _react_btn: Button
@@ -1151,12 +1152,11 @@ func _input(p_event) -> void:
 		pressed = p_event.pressed
 		pos = p_event.position
 	elif p_event is InputEventScreenDrag:
-		# El arrastre táctil cancela la inercia de rueda para no pelear.
-		_cancel_smooth()
 		# Ajustando una selección: el arrastre extiende el rango elegido.
 		if _sel_bubble != null and is_instance_valid(_sel_bubble):
 			_press_pos = p_event.position
 			_sel_bubble.drag_selection(p_event.position)
+			_consume_input()
 			return
 		if _press and p_event.position.distance_to(_press_pos) > 14.0:
 			_press_moved = true
@@ -1167,6 +1167,19 @@ func _input(p_event) -> void:
 				var dx = p_event.position.x - _press_pos.x
 				if abs(dx) > 70.0 and abs(dx) > abs(p_event.position.y - _press_pos.y) * 2.0:
 					_swipe_reply(_press_pos)
+		# Arrastre vertical: desplazar el chat acá mismo. No dependemos de que el
+		# ScrollContainer lo tome: con una sola burbuja grande, el texto cubre
+		# toda la zona y antes el gesto no llegaba a scrollear.
+		if _press and not _swipe_done:
+			var d = p_event.relative
+			if is_zero_approx(d.y) and is_zero_approx(d.x):
+				d = p_event.position - _last_drag_pos
+			_last_drag_pos = p_event.position
+			if abs(d.y) > 0.01:
+				_consume_input()
+				_cancel_scroll_tween()
+				_smooth.kick(-d.y)
+				set_process(true)
 		return
 	else:
 		return
@@ -1181,6 +1194,7 @@ func _input(p_event) -> void:
 			return
 		_press = true
 		_press_pos = pos
+		_last_drag_pos = pos
 		_press_moved = false
 		if _lp != null:
 			_lp.start()
@@ -1764,8 +1778,8 @@ func mark_delivered(p_id: String) -> void:
 			return
 
 func set_chat_state(p_text: String) -> void:
-	if _room != "":
-		return
+	# También en salas: session reenvía <composing/>/<active/> de los ocupantes y
+	# main apaga el indicador con timeout, así que no queda colgado.
 	_typing = p_text
 	_refresh_state()
 
