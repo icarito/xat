@@ -150,6 +150,7 @@ func _ready() -> void:
 	store = Store.new()
 	if store.available():
 		store.open(HISTORY_DB)
+		store.remove_decoded_omemo_duplicates(OMEMO_PLACEHOLDER)
 	enable_omemo()
 
 	_transport = Transport.new()
@@ -1166,9 +1167,9 @@ func _on_stanza(xml: String) -> void:
 
 # --- Mensajería ---
 
-# JID real del ocupante de una sala no anónima: en un mensaje groupchat viene
-# en `<x xmlns='http://jabber.org/protocol/muc#user'><item jid='real@h/r'/>`.
-# Es el "from" correcto para resolver la sesión OMEMO (no el JID de la sala).
+# JID real del ocupante de una sala no anónima: en un mensaje groupchat puede
+# venir en `<x xmlns='http://jabber.org/protocol/muc#user'><item jid='real@h/r'/>`
+# (fallback del estado de presencia, ver `_omemo_sender_bare`).
 func _muc_real_jid(p_stanza) -> String:
 	var x = p_stanza.get_child("x", NS.MUC_USER)
 	if x == null:
@@ -1177,6 +1178,17 @@ func _muc_real_jid(p_stanza) -> String:
 	if item == null:
 		return ""
 	return _bare_of(item.get_attr("jid", ""))
+
+# En MUC no anónima, la sesión OMEMO pertenece al JID real del ocupante
+# (state de presencia de la sala). Devuelve "" si la sala es anónima.
+func _omemo_sender_bare(p_rec: Dictionary) -> String:
+	var from = str(p_rec.get("from", ""))
+	if str(p_rec.get("type", "")) != "groupchat":
+		return _bare_of(from)
+	var room = _bare_of(from)
+	var nick = _resource_of(from)
+	var occupant = _muc_state.get(room, {}).get(nick, {})
+	return _bare_of(str(occupant.get("jid", "")))
 
 func _on_message(p_stanza) -> void:
 	if p_stanza.get_child("event", NS.PEP) != null:
@@ -1187,31 +1199,37 @@ func _on_message(p_stanza) -> void:
 		_on_mam_fin(p_stanza)
 		return
 	var rec = Message.parse(p_stanza)
+	# La historia de MUC puede reenviar la misma stanza tras reconectar. La
+	# sesión Signal ya avanzó al descifrarla en vivo; no volver a descifrarla.
+	if rec["type"] == "groupchat" and store != null and store.available():
+		var room = _bare_of(str(rec["from"]))
+		var replay_id = str(rec["origin_id"]) if str(rec["origin_id"]) != "" else str(rec["id"])
+		if store.has_request_id(room, replay_id):
+			return
 	# OMEMO (0384): intentar descifrar; si no se puede, mostrar un aviso en vez
 	# de descartar en silencio un mensaje cifrado sin body.
 	var enc_el = Omemo.encrypted_child(p_stanza)
 	if enc_el != null:
 		rec["encrypted"] = true
-		var omemo_from = _bare_of(p_stanza.get_attr("from", ""))
 		var is_groupchat = p_stanza.get_attr("type", "") == "groupchat"
-		var real := ""
-		if is_groupchat:
-			real = _muc_real_jid(p_stanza)
-			if real != "":
-				omemo_from = real
 		if omemo_available():
-			# En sala sin JID real no podemos usar el bare de la sala: el cifrado
-			# es 1:1 del dispositivo del ocupante, resolvemos por device id.
+			# Preferimos el JID real del ocupante (presencia o `muc#user` del
+			# mensaje); si la sala es anónima, resolvemos por device id (sid).
+			var sender_bare = _omemo_sender_bare(rec)
+			if sender_bare == "" and is_groupchat:
+				sender_bare = _muc_real_jid(p_stanza)
 			var omemo_res
-			if is_groupchat and real == "":
+			if sender_bare != "":
+				omemo_res = _omemo_engine.decrypt(sender_bare, enc_el)
+			elif is_groupchat:
 				omemo_res = _omemo_engine.decrypt_muc(enc_el)
 			else:
-				omemo_res = _omemo_engine.decrypt(omemo_from, enc_el)
+				omemo_res = {"ok": false, "error": "sin_sesion"}
 			if omemo_res["ok"]:
 				rec["body"] = omemo_res["body"]
 				rec["omemo_sender_device"] = omemo_res["sender_device"]
 			else:
-				emit_signal("log_message", 1, "OMEMO decrypt failed from %s device %s: %s" % [omemo_from, str(Omemo.parse_encrypted(enc_el)["sid"]), str(omemo_res.get("error", "desconocido"))])
+				emit_signal("log_message", 1, "OMEMO decrypt failed from %s device %s: %s" % [str(rec["from"]), str(Omemo.parse_encrypted(enc_el)["sid"]), str(omemo_res.get("error", "desconocido"))])
 				if rec["body"] == "":
 					rec["body"] = OMEMO_PLACEHOLDER
 		elif rec["body"] == "":
@@ -1458,6 +1476,7 @@ func _on_muc_message(rec: Dictionary) -> void:
 			"bare_jid": room, "body": rec["body"], "direction": rec["direction"],
 			"ts": _timestamp(rec), "sender": nick,
 			"request_id": str(rec.get("origin_id", "")) if str(rec.get("origin_id", "")) != "" else str(rec.get("id", "")),
+			"encrypted": bool(rec.get("encrypted", false)),
 			"quick": rec["quick_responses"], "commands": rec["commands"],
 		})
 	emit_signal("message_received", rec)
@@ -1484,6 +1503,7 @@ func _handle_muc_mam(rec: Dictionary, p_room: String, p_nick: String) -> void:
 			"bare_jid": p_room, "body": rec["body"], "direction": rec["direction"],
 			"ts": _timestamp(rec), "mam_id": rec["mam_id"], "sender": p_nick,
 			"request_id": rec["id"],
+			"encrypted": bool(rec.get("encrypted", false)),
 			"quick": rec["quick_responses"], "commands": rec["commands"],
 		})
 	emit_signal("message_received", rec)

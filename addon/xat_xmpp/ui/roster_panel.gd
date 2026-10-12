@@ -757,8 +757,6 @@ func _rebuild_grid() -> void:
 	if _rooms_box != null:
 		_rooms_box.visible = false
 	var items := []
-	for b in _sorted():
-		items.append(_make_row(str(b)))
 	if not _rooms.empty():
 		var hdr = Label.new()
 		hdr.text = "Salas"
@@ -767,6 +765,8 @@ func _rebuild_grid() -> void:
 		items.append(hdr)
 		for b in _sorted_rooms():
 			items.append(_make_room_row(str(b)))
+	for b in _sorted():
+		items.append(_make_row(str(b)))
 	var n = max(1, _columns)
 	var cols := []
 	for i in range(n):

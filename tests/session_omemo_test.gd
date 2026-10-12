@@ -63,6 +63,20 @@ func _init():
 	s_a._on_stanza(el_b.to_xml())
 	check(_last.get("body") == "respuesta de B", "A descifra la respuesta")
 
+	# MUC no anónima: el sobre llega de room/nick, pero la sesión Signal
+	# pertenece al JID real anunciado en la presencia del ocupante.
+	s_a.state = Session.State.CONNECTED
+	s_a.join_room("sala@conference.h", "alice")
+	s_a._on_stanza('<presence from="sala@conference.h/bob"><x xmlns="http://jabber.org/protocol/muc#user"><item jid="bob@h/resource" affiliation="member" role="participant"/></x></presence>')
+	check(s_a._omemo_sender_bare({"type": "groupchat", "from": "sala@conference.h/bob"}) == bare_b, "MUC resuelve JID real")
+	check(s_a._omemo_sender_bare({"type": "groupchat", "from": "sala@conference.h/desconocido"}) == "", "MUC desconocido no usa JID de sala")
+	s_b.send_message(bare_a, "respuesta cifrada de sala")
+	var el_muc = Stanza.parse(str(fake_b.sent.back()))
+	el_muc.set_attr("from", "sala@conference.h/bob")
+	el_muc.set_attr("type", "groupchat")
+	s_a._on_stanza(el_muc.to_xml())
+	check(_last.get("body") == "respuesta cifrada de sala" and _last.get("muc", false), "A descifra OMEMO de MUC")
+
 	s_a.free()
 	s_b.free()
 	if _fail == 0:
