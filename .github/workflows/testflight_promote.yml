@@ -1,0 +1,41 @@
+name: Promote approved TestFlight builds
+
+# Unico camino de distribucion a TestFlight de testers EXTERNOS. El job `ios` de
+# release.yml solo SUBE el IPA con `altool --upload-app`: el build queda para
+# testers internos hasta que Apple lo procesa, se responde el cuestionario de
+# exportacion y pasa la Beta App Review. Ese paso no puede vivir en el export
+# (la revision tarda horas, no minutos), asi que corre aca cada 30 minutos.
+#
+# `--promote` recorre los builds VALID mas nuevos por plataforma, contesta el
+# cuestionario si falta, pide la revision del mas nuevo y publica al grupo
+# externo el aprobado mas nuevo. Es idempotente: correrlo cada 30 min no duplica
+# nada y toma el build recien subido en la corrida siguiente.
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  promote:
+    if: ${{ github.repository == 'icarito/xat' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Promote newly-approved builds to external TestFlight groups
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          ASC_API_KEY_P8: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
+          BUNDLE_ID: org.fuentelibre.xat
+          PLATFORMS: IOS
+        run: |
+          set -euo pipefail
+          if [ -z "$ASC_KEY_ID" ] || [ -z "$ASC_ISSUER_ID" ] || [ -z "$ASC_API_KEY_P8" ]; then
+            echo "App Store Connect secrets missing — skipping TestFlight promotion."
+            exit 0
+          fi
+          pip install --quiet "pyjwt[crypto]"
+          python3 scripts/testflight_distribute.py --promote
