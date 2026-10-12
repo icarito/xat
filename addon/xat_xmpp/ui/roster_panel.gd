@@ -117,7 +117,7 @@ func _init() -> void:
 	_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_box.mouse_filter = Control.MOUSE_FILTER_IGNORE # deja pasar el arrastre táctil entre filas
 	_box.add_constant_override("separation", 2)
-	# Sección "Salas" (XEP-0045), bajo Contactos. Oculta mientras no haya salas.
+	# Las salas guardadas van primero para poder abrirlas sin recorrer el roster.
 	_rooms_header = Label.new()
 	_rooms_header.text = "Salas"
 	_rooms_header.visible = false
@@ -132,9 +132,9 @@ func _init() -> void:
 	content.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	content.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	content.add_constant_override("separation", 2)
-	content.add_child(_box)
 	content.add_child(_rooms_header)
 	content.add_child(_rooms_box)
+	content.add_child(_box)
 	var top = MarginContainer.new()
 	top.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	top.add_constant_override("margin_top", 12)
@@ -658,8 +658,6 @@ func _rebuild_grid() -> void:
 	if _rooms_box != null:
 		_rooms_box.visible = false
 	var items := []
-	for b in _sorted():
-		items.append(_make_row(str(b)))
 	if not _rooms.empty():
 		var hdr = Label.new()
 		hdr.text = "Salas"
@@ -668,6 +666,8 @@ func _rebuild_grid() -> void:
 		items.append(hdr)
 		for b in _sorted_rooms():
 			items.append(_make_room_row(str(b)))
+	for b in _sorted():
+		items.append(_make_row(str(b)))
 	var n = max(1, _columns)
 	var cols := []
 	for i in range(n):
