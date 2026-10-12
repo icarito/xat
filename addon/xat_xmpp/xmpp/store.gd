@@ -269,6 +269,20 @@ func has_request_id(p_bare_jid: String, p_request_id: String) -> bool:
 	var rows = _db.query("SELECT 1 FROM messages WHERE bare_jid = ? AND request_id = ? LIMIT 1", [p_bare_jid, p_request_id])
 	return not rows.empty()
 
+# El replay de una sala puede haber guardado un placeholder tras descifrar la
+# misma stanza en vivo. Conserva la fila legible y cualquier MAM legítimo.
+func remove_decoded_omemo_duplicates(p_placeholder: String) -> int:
+	if not _available:
+		return 0
+	var q = _db.prepare("DELETE FROM messages WHERE id IN (SELECT bad.id FROM messages bad JOIN messages good ON good.bare_jid = bad.bare_jid AND good.request_id = bad.request_id AND good.id <> bad.id WHERE bad.body = ? AND good.body <> ? AND bad.mam_id IS NULL AND bad.request_id IS NOT NULL)")
+	if q == null:
+		return 0
+	q.bind_text(1, p_placeholder)
+	q.bind_text(2, p_placeholder)
+	q.step()
+	q.finalize()
+	return _db.changes()
+
 func _decode_rows(rows: Array) -> Array:
 	var out := []
 	for r in rows:

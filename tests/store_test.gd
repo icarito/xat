@@ -78,6 +78,13 @@ func _init():
 	check(s.find_by_request_id("room@conference.h", "sr1")["sender"] == "ana", "sender round-trip")
 	check(s.get_recent("room@conference.h", 5)[0]["sender"] == "ana", "sender en get_recent")
 
+	# Un replay OMEMO fallido no debe tapar la respuesta ya descifrada.
+	var placeholder = "🔒 Mensaje cifrado con OMEMO: xat todavía no puede leerlo."
+	s.record_message({"bare_jid": "room@conference.h", "body": placeholder, "direction": "in", "ts": "2026-08-08T01:00:02Z", "request_id": "sr1", "sender": "ana"})
+	s.record_message({"bare_jid": "room@conference.h", "body": placeholder, "direction": "in", "ts": "2026-08-08T01:00:03Z", "request_id": "unreadable", "sender": "ana"})
+	check(s.remove_decoded_omemo_duplicates(placeholder) == 1, "elimina sólo placeholder duplicado")
+	check(s.get_recent("room@conference.h", 10).size() == 2, "conserva respuesta legible y mensaje no descifrable")
+
 	# open() limpia filas sin cuerpo heredadas.
 	var tmp = "user://store_test_tmp.db"
 	var s2 = Store.new()

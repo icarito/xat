@@ -150,6 +150,7 @@ func _ready() -> void:
 	store = Store.new()
 	if store.available():
 		store.open(HISTORY_DB)
+		store.remove_decoded_omemo_duplicates(OMEMO_PLACEHOLDER)
 	enable_omemo()
 
 	_transport = Transport.new()
@@ -1185,6 +1186,13 @@ func _on_message(p_stanza) -> void:
 		_on_mam_fin(p_stanza)
 		return
 	var rec = Message.parse(p_stanza)
+	# La historia de MUC puede reenviar la misma stanza tras reconectar. La
+	# sesión Signal ya avanzó al descifrarla en vivo; no volver a descifrarla.
+	if rec["type"] == "groupchat" and store != null and store.available():
+		var room = _bare_of(str(rec["from"]))
+		var replay_id = str(rec["origin_id"]) if str(rec["origin_id"]) != "" else str(rec["id"])
+		if store.has_request_id(room, replay_id):
+			return
 	# OMEMO (0384): intentar descifrar; si no se puede, mostrar un aviso en vez
 	# de descartar en silencio un mensaje cifrado sin body.
 	var enc_el = Omemo.encrypted_child(p_stanza)
@@ -1444,6 +1452,7 @@ func _on_muc_message(rec: Dictionary) -> void:
 			"bare_jid": room, "body": rec["body"], "direction": rec["direction"],
 			"ts": _timestamp(rec), "sender": nick,
 			"request_id": str(rec.get("origin_id", "")) if str(rec.get("origin_id", "")) != "" else str(rec.get("id", "")),
+			"encrypted": bool(rec.get("encrypted", false)),
 			"quick": rec["quick_responses"], "commands": rec["commands"],
 		})
 	emit_signal("message_received", rec)
@@ -1470,6 +1479,7 @@ func _handle_muc_mam(rec: Dictionary, p_room: String, p_nick: String) -> void:
 			"bare_jid": p_room, "body": rec["body"], "direction": rec["direction"],
 			"ts": _timestamp(rec), "mam_id": rec["mam_id"], "sender": p_nick,
 			"request_id": rec["id"],
+			"encrypted": bool(rec.get("encrypted", false)),
 			"quick": rec["quick_responses"], "commands": rec["commands"],
 		})
 	emit_signal("message_received", rec)

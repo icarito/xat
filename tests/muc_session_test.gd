@@ -121,6 +121,20 @@ func _init():
 	if s.store != null:
 		check(s.store.has_request_id("sala@conference.h", mid), "fila optimista guardada")
 
+	# Prosody reenvía la misma stanza de un ocupante al volver a entrar. No
+	# insertar una segunda burbuja ni repetir un descifrado Signal.
+	seen = _msgs.size()
+	s._on_stanza('<message type="groupchat" from="sala@conference.h/ana" id="reply-1"><body>respuesta viva</body></message>')
+	check(_msgs.size() == seen + 1, "respuesta de ocupante emitida")
+	s._on_stanza('<message type="groupchat" from="sala@conference.h/ana" id="reply-1"><body>respuesta viva</body><delay xmlns="urn:xmpp:delay" stamp="2026-10-12T00:00:00Z"/></message>')
+	check(_msgs.size() == seen + 1, "replay de ocupante no emite duplicado")
+	if s.store != null:
+		check(s.store.get_recent("sala@conference.h", 10).size() == 3, "replay de ocupante no duplica historial")
+		var encrypted_rec = load("res://addons/xat_xmpp/xmpp/message.gd").parse(Stanza.parse('<message type="groupchat" from="sala@conference.h/ana" id="reply-2"><body>cifrado</body></message>'))
+		encrypted_rec["encrypted"] = true
+		s._on_muc_message(encrypted_rec)
+		check(s.store.find_by_request_id("sala@conference.h", "reply-2")["encrypted"], "sala conserva marca OMEMO en historial")
+
 	# MAM de sala: la query va a la sala SIN `with`; el IQ id es el queryid y el
 	# `<fin>` (que en sala puede llegar como <message>) cierra y avisa al main.
 	s.load_history("sala@conference.h")
