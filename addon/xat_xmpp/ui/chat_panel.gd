@@ -1167,12 +1167,18 @@ func _input(p_event) -> void:
 		if _lp != null:
 			_lp.start()
 	else:
+		var was_tap = _press and not _press_moved and _sel_bubble == null
 		_press = false
 		if _lp != null:
 			_lp.stop()
 		# Cierra el gesto de selección (la barra queda visible para copiar).
 		if _sel_bubble != null and is_instance_valid(_sel_bubble):
 			_sel_bubble.end_selection_drag()
+		elif was_tap:
+			# Toque corto: puede caer sobre un enlace (lo abre la burbuja).
+			var tapped = _bubble_at(pos)
+			if tapped != null:
+				tapped.tap_at(pos)
 
 # ¿El punto cae dentro del composer? (para no robar el gesto de selección).
 func _in_composer(p_pos: Vector2) -> bool:

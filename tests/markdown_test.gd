@@ -13,6 +13,11 @@ func _init():
 	check(Md.to_bbcode("~~viejo~~") == "[s]viejo[/s]", "tachado")
 	check(Md.to_bbcode("usa `code` acá") == "usa [code]code[/code] acá", "código inline")
 	check(Md.to_bbcode("ver [docs](https://x.y/z)") == "ver [url=https://x.y/z]docs[/url]", "link")
+	# Autolink de URLs sueltas.
+	check(Md.to_bbcode("mirá https://x.y/z") == "mirá [url=https://x.y/z]https://x.y/z[/url]", "autolink http")
+	check(Md.to_bbcode("andá a https://x.y/z.") == "andá a [url=https://x.y/z]https://x.y/z[/url].", "autolink recorta punto final")
+	check(Md.to_bbcode("(ver https://x.y/z)") == "(ver [url=https://x.y/z]https://x.y/z[/url])", "autolink recorta paréntesis")
+	check(Md.to_bbcode("`https://x.y/z`") == "[code]https://x.y/z[/code]", "autolink no toca código inline")
 
 	# Fence multilínea; '[' interno se escapa.
 	var fenced = Md.to_bbcode("antes\n```\nrm -rf [tmp]\n```\ndespués")

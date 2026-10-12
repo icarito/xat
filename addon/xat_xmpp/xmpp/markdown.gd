@@ -70,6 +70,13 @@ static func _inline(p_line: String, p_store: Array, p_inline = null) -> String:
 					o += _sentinel(p_store, "[url=" + url + "]" + text + "[/url]")
 					i = rp + 1
 					continue
+		elif ch == "h":
+			# URL suelta (http/https): autolink.
+			var bare = _match_url(p_line, i)
+			if bare != "":
+				o += _sentinel(p_store, "[url=" + bare + "]" + bare + "[/url]")
+				i += bare.length()
+				continue
 		if p_inline != null:
 			var replacement = p_inline.replacement(p_line, i)
 			if not replacement.empty():
@@ -79,6 +86,33 @@ static func _inline(p_line: String, p_store: Array, p_inline = null) -> String:
 		o += ch
 		i += 1
 	return o
+
+# Autolink de una URL suelta a partir de p_i (debe empezar con http/https).
+static func _match_url(p_line: String, p_i: int) -> String:
+	for scheme in ["https://", "http://"]:
+		if p_line.substr(p_i, scheme.length()) == scheme:
+			var j = p_i + scheme.length()
+			while j < p_line.length() and not _url_stop(p_line[j]):
+				j += 1
+			return _trim_url(p_line.substr(p_i, j - p_i))
+	return ""
+
+static func _url_stop(p_c: String) -> bool:
+	return p_c == " " or p_c == "\t" or p_c == "\n" or p_c == "<" or p_c == ">" or p_c == "\"" or p_c == "'"
+
+# Quita puntuación final que no suele ser parte del enlace (.,;:!?) y cierra
+# paréntesis desbalanceados.
+static func _trim_url(p_url: String) -> String:
+	var u := p_url
+	while u.length() > 0:
+		var c = u[u.length() - 1]
+		if c in [".", ",", ";", ":", "!", "?"]:
+			u = u.substr(0, u.length() - 1)
+		elif c == ")" and u.count("(") < u.count(")"):
+			u = u.substr(0, u.length() - 1)
+		else:
+			break
+	return u
 
 static func _sentinel(p_store: Array, p_value: String) -> String:
 	p_store.append(p_value)

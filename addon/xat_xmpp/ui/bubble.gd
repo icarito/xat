@@ -121,6 +121,8 @@ func _init() -> void:
 	# una pulsación larga (chat_panel llama a begin_selection). Sin selección el
 	# label no consume el arrastre (IGNORE) y el ScrollContainer se mueve.
 	_label.selection_enabled = true
+	_label.meta_underlined = true
+	_label.connect("meta_clicked", self, "_on_meta_clicked")
 	if OS.has_touchscreen_ui_hint():
 		_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_label.add_color_override("default_color", Palette.TEXT)
@@ -299,6 +301,18 @@ func end_selection_drag() -> void:
 	if _drag_active:
 		_drag_active = false
 		_feed_mouse(_last_global, false)
+
+# Toque corto (táctil): reenvía el clic al label para que, si cae sobre un
+# enlace, RichTextLabel emita meta_clicked y lo abramos.
+func tap_at(p_global: Vector2) -> void:
+	if not _drag_active:
+		_feed_mouse(p_global, true)
+		_feed_mouse(p_global, false)
+
+func _on_meta_clicked(p_meta) -> void:
+	var url = str(p_meta).strip_edges()
+	if url.begins_with("http://") or url.begins_with("https://") or url.begins_with("mailto:") or url.begins_with("xmpp:"):
+		OS.shell_open(url)
 
 # Selección total (botón "Todo" de la barra).
 func select_all() -> void:
