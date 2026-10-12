@@ -131,7 +131,6 @@ func _build_encrypted(p_bare: String, p_keys: Array, p_payload: PoolByteArray):
 	return enc
 
 # --- Descifrado ---
-
 # Devuelve {ok, body, sender_device, trust} o {ok:false, error}.
 func decrypt(p_from_bare: String, p_enc) -> Dictionary:
 	if not available():
@@ -164,6 +163,36 @@ func decrypt(p_from_bare: String, p_enc) -> Dictionary:
 		return {"ok": false, "error": "payload"}
 	var body = Omemo.unwrap_sce(pt.get_string_from_utf8())
 	return {"ok": true, "body": body, "sender_device": sender_dev, "trust": trust_key(p_from_bare, sender_dev)}
+
+# Descifrado para OMEMO dentro de una sala (MUC): el mensaje llega desde el JID
+# de la sala y puede no incluir el JID real del ocupante, pero es un cifrado 1:1
+# de su dispositivo. Resolvemos la sesión por el device id (header `sid`).
+func decrypt_muc(p_enc) -> Dictionary:
+	var parsed = Omemo.parse_encrypted(p_enc, _device.device_id())
+	if parsed["our"].empty():
+		return {"ok": false, "error": "no_es_para_nosotros"}
+	var sid = int(parsed["sid"])
+	var tried := []
+	# 1) Device conocido: buscar el bare cuya lista de dispositivos lo incluye.
+	for key in _store.keys_with_prefix(_S_PEER_DEV):
+		var bare = key.substr(_S_PEER_DEV.length())
+		for dev in peer_devices(bare):
+			if int(dev) == sid:
+				var r = decrypt(bare, p_enc)
+				if r.get("ok"):
+					return r
+				tried.append("%s:%s" % [bare, str(r.get("error", "?"))])
+	# 2) Sesión existente con ese device id.
+	var suffix = "." + str(sid)
+	for key in _store.keys_with_prefix(_S_SESSION):
+		if not key.ends_with(suffix):
+			continue
+		var bare2 = key.substr(_S_SESSION.length(), key.length() - _S_SESSION.length() - suffix.length())
+		var r2 = decrypt(bare2, p_enc)
+		if r2.get("ok"):
+			return r2
+		tried.append("%s:%s" % [bare2, str(r2.get("error", "?"))])
+	return {"ok": false, "error": "sin_sesion_muc (%s)" % ", ".join(tried)}
 
 func _decrypt_kex(p_from_bare: String, p_sender_dev: int, p_key_bytes: PoolByteArray) -> Dictionary:
 	var kx = Omemo.parse_key_exchange(p_key_bytes)

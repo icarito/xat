@@ -1166,6 +1166,18 @@ func _on_stanza(xml: String) -> void:
 
 # --- Mensajería ---
 
+# JID real del ocupante de una sala no anónima: en un mensaje groupchat viene
+# en `<x xmlns='http://jabber.org/protocol/muc#user'><item jid='real@h/r'/>`.
+# Es el "from" correcto para resolver la sesión OMEMO (no el JID de la sala).
+func _muc_real_jid(p_stanza) -> String:
+	var x = p_stanza.get_child("x", NS.MUC_USER)
+	if x == null:
+		return ""
+	var item = x.get_child("item")
+	if item == null:
+		return ""
+	return _bare_of(item.get_attr("jid", ""))
+
 func _on_message(p_stanza) -> void:
 	if p_stanza.get_child("event", NS.PEP) != null:
 		_on_pep_event(p_stanza)
@@ -1180,13 +1192,26 @@ func _on_message(p_stanza) -> void:
 	var enc_el = Omemo.encrypted_child(p_stanza)
 	if enc_el != null:
 		rec["encrypted"] = true
+		var omemo_from = _bare_of(p_stanza.get_attr("from", ""))
+		var is_groupchat = p_stanza.get_attr("type", "") == "groupchat"
+		var real := ""
+		if is_groupchat:
+			real = _muc_real_jid(p_stanza)
+			if real != "":
+				omemo_from = real
 		if omemo_available():
-			var omemo_res = _omemo_engine.decrypt(_bare_of(p_stanza.get_attr("from", "")), enc_el)
+			# En sala sin JID real no podemos usar el bare de la sala: el cifrado
+			# es 1:1 del dispositivo del ocupante, resolvemos por device id.
+			var omemo_res
+			if is_groupchat and real == "":
+				omemo_res = _omemo_engine.decrypt_muc(enc_el)
+			else:
+				omemo_res = _omemo_engine.decrypt(omemo_from, enc_el)
 			if omemo_res["ok"]:
 				rec["body"] = omemo_res["body"]
 				rec["omemo_sender_device"] = omemo_res["sender_device"]
 			else:
-				emit_signal("log_message", 1, "OMEMO decrypt failed from %s device %s: %s" % [_bare_of(p_stanza.get_attr("from", "")), str(Omemo.parse_encrypted(enc_el)["sid"]), str(omemo_res.get("error", "desconocido"))])
+				emit_signal("log_message", 1, "OMEMO decrypt failed from %s device %s: %s" % [omemo_from, str(Omemo.parse_encrypted(enc_el)["sid"]), str(omemo_res.get("error", "desconocido"))])
 				if rec["body"] == "":
 					rec["body"] = OMEMO_PLACEHOLDER
 		elif rec["body"] == "":
