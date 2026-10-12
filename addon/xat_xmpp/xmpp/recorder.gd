@@ -146,6 +146,11 @@ func stop(p_discard: bool = false) -> Dictionary:
 	return {"path": _path, "duration_ms": duration_ms, "mime": "audio/wav", "pending": true}
 
 func _start_encode_thread() -> void:
+	# Si quedó un encode anterior sin recoger, se junta antes de pisar `_thread`:
+	# si no, el hilo viejo queda huérfano (nunca se hace wait_to_finish) y con
+	# grabaciones repetidas los threads se acumulan hasta tumbar la app.
+	if _thread != null and _thread.is_active():
+		_thread.wait_to_finish()
 	_thread = Thread.new()
 	var err = _thread.start(self, "_encode_worker", _job)
 	if err != OK:
@@ -155,9 +160,13 @@ func _start_encode_thread() -> void:
 
 # Corre en el thread de encode: SOLO computa (downmix + ADPCM). No toca el
 # filesystem ni el árbol (no son thread-safe en Godot 3); el guardado ocurre en
-# el hilo principal, en _finish_encode.
+# el hilo principal, en _finish_encode. El resultado se encola con call_deferred
+# (thread-safe): sin esto el valor de retorno se descartaba y `recording_finished`
+# nunca se emitía, así que la nota de voz no se enviaba.
 func _encode_worker(p_job) -> Dictionary:
-	return _encode_pcm(p_job)
+	var res = _encode_pcm(p_job)
+	call_deferred("_finish_encode", res)
+	return res
 
 # Puro: downmix+remuestreo a voz, ADPCM y armado del WAV (sin escribir).
 func _encode_pcm(p_job: Dictionary) -> Dictionary:

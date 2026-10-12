@@ -14,6 +14,7 @@ signal chat_state_sent(bare, state)
 signal media_action(peer, rec, action) # abrir/descargar/reproducir media
 signal attach_picked(peer, path)       # archivo elegido para enviar
 signal attach_requested(peer)          # pedir el selector nativo (Android)
+signal gallery_requested(peer)         # abrir la fototeca del sistema (iOS/Android)
 signal camera_requested(peer)          # tomar foto
 signal voice_toggle(peer, start)       # empezar/terminar grabación
 signal voice_cancel(peer)              # descartar la grabación en curso
@@ -354,10 +355,10 @@ func _build() -> void:
 	_row = HBoxContainer.new()
 	_row.add_constant_override("separation", 8)
 	_row.alignment = BoxContainer.ALIGN_CENTER
-	# Adjuntar con el mismo estilo de pluma que el mic/enviar (icono vectorial),
-	# no un PNG: antes el paperclip (imagen) no combinaba con el mic (vector).
+	# Adjuntar con el mismo estilo de pluma que el mic/enviar (icono vectorial).
+	# Glifo "+": el clip no se entendía como "adjuntar" en pruebas en teléfono.
 	_attach_btn = IconButton.new()
-	_attach_btn.setup("paperclip", 48, Palette.TEXT_DIM, "Adjuntar (archivo o foto)")
+	_attach_btn.setup("plus", 48, Palette.TEXT_DIM, "Adjuntar foto, cámara o archivo")
 	_attach_btn.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	_attach_btn.connect("pressed", self, "_on_attach")
 	_row.add_child(_attach_btn)
@@ -690,8 +691,15 @@ func _on_attach() -> void:
 		return
 	if _attach_menu == null:
 		_attach_menu = PopupMenu.new()
-		_attach_menu.add_item("Archivo…", 1)
-		_attach_menu.add_item("Cámara / Foto…", 2)
+		# Menú táctil: fuente y separación grandes. El tamaño default del
+		# PopupMenu es diminuto para el dedo (targets de ~20 px) y cada opción
+		# quedaba difícil de acertar.
+		_attach_menu.add_font_override("font", XatTheme.font(Palette.FONT_REGULAR, Palette.FONT_SIZE + 3))
+		_attach_menu.add_constant_override("vseparation", 14)
+		_attach_menu.add_constant_override("hseparation", 14)
+		_attach_menu.add_item("Galería de fotos", 1)
+		_attach_menu.add_item("Cámara", 2)
+		_attach_menu.add_item("Archivo…", 3)
 		_attach_menu.connect("id_pressed", self, "_on_attach_menu")
 		add_child(_attach_menu)
 	# Posicionar bajo el botón adjuntar (popup_centered podía quedar fuera de
@@ -702,9 +710,19 @@ func _on_attach() -> void:
 
 func _on_attach_menu(p_id: int) -> void:
 	if p_id == 1:
-		_open_file_dialog()
+		_on_gallery()
 	elif p_id == 2:
 		_on_camera()
+	elif p_id == 3:
+		_open_file_dialog()
+
+# Fototeca del sistema (Álbum/Fotos). En iOS/Android la app la abre nativa vía
+# el singleton XatMedia (pickImage); sin backend, app/ cae al selector de
+# archivos. Antes no había entrada directa: "Cámara / Foto…" siempre abría la
+# cámara cuando el dispositivo tenía una.
+func _on_gallery() -> void:
+	if _peer != "":
+		emit_signal("gallery_requested", _peer)
 
 func _open_file_dialog() -> void:
 	if _peer == "":

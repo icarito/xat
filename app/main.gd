@@ -306,6 +306,7 @@ func _ready() -> void:
 	_chat.connect("back_requested", self, "_on_back")
 	_chat.connect("attach_picked", self, "_on_attach_picked")
 	_chat.connect("attach_requested", self, "_on_attach_requested")
+	_chat.connect("gallery_requested", self, "_on_gallery_requested")
 	_chat.connect("camera_requested", self, "_on_camera_requested")
 	_chat.connect("voice_toggle", self, "_on_voice_toggle")
 	_chat.connect("voice_cancel", self, "_on_voice_cancel")
@@ -1136,6 +1137,15 @@ func _on_attach_requested(peer: String) -> void:
 		return
 	_pending_media_peer = peer
 	_native_media.call("pickFile")
+
+# Fototeca del sistema: iOS/Android la abre el singleton XatMedia (pickImage =
+# fotos, no la app Archivos). Sin backend nativo (escritorio) cae al selector.
+func _on_gallery_requested(peer: String) -> void:
+	if _native_media == null:
+		_chat.open_gallery()
+		return
+	_pending_media_peer = peer
+	_native_media.call("pickImage")
 
 func _on_native_media_picked(path: String) -> void:
 	if _pending_avatar:

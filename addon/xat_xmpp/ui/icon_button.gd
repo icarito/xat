@@ -83,6 +83,10 @@ func _glyph(g: String, c: Vector2, r: float, col: Color) -> void:
 			draw_line(a + Vector2(r * 0.34, r * 0.34), b + Vector2(-r * 0.34, r * 0.34), col, w, true)
 			draw_arc(c + Vector2(r * 0.5, -r * 0.5), r * 0.34, PI * 0.5, PI * 1.5, 16, col, w, true)
 			draw_arc(c + Vector2(-r * 0.5, r * 0.5), r * 0.34, -PI * 0.5, PI * 0.5, 16, col, w, true)
+		"plus":
+			# Cruz gruesa: la señal universal de "agregar/adjuntar".
+			draw_line(c + Vector2(0, -r * 0.62), c + Vector2(0, r * 0.62), col, w * 1.5, true)
+			draw_line(c + Vector2(-r * 0.62, 0), c + Vector2(r * 0.62, 0), col, w * 1.5, true)
 		"emoji":
 			draw_arc(c, r * 0.72, 0.0, TAU, 30, col, w, true)
 			draw_circle(c + Vector2(-r * 0.26, -r * 0.18), w * 0.7, col)
