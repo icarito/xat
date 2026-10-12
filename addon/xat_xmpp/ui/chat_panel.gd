@@ -507,6 +507,7 @@ func _build_select() -> void:
 	_sel_overlay.anchor_right = 1.0
 	_sel_overlay.anchor_bottom = 1.0
 	add_child(_sel_overlay)
+	_sel_overlay.connect("draw", self, "_draw_sel_handles")
 	_sel_bar = PanelContainer.new()
 	_sel_bar.anchor_left = 0.5
 	_sel_bar.anchor_right = 0.5
@@ -1152,10 +1153,14 @@ func _input(p_event) -> void:
 		pressed = p_event.pressed
 		pos = p_event.position
 	elif p_event is InputEventScreenDrag:
-		# Ajustando una selección: el arrastre extiende el rango elegido.
+		# Ajustando una selección: mueve el tirador más cercano (o extiende).
 		if _sel_bubble != null and is_instance_valid(_sel_bubble):
 			_press_pos = p_event.position
-			_sel_bubble.drag_selection(p_event.position)
+			if _sel_bubble.is_handle_dragging():
+				_sel_bubble.drag_handle(p_event.position)
+			else:
+				_sel_bubble.drag_selection(p_event.position)
+			_sel_overlay.update()
 			_consume_input()
 			return
 		if _press and p_event.position.distance_to(_press_pos) > 14.0:
@@ -1192,6 +1197,13 @@ func _input(p_event) -> void:
 		# Un toque sobre la barra no debe disparar otra selección.
 		if _sel_bar != null and _sel_bar.visible and _sel_bar.get_global_rect().has_point(pos):
 			return
+		# Con selección activa: agarrar el tirador más cercano para ajustarla
+		# (funciona aunque el dedo se haya levantado antes).
+		if _sel_bubble != null and is_instance_valid(_sel_bubble):
+			_sel_bubble.begin_handle_drag(pos)
+			_sel_overlay.update()
+			_consume_input()
+			return
 		_press = true
 		_press_pos = pos
 		_last_drag_pos = pos
@@ -1206,6 +1218,7 @@ func _input(p_event) -> void:
 		# Cierra el gesto de selección (la barra queda visible para copiar).
 		if _sel_bubble != null and is_instance_valid(_sel_bubble):
 			_sel_bubble.end_selection_drag()
+			_sel_overlay.update()
 		elif was_tap:
 			# Toque corto: puede caer sobre un enlace (lo abre la burbuja).
 			var tapped = _bubble_at(pos)
@@ -1234,7 +1247,13 @@ func _handle_wheel(p_event) -> bool:
 	var dy = SmoothScroll.wheel_delta(p_event)
 	if is_zero_approx(dy):
 		return false
-	if not get_global_rect().has_point(p_event.position):
+	# En macOS el scroll del trackpad llega como `InputEventPanGesture`, que puede
+	# no traer posición válida: caemos a la posición del mouse. Sin esto el evento
+	# se descartaba y no se podía scrollear la lista.
+	var inside = get_global_rect().has_point(p_event.position)
+	if not inside and p_event is InputEventPanGesture:
+		inside = get_global_rect().has_point(get_global_mouse_position())
+	if not inside:
 		return false
 	get_tree().set_input_as_handled()
 	_cancel_scroll_tween()
@@ -1279,6 +1298,8 @@ func _enter_selection(p_bubble) -> void:
 		_sel_bubble.end_selection()
 	_sel_bubble = p_bubble
 	_sel_bubble.begin_selection_at(_press_pos)
+	if _sel_overlay != null:
+		_sel_overlay.update()
 	if _sel_bar != null:
 		_sel_bar.visible = true
 		_update_sel_actions()
@@ -1393,6 +1414,18 @@ func _exit_selection() -> void:
 	_sel_bubble = null
 	if _sel_bar != null:
 		_sel_bar.visible = false
+	if _sel_overlay != null:
+		_sel_overlay.update()
+
+# Tiradores de la selección (inicio/fin), dibujados sobre el contenido.
+func _draw_sel_handles() -> void:
+	if _sel_overlay == null or _sel_bubble == null or not is_instance_valid(_sel_bubble):
+		return
+	var inv = _sel_overlay.get_global_transform().affine_inverse()
+	for pt in _sel_bubble.handles():
+		var c = inv.xform(pt)
+		_sel_overlay.draw_circle(c, 13.0, Color(0, 0, 0, 0.35))
+		_sel_overlay.draw_circle(c, 9.5, Color(1, 1, 1, 0.95))
 
 func _on_copy_selection() -> void:
 	if _sel_bubble == null or not is_instance_valid(_sel_bubble):
@@ -1481,8 +1514,8 @@ func set_peer(p_bare: String) -> void:
 	_rebuild()
 
 # Modo sala (XEP-0045): título = sala; se muestra la lista de ocupantes
-# (oprimible -> @mención) y se suprimen acciones, estados y adjuntos.
-# `p_affiliation`/`p_role` son los nuestros, para habilitar la moderación.
+# (oprimible -> @mención). Adjuntos y voz quedan habilitados (paridad con el
+# 1:1). `p_affiliation`/`p_role` son los nuestros, para habilitar la moderación.
 func set_room(p_room: String, p_nick: String, p_occupants: Array = [], p_affiliation: String = "", p_role: String = "") -> void:
 	_exit_selection()
 	_peer = p_room
@@ -1497,7 +1530,7 @@ func set_room(p_room: String, p_nick: String, p_occupants: Array = [], p_affilia
 	_leave_btn.visible = true
 	_room_menu_btn.visible = true
 	_apply_header_actions()
-	_set_tools_visible(false)
+	_set_tools_visible(true)
 	_messages = []
 	_pending_actions = null
 	_clear_actions()
@@ -1523,8 +1556,8 @@ func set_room_subject(p_subject: String) -> void:
 	if _room != "":
 		_title.hint_tooltip = _room + (("\n" + p_subject) if p_subject != "" else "")
 
-# En salas se suprimen adjuntos y voz (comportamiento previo): se deshabilitan
-# el botón de adjuntar y el arranque de grabación por gesto/tap.
+# Habilita/deshabilita el botón de adjuntar y el arranque de grabación por
+# gesto/tap. En 1:1 y en salas queda habilitado (paridad).
 func _set_tools_visible(p_visible: bool) -> void:
 	_attach_enabled = p_visible
 	_voice_enabled = p_visible

@@ -189,14 +189,19 @@ func _init():
 	check(p._rec_phase == "held" and not p._rec_cancel, "volver del cancelar: reanuda")
 	p.set_recording(false, 0)
 
-	# --- Modo sala: adjuntos y voz deshabilitados (sin regresión) ---
+	# --- Modo sala: adjuntos y voz habilitados (paridad con 1:1) ---
 	p.set_room("sala@conference.h", "yo", [])
-	check(not p._attach_enabled and not p._voice_enabled, "sala: adjuntos/voz off")
-	check(p._attach_btn.disabled, "sala: botón adjuntar deshabilitado")
+	check(p._attach_enabled and p._voice_enabled, "sala: adjuntos/voz on")
+	check(not p._attach_btn.disabled, "sala: botón adjuntar habilitado")
+	# La voz en sala se comporta como en 1:1 (clic en el tail bloquea grabación).
 	_toggles.clear()
+	p.set_recording(false, 0)
 	p._gesture_press(-2, Vector2(100, 100))
+	check(p._rec_phase == "armed_click", "sala: tail arma grabación")
 	p._gesture_release()
-	check(_toggles.empty() and p._rec_phase == "idle", "sala: tail vacío no graba")
+	check(p._rec_phase == "locked" and p._recording, "sala: voz bloqueada como 1:1")
+	check(_toggles.size() == 1 and _toggles[0] == true, "sala: voice_toggle(true)")
+	p.set_recording(false, 0)
 	p.set_peer("a@h")
 	check(p._attach_enabled and not p._attach_btn.disabled, "1:1: adjuntos habilitados")
 

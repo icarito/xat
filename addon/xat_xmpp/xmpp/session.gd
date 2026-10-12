@@ -654,7 +654,10 @@ func send_media_file(p_to_bare: String, p_path: String, p_mime: String = "", p_d
 	# cuerpo por la URL cuando termina.
 	if store != null and store.available():
 		var placeholder = ctx["caption"] if ctx["caption"] != "" else ctx["filename"]
-		store.record_message({"bare_jid": p_to_bare, "body": placeholder, "direction": "out", "ts": _now_iso(), "request_id": request_id, "attach": _attach_of(ctx, "uploading", "")})
+		var rec = {"bare_jid": p_to_bare, "body": placeholder, "direction": "out", "ts": _now_iso(), "request_id": request_id, "attach": _attach_of(ctx, "uploading", "")}
+		if is_room(p_to_bare):
+			rec["sender"] = room_nick(p_to_bare)
+		store.record_message(rec)
 	emit_signal("media_upload_state", p_to_bare, request_id, "uploading", "")
 	if not _upload_host_known:
 		_upload_queue.append(ctx)
@@ -848,7 +851,13 @@ func _on_upload_finished(id: String, ok: bool, _code: int, _payload, error: Stri
 		_fail_upload(ctx, error)
 		return
 	var url = str(ctx["get_url"])
-	var stanza = Message.build_media(ctx["to"], url, ctx["caption"], ctx["request_id"], _new_id("o"), true)
+	var stanza
+	if is_room(ctx["to"]):
+		# En sala el adjunto va como groupchat (mismo origin-id que la fila
+		# optimista, para que el eco propio se dedupe).
+		stanza = Muc.build_groupchat_media(ctx["to"], url, ctx["caption"], ctx["request_id"], ctx["request_id"])
+	else:
+		stanza = Message.build_media(ctx["to"], url, ctx["caption"], ctx["request_id"], _new_id("o"), true)
 	var rc = _transport.send(stanza.to_xml())
 	if rc == 0:
 		last_sent_id = ctx["request_id"]
@@ -1489,6 +1498,7 @@ func _on_muc_message(rec: Dictionary) -> void:
 			"request_id": str(rec.get("origin_id", "")) if str(rec.get("origin_id", "")) != "" else str(rec.get("id", "")),
 			"encrypted": bool(rec.get("encrypted", false)),
 			"quick": rec["quick_responses"], "commands": rec["commands"],
+			"attach": rec.get("attach", {}),
 		})
 	emit_signal("message_received", rec)
 
@@ -1516,6 +1526,7 @@ func _handle_muc_mam(rec: Dictionary, p_room: String, p_nick: String) -> void:
 			"request_id": rec["id"],
 			"encrypted": bool(rec.get("encrypted", false)),
 			"quick": rec["quick_responses"], "commands": rec["commands"],
+			"attach": rec.get("attach", {}),
 		})
 	emit_signal("message_received", rec)
 

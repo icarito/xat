@@ -20,6 +20,7 @@ const Credentials = preload("res://addons/xat_xmpp/xmpp/credentials.gd")
 const XatTheme = preload("res://addons/xat_xmpp/ui/xat_theme.gd")
 const MindPanel = preload("res://addons/xat_xmpp/ui/mind_panel.gd")
 const AgentOrb = preload("res://addons/xat_xmpp/ui/agent_orb.gd")
+const RoomPanel = preload("res://addons/xat_xmpp/ui/room_panel.gd")
 const AvatarBadge = preload("res://addons/xat_xmpp/ui/avatar_badge.gd")
 const Ns = preload("res://addons/xat_xmpp/xmpp/namespaces.gd")
 const Pep = preload("res://addons/xat_xmpp/xmpp/pep.gd")
@@ -60,6 +61,10 @@ var _mind
 var _mind_pinned := false # abierto a mano en pantallas angostas
 var _roster_hidden := false # desktop: roster colapsado (más ancho para el chat)
 var _mind_hidden := false   # desktop: mente colapsada a mano
+var _room_panel           # pane de participantes de la sala (XEP-0045)
+var _room_agent := ""     # bare del ocupante agente mostrado en la mente (sala)
+var _room_pane_open := false # pane de participantes abierto (vista angosta)
+var _participants_btn
 var _roster_toggle
 var _search_toggle
 var _plus_btn
@@ -255,6 +260,12 @@ func _ready() -> void:
 	_split.add_child(_mind)
 	_mind.connect("command_requested", self, "_on_agent_command")
 	_mind.connect("back_requested", self, "_on_mind_back")
+	# Pane de participantes de la sala (mismo carril que la mente).
+	_room_panel = RoomPanel.new()
+	_room_panel.visible = false
+	_split.add_child(_room_panel)
+	_room_panel.connect("occupant_selected", self, "_on_occupant_selected")
+	_room_panel.connect("back_requested", self, "_on_room_panel_back")
 	# Sidebar de navegación/acciones (sólo móvil landscape), a la derecha.
 	_build_sidebar()
 	# Mini-orbe en el header del chat: abre/cierra la mente en pantallas angostas.
@@ -290,6 +301,15 @@ func _ready() -> void:
 	_search_toggle.hint_tooltip = "Buscar en la conversación"
 	_search_toggle.connect("pressed", self, "_on_search_toggle")
 	_chat.header_slot.add_child(_search_toggle)
+	# Participantes (sólo en salas): muestra/oculta el pane de ocupantes.
+	_participants_btn = Button.new()
+	_participants_btn.text = "👥"
+	_participants_btn.flat = true
+	_participants_btn.focus_mode = Control.FOCUS_NONE
+	_participants_btn.hint_tooltip = "Participantes de la sala"
+	_participants_btn.visible = false
+	_participants_btn.connect("pressed", self, "_toggle_room_pane")
+	_chat.header_slot.add_child(_participants_btn)
 	_header_avatar = AvatarBadge.new(34.0)
 	_chat.header_slot.add_child(_header_avatar)
 	_header_orb = AgentOrb.new()
@@ -635,6 +655,8 @@ func _on_peer_selected(p_bare: String) -> void:
 	if session.is_room(p_bare):
 		_open_room(p_bare)
 		return
+	_room_agent = ""
+	_room_pane_open = false
 	_header_avatar.visible = true
 	_header_avatar.bare = p_bare
 	_header_avatar.set_texture(session.avatars.get(p_bare))
@@ -687,8 +709,12 @@ func _refresh_rooms() -> void:
 func _open_room(p_room: String) -> void:
 	_on_typing_timeout()
 	_show_roster = false
+	_room_agent = ""
+	_room_pane_open = not _single_pane()
 	_header_avatar.visible = false
 	_header_orb.visible = false
+	_room_panel.set_room(p_room, session.room_nick(p_room), session.muc_occupants(p_room))
+	_sync_room_agents()
 	_update_mind_visibility()
 	_chat.set_room(p_room, session.room_nick(p_room), session.muc_occupants(p_room), session.muc_affiliation(p_room), session.muc_role(p_room))
 	if not (OS.get_name() in ["Android", "iOS"]):
@@ -736,6 +762,8 @@ func _on_room_leave_requested() -> void:
 	session.leave_room(room)
 	_peer = ""
 	_show_roster = true
+	_room_agent = ""
+	_room_pane_open = false
 	_header_avatar.visible = true
 	_update_mind_visibility()
 	_refresh_rooms()
@@ -746,6 +774,8 @@ func _on_muc_joined(p_room: String) -> void:
 	if p_room == _peer:
 		_chat.update_occupants(session.muc_occupants(p_room))
 		_chat.set_room_caps(session.muc_affiliation(p_room), session.muc_role(p_room))
+		_room_panel.update_occupants(session.muc_occupants(p_room))
+		_sync_room_agents()
 	juice.haptic("tick")
 
 func _on_muc_left(p_room: String, _reason: String) -> void:
@@ -753,6 +783,8 @@ func _on_muc_left(p_room: String, _reason: String) -> void:
 	if p_room == _peer:
 		_peer = ""
 		_show_roster = true
+		_room_agent = ""
+		_room_pane_open = false
 		_header_avatar.visible = true
 		_update_mind_visibility()
 		juice.toast("Saliste de la sala")
@@ -765,6 +797,11 @@ func _on_muc_occupants_changed(p_room: String) -> void:
 	if p_room == _peer:
 		_chat.update_occupants(session.muc_occupants(p_room))
 		_chat.set_room_caps(session.muc_affiliation(p_room), session.muc_role(p_room))
+		_room_panel.update_occupants(session.muc_occupants(p_room))
+		# Si el agente mostrado salió de la sala, volvemos a la lista.
+		if _room_agent != "" and not _occupant_present(_room_agent):
+			_room_agent = ""
+		_update_mind_visibility()
 
 # El servidor rechazó el join (sala bloqueada, sólo miembros, nick en uso).
 func _on_muc_error(p_room: String, p_condition: String) -> void:
@@ -772,6 +809,8 @@ func _on_muc_error(p_room: String, p_condition: String) -> void:
 	if p_room == _peer:
 		_peer = ""
 		_show_roster = true
+		_room_agent = ""
+		_room_pane_open = false
 		_header_avatar.visible = true
 		_update_mind_visibility()
 	var msg = "No se pudo entrar a la sala"
@@ -1302,7 +1341,7 @@ func _send_attachment(peer: String, path: String, mime: String, duration_ms: int
 		juice.play("alert")
 		juice.toast("No se pudo enviar el adjunto", P.ERROR)
 		return
-	_chat.add_message({
+	var out = {
 		"from": session.bare(),
 		"to": peer,
 		"body": caption if caption != "" else path.get_file(),
@@ -1314,7 +1353,11 @@ func _send_attachment(peer: String, path: String, mime: String, duration_ms: int
 			"name": path.get_file(), "size": size,
 			"duration_ms": duration_ms, "state": "uploading", "local": path,
 		},
-	})
+	}
+	if session.is_room(peer):
+		out["muc"] = true
+		out["sender"] = session.room_nick(peer)
+	_chat.add_message(out)
 	_roster.touch(peer, _now_iso())
 
 func _on_media_upload_state(bare: String, request_id: String, state: String, url: String) -> void:
@@ -1668,11 +1711,15 @@ func _on_push_registration_changed(p_registered: bool, p_error: String) -> void:
 func _on_agent_state(p_bare: String, p_state: Dictionary) -> void:
 	_roster.set_agent_state(p_bare, p_state)
 	_sync_tool(p_bare, str(p_state.get("tool", "")))
+	if _room_panel != null and _peer != "" and session.is_room(_peer):
+		_room_panel.set_agent(p_bare, p_state, session.presence_model.is_online(p_bare))
 	if p_bare == _peer:
 		_mind.set_state(p_state)
 		_header_orb.set_state(p_state)
 		_chat.set_thinking(str(p_state.get("activity", "")) in ["processing", "busy"])
 		_update_mind_visibility()
+	elif p_bare == _room_agent:
+		_mind.set_state(p_state)
 
 # Telemetría trae sólo la tool actual: un cambio cierra la card previa y abre otra.
 func _sync_tool(p_bare: String, p_tool: String) -> void:
@@ -1691,19 +1738,28 @@ func _sync_tool(p_bare: String, p_tool: String) -> void:
 		juice.play("tool_start")
 		juice.haptic("tick")
 
-# Panel "mente" sólo para agentes (con telemetría) y si hay ancho, o fijado a mano.
+# Panel "mente": para el agente 1:1 (con telemetría) o para un ocupante agente
+# de la sala; el pane de participantes ocupa el mismo carril cuando hay lista.
 func _update_mind_visibility() -> void:
-	var is_agent = _peer != "" and session.agent_model.has_agent(_peer)
 	var single = _single_pane()
+	var in_room = _peer != "" and session.is_room(_peer)
+	var is_agent = _peer != "" and session.agent_model.has_agent(_peer)
+	var room_agent = in_room and _room_agent != "" and session.agent_model.has_agent(_room_agent)
 	# Un solo panel (móvil/angosto): la mente ocupa toda la pantalla. Ancho: sólo
 	# convive con los demás paneles si hay espacio o si se fijó a mano.
-	var mind = is_agent and not _mind_hidden and (_mind_pinned if single else (rect_size.x >= MIND_MIN_WIDTH or _mind_pinned))
-	_update_panes(single, mind)
+	var mind = room_agent or (is_agent and not _mind_hidden and (_mind_pinned if single else (rect_size.x >= MIND_MIN_WIDTH or _mind_pinned)))
+	var room_pane = in_room and not room_agent and _room_pane_open
+	_update_panes(single, mind, room_pane)
 	_mind.visible = mind
 	_mind.set_back_visible(mind and single)
+	if _room_panel != null:
+		_room_panel.visible = room_pane
+		_room_panel.set_back_visible(room_pane and single)
 	# El mini-orbe del header aparece cuando la mente no cabe, o siempre en un
 	# solo panel (móvil/landscape) para poder abrirla.
 	_header_orb.visible = is_agent and (single or rect_size.x < MIND_MIN_WIDTH or _mind_hidden)
+	if _participants_btn != null:
+		_participants_btn.visible = in_room
 	_brain_button.visible = FleetSnapshot.brain_url(_fleet_snapshot, _peer) != ""
 	# El ☰ sólo tiene sentido cuando hay roster que colapsar (desktop, 2 paneles).
 	if _roster_toggle != null:
@@ -1938,7 +1994,7 @@ func _on_sidebar_room() -> void:
 	_on_join_room_requested()
 
 func _on_sidebar_occ() -> void:
-	_chat.toggle_occupants()
+	_toggle_room_pane()
 
 func _on_sidebar_act() -> void:
 	_chat.popup_room_menu()
@@ -1968,7 +2024,8 @@ func _landscape_columns() -> int:
 	return int(clamp(rect_size.x / 260.0, 2.0, 4.0))
 
 func _on_agent_command(p_node: String) -> void:
-	var res = session.presence_model.best(_peer)
+	var target = _room_agent if _room_agent != "" else _peer
+	var res = session.presence_model.best(target)
 	if res == null:
 		_mind.show_note("El agente no está en línea")
 		return
@@ -2004,15 +2061,16 @@ func _celebrate() -> void:
 	juice.burst(get_global_mouse_position(), P.OK)
 	juice.haptic("success")
 
-# Angosto: un panel por vez (roster, chat o mente); ancho: ambos (+ mente si cabe).
-func _update_panes(p_single: bool, p_mind: bool) -> void:
+# Angosto: un panel por vez (roster, chat, participantes o mente); ancho: ambos
+# (+ participantes/mente en su carril si cabe).
+func _update_panes(p_single: bool, p_mind: bool, p_room: bool) -> void:
 	var landscape = _is_mobile_landscape()
 	if _sidebar != null:
 		_sidebar.visible = landscape
 	if p_single:
 		var roster = _peer == "" or _show_roster
-		_roster.visible = roster and not p_mind
-		_chat.visible = not roster and not p_mind
+		_roster.visible = roster and not p_mind and not p_room
+		_chat.visible = not roster and not p_mind and not p_room
 	else:
 		# Desktop: ambos paneles, pero el roster se puede colapsar a mano para
 		# ganar ancho cuando no caben los tres (roster + chat + mente).
@@ -2020,6 +2078,8 @@ func _update_panes(p_single: bool, p_mind: bool) -> void:
 		_chat.visible = true
 	_roster.size_flags_horizontal = Control.SIZE_EXPAND_FILL if p_single else 0
 	_mind.size_flags_horizontal = Control.SIZE_EXPAND_FILL if p_single else 0
+	if _room_panel != null:
+		_room_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL if p_single else 0
 	# En landscape la navegación no tiene pestañas: el botón atrás del header
 	# vuelve al roster, y el título vive en el sidebar (cabecera compacta).
 	_chat.set_nav_visible(p_single and _chat.visible, not landscape)
@@ -2030,7 +2090,9 @@ func _update_panes(p_single: bool, p_mind: bool) -> void:
 	# Los botones del roster (añadir/sala y pie de ajustes) se ocultan cuando el
 	# roster convive con el chat en desktop: estorban sobre la vista de mensajes.
 	# En pantalla de un solo panel (móvil) el roster los muestra.
-	_roster.set_chrome_visible(p_single)
+	# Los botones del roster (añadir/sala y pie de ajustes: sonido/vibración/A±)
+	# se ocultan cuando el sidebar de landscape ya los ofrece (para no duplicar).
+	_roster.set_chrome_visible(p_single and not landscape)
 	_chat.set_header_actions_visible(not landscape)
 	if _plus_btn != null:
 		_plus_btn.visible = not p_single
@@ -2055,8 +2117,62 @@ func _on_back() -> void:
 	_update_mind_visibility()
 
 func _on_mind_back() -> void:
+	if _peer != "" and session.is_room(_peer) and _room_agent != "":
+		_room_agent = ""
+		_update_mind_visibility()
+		return
 	_mind_pinned = false
 	_update_mind_visibility()
+
+# --- Participantes de la sala ---
+
+# Tocar un ocupante: si es agente, muestra su mente (actividad/telemetría);
+# si no, avisa que no hay telemetría.
+func _on_occupant_selected(p_nick: String, p_bare: String) -> void:
+	if p_bare == "" or not session.agent_model.has_agent(p_bare):
+		juice.toast("%s no es un agente" % p_nick)
+		return
+	_room_agent = p_bare
+	_mind.set_agent(p_bare)
+	_mind.set_state(session.agent_model.get_state(p_bare))
+	_mind.set_connected(session.presence_model.is_online(p_bare))
+	_update_mind_visibility()
+
+# Atrás desde el pane de participantes: vuelve al chat.
+func _on_room_panel_back() -> void:
+	_room_pane_open = false
+	_room_agent = ""
+	_update_mind_visibility()
+
+# Muestra/oculta el pane de participantes (vista angosta); vuelve a la lista.
+func _toggle_room_pane() -> void:
+	_room_agent = ""
+	_room_pane_open = not _room_pane_open
+	_update_mind_visibility()
+
+# Sembrar los agentes ya conocidos en el pane de participantes al abrir la sala.
+func _sync_room_agents() -> void:
+	if _room_panel == null:
+		return
+	for b in session.roster_model.bare_jids():
+		var bare = str(b)
+		if not session.agent_model.has_agent(bare):
+			continue
+		_room_panel.set_agent(bare, session.agent_model.get_state(bare), session.presence_model.is_online(bare))
+		if session.avatars.has(bare):
+			_room_panel.set_avatar(bare, session.avatars[bare])
+
+# ¿El bare sigue presente como ocupante de la sala activa?
+func _occupant_present(p_bare: String) -> bool:
+	if _peer == "" or not session.is_room(_peer):
+		return false
+	for occ in session.muc_occupants(_peer):
+		var jid = str(occ.get("jid", ""))
+		if jid != "" and _bare(jid) == p_bare:
+			return true
+		if jid == "" and str(occ.get("nick", "")) == p_bare.split("@")[0]:
+			return true
+	return false
 
 # Atrás del sistema (Android): navega hacia atrás en orden — diálogo fuente,
 # fleet, lightbox, mente, conversación — y sólo sale desde el roster raíz.
@@ -2234,6 +2350,8 @@ func _persist_scale() -> void:
 
 func _on_avatar_changed(p_bare: String, p_tex) -> void:
 	_roster.set_avatar(p_bare, p_tex)
+	if _room_panel != null:
+		_room_panel.set_avatar(p_bare, p_tex)
 	if p_bare == _peer:
 		_header_avatar.set_texture(p_tex)
 	if p_bare == session.bare():

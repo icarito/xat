@@ -96,15 +96,18 @@ cliente).
 ## Salas (MUC, XEP-0045)
 
 - `xmpp/muc.gd` — helper puro (testeable headless): builders de join/leave/
-  groupchat, parser de presencia de sala (códigos 110 self / 201 creada / 210
-  renombrado / 307 expulsado / 301 vetado), parser de invitaciones, estado de
-  ocupantes y `disco_has_muc`.
+  groupchat (texto y adjunto, `build_groupchat_media`), parser de presencia de
+  sala (códigos 110 self / 201 creada / 210 renombrado / 307 expulsado / 301
+  vetado), parser de invitaciones, estado de ocupantes y `disco_has_muc`.
 - `session.gd` — `_rooms` (nick/sujeto/joined por sala) + `_muc_state` (nick ->
   ocupante). `_on_presence` rutea a la sala **antes** de `presence_model.update`,
   de modo que una presencia de sala nunca contamina el anillo verde de contactos.
   `_on_message` rutea `type=groupchat` (vivo o MAM) por la sala: sin recibos ni
   chat states, dedupe del eco propio por `origin-id`/id de stanza, guardado con
-  `sender=nick`. Autojoin de las salas persistidas tras `send_presence()`.
+  `sender=nick` y `attach` (adjuntos entrantes). Los adjuntos salientes suben por
+  XEP-0363 y se envían como groupchat (`Muc.build_groupchat_media`), con el
+  `origin-id` igual al `request_id` optimista para dedupe. Autojoin de las salas
+  persistidas tras `send_presence()`.
 - `store.gd` — columna `sender` en `messages` y tabla `rooms(bare_jid, nick,
   autojoin)`. El dedupe global de `open()` incluye `sender`, para no plegar a dos
   ocupantes que digan lo mismo en el mismo minuto.
@@ -113,8 +116,8 @@ cliente).
   componente descubierto). Invitaciones como tarjeta en la banda de solicitudes.
 - `chat_panel.gd` + `bubble.gd` — modo sala: título = sala, botón de ocupantes
   (oprimir un nick inserta `@nick ` en el composer), chip de remitente oprimible
-  en la primera burbuja de cada grupo entrante, y se suprimen quick/approvals/
-  estados/adjuntos.
+  en la primera burbuja de cada grupo entrante, y quick/approvals/estados se
+  suprimen. Adjuntos y notas de voz quedan habilitados (paridad con el 1:1).
 - **Menú de sala** (botón `⋯`): "Invitar a contacto" (`invite_dialog.gd`, elige
   contacto del roster + razón), "Cambiar tema" (`text_prompt_dialog.gd`),
   "Ajustes de sala" y "Destruir sala" (estos dos sólo dueño/admin/dueño).

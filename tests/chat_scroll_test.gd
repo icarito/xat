@@ -52,6 +52,19 @@ func _init():
 		yield(self, "idle_frame")
 	check(m._chat._scroll.scroll_vertical < before, "el arrastre vertical mueve la lista hacia arriba (%d -> %d)" % [before, m._chat._scroll.scroll_vertical])
 
+	# macOS: el scroll del trackpad llega como PanGesture; debe scrollear igual.
+	m._chat._scroll.scroll_vertical = int(extent)
+	yield(self, "idle_frame")
+	var pan = InputEventPanGesture.new()
+	pan.position = c
+	pan.delta = Vector2(0, -1.0)
+	var before_pan = m._chat._scroll.scroll_vertical
+	m._chat._input(pan)
+	check(m._chat._smooth.is_active() or abs(m._chat._smooth._vel) > 0.01, "PanGesture activa el scroll (trackpad)")
+	for i in range(30):
+		yield(self, "idle_frame")
+	check(m._chat._scroll.scroll_vertical != before_pan, "PanGesture mueve la lista")
+
 	m.free()
 	if _fail == 0:
 		print("CHAT_SCROLL_CHECK_OK")

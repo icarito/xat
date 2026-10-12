@@ -51,6 +51,25 @@ static func build_groupchat(p_room_bare: String, p_body: String, p_id: String = 
 	m.add_child_stanza(body)
 	return m
 
+# Mensaje de sala con adjunto (XEP-0066): mismo `type=groupchat` que
+# `build_groupchat` pero el link va en el body (para clientes sin OOB) y en
+# `<x xmlns='jabber:x:oob'><url/></x>`. Un pie de foto opcional encabeza el body.
+static func build_groupchat_media(p_room_bare: String, p_url: String, p_caption: String = "", p_id: String = "", p_origin_id: String = ""):
+	var caption = p_caption.strip_edges()
+	var body_text = p_url if caption == "" else caption + "\n" + p_url
+	var m = build_groupchat(p_room_bare, body_text, p_id, p_origin_id)
+	var x = Stanza.new("x")
+	x.set_attr("xmlns", NS.OOB)
+	var url = Stanza.new("url")
+	url.append_text(p_url)
+	x.add_child_stanza(url)
+	if caption != "":
+		var desc = Stanza.new("desc")
+		desc.append_text(caption)
+		x.add_child_stanza(desc)
+	m.add_child_stanza(x)
+	return m
+
 # --- Parsers ---
 
 # Presencia de sala -> estado normalizado. `from` es `room/nick`.

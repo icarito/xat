@@ -33,6 +33,17 @@ func _init():
 	check(gx.find('xmlns="urn:xmpp:sid:0"') >= 0, "groupchat origin-id 0359")
 	check(gx.find("receipts") < 0 and gx.find("chatstates") < 0, "groupchat sin recibos/estados")
 
+	# Groupchat con adjunto: OOB + link en el body.
+	var gm = Muc.build_groupchat_media("sala@conference.h", "https://h/media/foto.jpg", "mirá", "m2", "m2")
+	var gmx = gm.to_xml()
+	check(gm.get_attr("type") == "groupchat" and gm.get_attr("to") == "sala@conference.h", "groupchat media attrs")
+	check(gmx.find('<x xmlns="jabber:x:oob">') >= 0 and gmx.find("<url>https://h/media/foto.jpg</url>") >= 0, "groupchat media oob url")
+	check(gmx.find("<body>mirá\nhttps://h/media/foto.jpg</body>") >= 0, "groupchat media body caption+link")
+	check(gmx.find("<desc>mirá</desc>") >= 0, "groupchat media oob desc")
+	check(gmx.find('xmlns="urn:xmpp:sid:0"') >= 0, "groupchat media origin-id")
+	var gm0 = Muc.build_groupchat_media("sala@conference.h", "https://h/f.bin", "", "m3", "m3")
+	check(gm0.to_xml().find("<body>https://h/f.bin</body>") >= 0 and gm0.to_xml().find("desc") < 0, "groupchat media sin caption")
+
 	# parse_presence: entrada normal de otro ocupante (sala no anónima).
 	var p1 = Stanza.parse('<presence from="sala@conference.h/joe" to="yo@h/x"><x xmlns="http://jabber.org/protocol/muc#user"><item affiliation="member" role="participant" jid="joe@h/phone"/></x></presence>')
 	var r1 = Muc.parse_presence(p1)

@@ -287,20 +287,85 @@ func is_text_visible() -> bool:
 # soltar. Así se puede elegir sólo una parte del mensaje.
 var _drag_active := false
 var _last_global := Vector2.ZERO
+var _anchor := Vector2.ZERO
+var _extending := false
+var _handle_a := Vector2.ZERO # extremos de la selección (global), para los tiradores
+var _handle_b := Vector2.ZERO
+var _active_handle := ""
 
+const HANDLE_GRAB := 32.0
+
+func handles() -> Array:
+	return [_handle_a, _handle_b]
+
+# Pulsación larga: selecciona la palabra bajo el dedo y coloca los tiradores en
+# el punto de pulsación (se separan al arrastrar/ajustar).
 func begin_selection_at(p_global: Vector2) -> void:
+	_anchor = p_global
+	_handle_a = p_global
+	_handle_b = p_global
+	_active_handle = ""
+	_extending = false
 	_label.deselect()
 	_drag_active = true
-	_feed_mouse(p_global, true)
+	_feed_doubleclick(p_global)
 
 func drag_selection(p_global: Vector2) -> void:
-	if _drag_active:
-		_feed_motion(p_global)
+	if not _drag_active:
+		return
+	if not _extending:
+		# El doble clic selecciona la palabra pero no fija el ancla del
+		# arrastre (`selection.click`); la fijamos acá desde el punto de pulsación.
+		_extending = true
+		_label.deselect()
+		_feed_mouse(_anchor, true)
+	_feed_motion(p_global)
+	_handle_a = _anchor
+	_handle_b = p_global
+
+# Ajuste por tiradores: mueve el extremo más cercano al toque; el otro queda
+# fijo. Funciona aunque el dedo se haya levantado antes (se puede volver a
+# agarrar la selección). Devuelve el tirador elegido ("" si no hay selección).
+func begin_handle_drag(p_global: Vector2) -> String:
+	if not _drag_active and _label.get_selected_text() == "":
+		return ""
+	_active_handle = "a" if p_global.distance_to(_handle_a) <= p_global.distance_to(_handle_b) else "b"
+	_drag_active = true
+	return _active_handle
+
+func drag_handle(p_global: Vector2) -> void:
+	if _active_handle == "":
+		return
+	var fixed = _handle_b if _active_handle == "a" else _handle_a
+	_label.deselect()
+	_feed_mouse(fixed, true)
+	_feed_motion(p_global)
+	if _active_handle == "a":
+		_handle_a = p_global
+	else:
+		_handle_b = p_global
+
+func is_handle_dragging() -> bool:
+	return _active_handle != ""
 
 func end_selection_drag() -> void:
+	_active_handle = ""
 	if _drag_active:
 		_drag_active = false
+		_extending = false
 		_feed_mouse(_last_global, false)
+
+func _feed_doubleclick(p_global: Vector2) -> void:
+	_last_global = p_global
+	var local = _label.get_global_transform().affine_inverse().xform(p_global)
+	var ev = InputEventMouseButton.new()
+	ev.button_index = BUTTON_LEFT
+	ev.pressed = true
+	ev.doubleclick = true
+	ev.button_mask = BUTTON_MASK_LEFT
+	ev.position = local
+	ev.global_position = p_global
+	_label.call("_gui_input", ev)
 
 # Toque corto (táctil): reenvía el clic al label para que, si cae sobre un
 # enlace, RichTextLabel emita meta_clicked y lo abramos.
@@ -325,6 +390,9 @@ func begin_selection() -> void:
 func end_selection() -> void:
 	if _drag_active:
 		end_selection_drag()
+	_active_handle = ""
+	_handle_a = Vector2.ZERO
+	_handle_b = Vector2.ZERO
 	_label.deselect()
 
 func selected_text() -> String:
@@ -336,6 +404,7 @@ func _feed_mouse(p_global: Vector2, p_pressed: bool) -> void:
 	var ev = InputEventMouseButton.new()
 	ev.button_index = BUTTON_LEFT
 	ev.pressed = p_pressed
+	ev.button_mask = BUTTON_MASK_LEFT if p_pressed else 0
 	ev.position = local
 	ev.global_position = p_global
 	_label.call("_gui_input", ev)
