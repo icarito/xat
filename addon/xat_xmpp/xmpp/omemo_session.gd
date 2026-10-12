@@ -99,15 +99,23 @@ func _encrypt_for(p_bare: String, p_dev: int, p_bundle: Dictionary, p_key48: Poo
 		var dr = _omemo.dr_start_active(act["ss"], p_bundle["spk"], act["ad"], p_key48)
 		if dr.empty():
 			return {"ok": false, "error": "dr"}
-		_save_session(p_bare, p_dev, act["ad"], dr["state"], false)
+		var kex := {"pk_id": int(prekey["id"]), "spk_id": int(p_bundle["spk_id"]), "ik": act["ik"], "ek": act["ek"]}
+		_save_session(p_bare, p_dev, act["ad"], dr["state"], false, {"kex": kex})
 		_mark_trust(p_bare, p_dev, p_bundle["ik"])
-		var kx = Omemo.encode_key_exchange(prekey["id"], p_bundle["spk_id"], act["ik"], act["ek"], dr["ciphertext"])
-		return {"ok": true, "rid": p_dev, "kex": true, "bytes": kx}
+		return {"ok": true, "rid": p_dev, "kex": true, "bytes": _wrap_kex(kex, dr["ciphertext"])}
 	var dr2 = _omemo.dr_encrypt(sess["state"], sess["ad"], p_key48)
 	if dr2.empty():
 		return {"ok": false, "error": "dr"}
-	_save_session(p_bare, p_dev, sess["ad"], dr2["state"], true)
+	# Hasta recibir algo del par en esta sesión, cada mensaje repite el kex
+	# (XEP-0384 §5.4.2): si el primero se perdió, el par igual puede abrirla.
+	var pending_kex = sess["kex"] if not sess["confirmed"] else {}
+	_save_session(p_bare, p_dev, sess["ad"], dr2["state"], sess["confirmed"], {"kex": pending_kex, "peer_ek": sess["peer_ek"]})
+	if not pending_kex.empty():
+		return {"ok": true, "rid": p_dev, "kex": true, "bytes": _wrap_kex(pending_kex, dr2["ciphertext"])}
 	return {"ok": true, "rid": p_dev, "kex": false, "bytes": dr2["ciphertext"]}
+
+func _wrap_kex(p_kex: Dictionary, p_message: PoolByteArray) -> PoolByteArray:
+	return Omemo.encode_key_exchange(p_kex["pk_id"], p_kex["spk_id"], p_kex["ik"], p_kex["ek"], p_message)
 
 func _build_encrypted(p_bare: String, p_keys: Array, p_payload: PoolByteArray):
 	var enc = Stanza.new("encrypted")
@@ -156,7 +164,7 @@ func decrypt(p_from_bare: String, p_enc) -> Dictionary:
 		if dr.empty():
 			return {"ok": false, "error": "dr"}
 		key48 = dr["plaintext"]
-		_save_session(p_from_bare, sender_dev, sess["ad"], dr["state"], true)
+		_save_session(p_from_bare, sender_dev, sess["ad"], dr["state"], true, {"peer_ek": sess["peer_ek"]})
 
 	var pt = _omemo.payload_decrypt(payload, key48)
 	if pt.empty():
@@ -198,6 +206,16 @@ func _decrypt_kex(p_from_bare: String, p_sender_dev: int, p_key_bytes: PoolByteA
 	var kx = Omemo.parse_key_exchange(p_key_bytes)
 	if kx["ek"].empty() or kx["message"].empty():
 		return {"ok": false, "error": "kex"}
+	# El activo repite el mismo kex hasta que le respondemos: si ya abrimos esa
+	# sesión (mismo EK), seguirla. Su prekey ya se consumió con el primero.
+	var sess = _load_session(p_from_bare, p_sender_dev)
+	if sess != null and not sess["peer_ek"].empty() \
+			and Marshalls.raw_to_base64(sess["peer_ek"]) == Marshalls.raw_to_base64(kx["ek"]):
+		var dr0 = _omemo.dr_decrypt(sess["state"], sess["ad"], kx["message"])
+		if dr0.empty():
+			return {"ok": false, "error": "dr"}
+		_save_session(p_from_bare, p_sender_dev, sess["ad"], dr0["state"], true, {"peer_ek": kx["ek"]})
+		return {"ok": true, "key48": dr0["plaintext"]}
 	var prekey_priv = _device.prekey_priv(kx["pk_id"])
 	if prekey_priv.empty():
 		return {"ok": false, "error": "prekey"}
@@ -210,28 +228,45 @@ func _decrypt_kex(p_from_bare: String, p_sender_dev: int, p_key_bytes: PoolByteA
 	var dr = _omemo.dr_start_passive(pas["ss"], spk_priv, pas["ad"], kx["message"])
 	if dr.empty() or not dr.has("plaintext"):
 		return {"ok": false, "error": "dr"}
-	_save_session(p_from_bare, p_sender_dev, pas["ad"], dr["state"], true)
+	_save_session(p_from_bare, p_sender_dev, pas["ad"], dr["state"], true, {"peer_ek": kx["ek"]})
 	_mark_trust(p_from_bare, p_sender_dev, kx["ik"])
 	_device.consume_prekey(kx["pk_id"])
 	return {"ok": true, "key48": dr["plaintext"]}
 
 # --- Persistencia de sesiones y confianza ---
 
-func _save_session(p_bare: String, p_dev: int, p_ad: PoolByteArray, p_state: PoolByteArray, p_confirmed: bool) -> void:
-	_store.set_json(_S_SESSION + p_bare + "." + str(p_dev), {
+# `kex`: encabezado del key exchange que repetimos mientras la sesión activa no
+# esté confirmada. `peer_ek`: EK del kex con el que el par abrió la sesión, para
+# reconocer sus repeticiones.
+func _save_session(p_bare: String, p_dev: int, p_ad: PoolByteArray, p_state: PoolByteArray, p_confirmed: bool, p_extra: Dictionary = {}) -> void:
+	var v := {
 		"ad": Marshalls.raw_to_base64(p_ad),
 		"state": Marshalls.raw_to_base64(p_state),
 		"confirmed": p_confirmed,
-	})
+	}
+	var kex: Dictionary = p_extra.get("kex", {})
+	if not kex.empty():
+		v["kex"] = {"pk_id": kex["pk_id"], "spk_id": kex["spk_id"],
+			"ik": Marshalls.raw_to_base64(kex["ik"]), "ek": Marshalls.raw_to_base64(kex["ek"])}
+	var peer_ek: PoolByteArray = p_extra.get("peer_ek", PoolByteArray())
+	if not peer_ek.empty():
+		v["peer_ek"] = Marshalls.raw_to_base64(peer_ek)
+	_store.set_json(_S_SESSION + p_bare + "." + str(p_dev), v)
 
 func _load_session(p_bare: String, p_dev: int):
 	var v = _store.get_json(_S_SESSION + p_bare + "." + str(p_dev), null)
 	if not (v is Dictionary) or not v.has("ad") or not v.has("state"):
 		return null
+	var kex := {}
+	if v.get("kex") is Dictionary:
+		kex = {"pk_id": int(v["kex"]["pk_id"]), "spk_id": int(v["kex"]["spk_id"]),
+			"ik": Marshalls.base64_to_raw(str(v["kex"]["ik"])), "ek": Marshalls.base64_to_raw(str(v["kex"]["ek"]))}
 	return {
 		"ad": Marshalls.base64_to_raw(str(v["ad"])),
 		"state": Marshalls.base64_to_raw(str(v["state"])),
 		"confirmed": bool(v.get("confirmed", false)),
+		"kex": kex,
+		"peer_ek": Marshalls.base64_to_raw(str(v.get("peer_ek", ""))),
 	}
 
 func _mark_trust(p_bare: String, p_dev: int, p_ik: PoolByteArray) -> void:
