@@ -1,8 +1,8 @@
 extends Reference
 
 # Carga de adjuntos para la UI: bytes -> ImageTexture / AudioStreamSample.
-# Godot 3.6 sólo reproduce WAV (no hay AudioStreamOGGVorbis en el fork), así que
-# el audio se decodifica con el parser WAV de `media.gd`.
+# Audio: WAV (parser propio, incl. ADPCM), OGG Vorbis y MP3 si el build trae los
+# módulos, y **Ogg Opus** vía el códec nativo `OpusCodec` (modules/xmpp).
 
 const Media = preload("res://addons/xat_xmpp/xmpp/media.gd")
 const Adpcm = preload("res://addons/xat_xmpp/xmpp/adpcm.gd")
@@ -141,10 +141,53 @@ static func load_audio(p_path: String):
 	var buf = f.get_buffer(f.get_len())
 	f.close()
 	if ext == "ogg" or ext == "oga":
+		var op = _opus_stream(buf)
+		if op != null:
+			return op
 		return _stream_from_data("AudioStreamOGGVorbis", buf)
+	if ext == "opus":
+		return _opus_stream(buf)
 	if ext == "mp3":
 		return _stream_from_data("AudioStreamMP3", buf)
 	return null
+
+# Ogg Opus -> AudioStreamSample vía el módulo nativo (modules/xmpp). Si el build
+# no trae el módulo (p. ej. templates Android viejos), devuelve null.
+static func _opus_stream(p_buf: PoolByteArray):
+	if not ClassDB.class_exists("OpusCodec"):
+		return null
+	if not _contains(p_buf, "OpusHead"):
+		return null
+	var codec = ClassDB.instance("OpusCodec")
+	if codec == null:
+		return null
+	var dec = codec.decode(p_buf)
+	if not dec.has("pcm") or dec["pcm"].size() == 0:
+		return null
+	var sa = AudioStreamSample.new()
+	sa.format = AudioStreamSample.FORMAT_16_BITS
+	sa.mix_rate = int(dec["rate"])
+	sa.stereo = int(dec["channels"]) > 1
+	sa.data = dec["pcm"]
+	return sa
+
+static func _contains(p_buf: PoolByteArray, p_needle: String) -> bool:
+	var nb = p_needle.to_utf8()
+	var n = nb.size()
+	var m = p_buf.size()
+	if n == 0 or m < n:
+		return false
+	var i = 0
+	while i <= m - n:
+		var ok = true
+		for j in range(n):
+			if p_buf[i + j] != nb[j]:
+				ok = false
+				break
+		if ok:
+			return true
+		i += 1
+	return false
 
 static func _stream_from_data(p_class: String, p_data: PoolByteArray):
 	if not ClassDB.class_exists(p_class):
@@ -160,7 +203,9 @@ static func is_playable(p_path: String) -> bool:
 	if ext == "wav":
 		return true
 	if ext == "ogg" or ext == "oga":
-		return ClassDB.class_exists("AudioStreamOGGVorbis")
+		return ClassDB.class_exists("AudioStreamOGGVorbis") or ClassDB.class_exists("OpusCodec")
+	if ext == "opus":
+		return ClassDB.class_exists("OpusCodec")
 	if ext == "mp3":
 		return ClassDB.class_exists("AudioStreamMP3")
 	return false

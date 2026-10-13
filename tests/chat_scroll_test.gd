@@ -65,6 +65,41 @@ func _init():
 		yield(self, "idle_frame")
 	check(m._chat._scroll.scroll_vertical != before_pan, "PanGesture mueve la lista")
 
+	# La selección de texto no se debe cancelar por un scroll (auto-scroll del
+	# chat, inercia o mensaje nuevo); antes cualquier `scrolled` la mataba.
+	var b2 = m._chat._bubbles[m._chat._bubbles.size() - 1]
+	m._chat._press_pos = b2.text_global_rect().position + Vector2(6, 8)
+	m._chat._enter_selection(b2)
+	check(m._chat._sel_bubble == b2, "selección activa")
+	m._chat._on_scrolled(0.0)
+	check(m._chat._sel_bubble == b2, "un scroll no cancela la selección")
+	m._chat._exit_selection()
+
+	# Micro-movimiento durante el "hold": no debe scrollear ni iniciar inercia
+	# (antes el ScrollContainer hacía scroll con el temblor y mataba el hold).
+	m._chat._scroll.scroll_vertical = 200
+	yield(self, "idle_frame")
+	var before_micro = m._chat._scroll.scroll_vertical
+	var t3 = InputEventScreenTouch.new()
+	t3.index = 0
+	t3.position = c
+	t3.pressed = true
+	m._chat._input(t3)
+	var d3 = InputEventScreenDrag.new()
+	d3.index = 0
+	d3.position = c + Vector2(0, 5)
+	d3.relative = Vector2(0, 5)
+	m._chat._input(d3)
+	check(not m._chat._smooth.is_active() and abs(m._chat._smooth._vel) < 0.01, "micro-arrastre no inicia scroll")
+	for i in range(10):
+		yield(self, "idle_frame")
+	check(m._chat._scroll.scroll_vertical == before_micro, "micro-arrastre no mueve la lista")
+	var t4 = InputEventScreenTouch.new()
+	t4.index = 0
+	t4.position = c + Vector2(0, 5)
+	t4.pressed = false
+	m._chat._input(t4)
+
 	m.free()
 	if _fail == 0:
 		print("CHAT_SCROLL_CHECK_OK")

@@ -71,6 +71,7 @@ func _init():
 
 	var p = CP.new()
 	root.add_child(p)
+	p.tail_hysteresis_ms = 0 # los gestos del test son síncronos: sin anticlic
 	p.connect("message_submitted", self, "_on_msg")
 	p.connect("voice_toggle", self, "_on_toggle")
 	p.connect("voice_cancel", self, "_on_cancel")

@@ -132,6 +132,8 @@ var _press_pos := Vector2.ZERO
 var _press_moved := false
 var _last_drag_pos := Vector2.ZERO
 var _sel_bubble = null
+var _sel_scroll := 0        # posición de scroll congelada durante la selección
+var _locking_scroll := false
 var _reply_btn: Button
 var _react_btn: Button
 var _edit_btn: Button
@@ -161,6 +163,10 @@ var _header_actions := true
 # Estado del gesto de voz (máquina de estados, ver docs/input-bar-design.md §5.1).
 var _rec_phase := "idle"        # idle | armed | held | locked | cancel
 var _rec_index := -1            # índice de toque que posee el gesto (-2 = mouse)
+# Histéresis del botón de cola: tras cambiar de modo (mic<->enviar) ignora toques
+# por un momento, para no "apretar" el modo nuevo antes de que se asiente.
+var tail_hysteresis_ms := 250
+var _tail_mode_ms := 0
 var _rec_origin := Vector2.ZERO
 var _rec_arm_timer: Timer
 var _rec_cancel := false
@@ -826,6 +832,8 @@ func _update_tail() -> void:
 func _tail_set_mode(p_mode: String) -> void:
 	if _tail_btn == null:
 		return
+	if p_mode != _tail_mode:
+		_tail_mode_ms = OS.get_ticks_msec()
 	_tail_mode = p_mode
 	if p_mode == "send":
 		_tail_btn.set_glyph("send")
@@ -908,6 +916,8 @@ func _tail_hit(p_pos: Vector2) -> bool:
 	return _tail_btn.get_global_rect().grow(6).has_point(p_pos)
 
 func _gesture_press(p_index: int, p_pos: Vector2) -> void:
+	if tail_hysteresis_ms > 0 and OS.get_ticks_msec() - _tail_mode_ms < tail_hysteresis_ms:
+		return
 	if _rec_phase == "locked":
 		_rec_send()
 		return
@@ -1153,13 +1163,14 @@ func _input(p_event) -> void:
 		pressed = p_event.pressed
 		pos = p_event.position
 	elif p_event is InputEventScreenDrag:
-		# Ajustando una selección: mueve el tirador más cercano (o extiende).
+		# Ajustando una selección: mueve el tirador más cercano al arrastre.
+		# Armamos el tirador acá mismo (no dependemos de que el press lo haya
+		# hecho), así el gesto nunca se escapa al scroll.
 		if _sel_bubble != null and is_instance_valid(_sel_bubble):
+			_cancel_smooth()
 			_press_pos = p_event.position
-			if _sel_bubble.is_handle_dragging():
-				_sel_bubble.drag_handle(p_event.position)
-			else:
-				_sel_bubble.drag_selection(p_event.position)
+			_sel_bubble.begin_handle_drag(p_event.position)
+			_sel_bubble.drag_handle(p_event.position)
 			_sel_overlay.update()
 			_consume_input()
 			return
@@ -1172,19 +1183,21 @@ func _input(p_event) -> void:
 				var dx = p_event.position.x - _press_pos.x
 				if abs(dx) > 70.0 and abs(dx) > abs(p_event.position.y - _press_pos.y) * 2.0:
 					_swipe_reply(_press_pos)
-		# Arrastre vertical: desplazar el chat acá mismo. No dependemos de que el
-		# ScrollContainer lo tome: con una sola burbuja grande, el texto cubre
-		# toda la zona y antes el gesto no llegaba a scrollear.
-		if _press and not _swipe_done:
-			var d = p_event.relative
-			if is_zero_approx(d.y) and is_zero_approx(d.x):
-				d = p_event.position - _last_drag_pos
-			_last_drag_pos = p_event.position
-			if abs(d.y) > 0.01:
-				_consume_input()
-				_cancel_scroll_tween()
-				_smooth.kick(-d.y)
-				set_process(true)
+		# Consumimos SIEMPRE el drag mientras hay un press: el ScrollContainer
+		# también scrollea por drag táctil (drag_touching) y con el temblor del
+		# "hold" movía la lista y rompía la pulsación larga. El scroll propio
+		# arranca recién pasada la deadzone (_press_moved).
+		if _press:
+			_consume_input()
+			if _press_moved and not _swipe_done:
+				var d = p_event.relative
+				if is_zero_approx(d.y) and is_zero_approx(d.x):
+					d = p_event.position - _last_drag_pos
+				_last_drag_pos = p_event.position
+				if abs(d.y) > 0.01:
+					_cancel_scroll_tween()
+					_smooth.kick(-d.y)
+					set_process(true)
 		return
 	else:
 		return
@@ -1200,6 +1213,7 @@ func _input(p_event) -> void:
 		# Con selección activa: agarrar el tirador más cercano para ajustarla
 		# (funciona aunque el dedo se haya levantado antes).
 		if _sel_bubble != null and is_instance_valid(_sel_bubble):
+			_cancel_smooth()
 			_sel_bubble.begin_handle_drag(pos)
 			_sel_overlay.update()
 			_consume_input()
@@ -1257,6 +1271,8 @@ func _handle_wheel(p_event) -> bool:
 		return false
 	get_tree().set_input_as_handled()
 	_cancel_scroll_tween()
+	if _sel_bubble != null:
+		_exit_selection()
 	_smooth.kick(dy)
 	set_process(true)
 	return true
@@ -1297,6 +1313,12 @@ func _enter_selection(p_bubble) -> void:
 	if _sel_bubble != null and is_instance_valid(_sel_bubble):
 		_sel_bubble.end_selection()
 	_sel_bubble = p_bubble
+	# Detiene inercia/auto-scroll y congela el scroll: mientras se selecciona, la
+	# lista no debe moverse (ni por inercia del ScrollContainer ni por nada).
+	_cancel_smooth()
+	_cancel_scroll_tween()
+	if _scroll != null:
+		_sel_scroll = _scroll.scroll_vertical
 	_sel_bubble.begin_selection_at(_press_pos)
 	if _sel_overlay != null:
 		_sel_overlay.update()
@@ -1417,21 +1439,36 @@ func _exit_selection() -> void:
 	if _sel_overlay != null:
 		_sel_overlay.update()
 
-# Tiradores de la selección (inicio/fin), dibujados sobre el contenido.
+# Marcadores de selección (inicio/fin) con punta, dibujados sobre el contenido.
+# El cuerpo va arriba o abajo del punto para no tapar el texto resaltado.
 func _draw_sel_handles() -> void:
 	if _sel_overlay == null or _sel_bubble == null or not is_instance_valid(_sel_bubble):
 		return
 	var inv = _sel_overlay.get_global_transform().affine_inverse()
+	var rect = _sel_bubble.text_global_rect()
+	var mid_y = rect.position.y + rect.size.y * 0.5
 	for pt in _sel_bubble.handles():
 		var c = inv.xform(pt)
-		_sel_overlay.draw_circle(c, 13.0, Color(0, 0, 0, 0.35))
-		_sel_overlay.draw_circle(c, 9.5, Color(1, 1, 1, 0.95))
+		_draw_pin(c, -1.0 if pt.y >= mid_y else 1.0)
+
+func _draw_pin(c: Vector2, dir: float) -> void:
+	var r := 12.0
+	var tip := 9.0
+	var pw := r * 0.62
+	var cc = c + Vector2(0, dir * (r + tip))
+	var base = cc - Vector2(0, dir * r * 0.6)
+	var col = Palette.USER
+	_sel_overlay.draw_colored_polygon(PoolVector2Array([c + Vector2(0, 1), base + Vector2(-pw, 1), base + Vector2(pw, 1)]), Color(0, 0, 0, 0.25))
+	_sel_overlay.draw_colored_polygon(PoolVector2Array([c, base + Vector2(-pw, 0), base + Vector2(pw, 0)]), col)
+	_sel_overlay.draw_circle(cc, r, Color(0, 0, 0, 0.25))
+	_sel_overlay.draw_circle(cc, r - 1.0, col)
+	_sel_overlay.draw_circle(cc, r - 5.0, Color(1, 1, 1, 0.9))
 
 func _on_copy_selection() -> void:
 	if _sel_bubble == null or not is_instance_valid(_sel_bubble):
 		_exit_selection()
 		return
-	var t = _sel_bubble.selected_text()
+	var t = _sel_bubble.copy_text()
 	if t.strip_edges() == "":
 		t = str(_sel_bubble.rec.get("body", ""))
 	if t != "":
@@ -2153,9 +2190,13 @@ static func near_bottom(p_value: float, p_max: float, p_page: float, p_slack: fl
 	return p_max - p_page - p_value <= p_slack
 
 func _on_scrolled(p_value: float) -> void:
-	# Desplazar sale del modo selección (el texto ya no está donde se tocó).
-	if _sel_bubble != null:
-		_exit_selection()
+	# Con selección activa el scroll queda congelado en `_sel_scroll` (el gesto
+	# de mover los tiradores no debe desplazar la lista).
+	if _sel_bubble != null and not _locking_scroll and _scroll != null and int(p_value) != _sel_scroll:
+		_locking_scroll = true
+		_scroll.scroll_vertical = _sel_scroll
+		_locking_scroll = false
+		return
 	# Mientras corre el tween de "seguir al final" el destino es el fondo: no
 	# dejar que los pasos intermedios ensucien `_pinned` ni el contador.
 	if _animating:

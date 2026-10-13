@@ -38,7 +38,7 @@ func _init():
 	check(ClassDB.class_exists("AudioStreamMP3"), "decodificador MP3 (minimp3)")
 	var MU = load("res://addons/xat_xmpp/ui/media_util.gd")
 	check(MU.is_playable("a.wav") and MU.is_playable("a.ogg") and MU.is_playable("b.mp3"), "media_util: formatos reproducibles")
-	check(not MU.is_playable("voz.opus"), "media_util: opus sin decodificador")
+	check(MU.is_playable("voz.opus") == ClassDB.class_exists("OpusCodec"), "media_util: opus según módulo")
 	check(load("res://addons/xat_xmpp/xmpp/forms.gd") != null, "forms.gd compila")
 	check(load("res://addons/xat_xmpp/xmpp/commands.gd") != null, "commands.gd compila")
 	check(load("res://addons/xat_xmpp/xmpp/caps.gd") != null, "caps.gd compila")

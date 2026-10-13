@@ -31,6 +31,8 @@ func _init():
 	check(m.session != null, "sesión creada")
 	check(m._account != null and m._roster != null and m._chat != null, "paneles creados")
 	check(m._split != null and not m._split.visible, "vista de cuenta al inicio")
+	var ver = str(ProjectSettings.get_setting("application/config/version"))
+	check(m._version_label != null and m._version_label.text == "v" + ver, "indicador de versión en el sidebar")
 
 	# Validación de cuenta (sin conectar).
 	m._account._jid.text = "agente@h"

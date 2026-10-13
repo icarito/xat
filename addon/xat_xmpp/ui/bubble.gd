@@ -121,6 +121,8 @@ func _init() -> void:
 	# una pulsación larga (chat_panel llama a begin_selection). Sin selección el
 	# label no consume el arrastre (IGNORE) y el ScrollContainer se mueve.
 	_label.selection_enabled = true
+	# Resaltado de selección visible (por defecto el tema no define uno propio).
+	_label.add_color_override("selection_color", Color(Palette.USER.r, Palette.USER.g, Palette.USER.b, 0.45))
 	_label.meta_underlined = true
 	_label.connect("meta_clicked", self, "_on_meta_clicked")
 	if OS.has_touchscreen_ui_hint():
@@ -289,6 +291,7 @@ var _drag_active := false
 var _last_global := Vector2.ZERO
 var _anchor := Vector2.ZERO
 var _extending := false
+var _sel_last := ""   # última selección de texto válida (para Copiar)
 var _handle_a := Vector2.ZERO # extremos de la selección (global), para los tiradores
 var _handle_b := Vector2.ZERO
 var _active_handle := ""
@@ -309,6 +312,7 @@ func begin_selection_at(p_global: Vector2) -> void:
 	_label.deselect()
 	_drag_active = true
 	_feed_doubleclick(p_global)
+	_sel_last = _label.get_selected_text()
 
 func drag_selection(p_global: Vector2) -> void:
 	if not _drag_active:
@@ -324,11 +328,9 @@ func drag_selection(p_global: Vector2) -> void:
 	_handle_b = p_global
 
 # Ajuste por tiradores: mueve el extremo más cercano al toque; el otro queda
-# fijo. Funciona aunque el dedo se haya levantado antes (se puede volver a
-# agarrar la selección). Devuelve el tirador elegido ("" si no hay selección).
+# fijo. Elige siempre el más cercano (no depende de que el toque haya caído
+# justo encima), así el arrastre sobre la selección siempre la ajusta.
 func begin_handle_drag(p_global: Vector2) -> String:
-	if not _drag_active and _label.get_selected_text() == "":
-		return ""
 	_active_handle = "a" if p_global.distance_to(_handle_a) <= p_global.distance_to(_handle_b) else "b"
 	_drag_active = true
 	return _active_handle
@@ -340,6 +342,7 @@ func drag_handle(p_global: Vector2) -> void:
 	_label.deselect()
 	_feed_mouse(fixed, true)
 	_feed_motion(p_global)
+	_sel_last = _label.get_selected_text()
 	if _active_handle == "a":
 		_handle_a = p_global
 	else:
@@ -353,7 +356,18 @@ func end_selection_drag() -> void:
 	if _drag_active:
 		_drag_active = false
 		_extending = false
-		_feed_mouse(_last_global, false)
+		# No inyectamos el release sintético: en device el release del motor limpia
+		# la selección (get_selected_text() queda vacío) y "Copiar" caía al body.
+		# La dejamos activa; el próximo press hace deselect+press igual.
+
+func selected_text() -> String:
+	return _label.get_selected_text()
+
+# Texto a copiar: la selección actual o, si el release la limpió, la última que
+# se llegó a seleccionar con los tiradores.
+func copy_text() -> String:
+	var t = _label.get_selected_text()
+	return t if t != "" else _sel_last
 
 func _feed_doubleclick(p_global: Vector2) -> void:
 	_last_global = p_global
@@ -393,10 +407,8 @@ func end_selection() -> void:
 	_active_handle = ""
 	_handle_a = Vector2.ZERO
 	_handle_b = Vector2.ZERO
+	_sel_last = ""
 	_label.deselect()
-
-func selected_text() -> String:
-	return _label.get_selected_text()
 
 func _feed_mouse(p_global: Vector2, p_pressed: bool) -> void:
 	_last_global = p_global

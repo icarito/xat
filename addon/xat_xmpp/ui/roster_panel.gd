@@ -93,6 +93,8 @@ func _init() -> void:
 	_tabbar = HBoxContainer.new()
 	_tabbar.add_constant_override("separation", 4)
 	_tabbar_margin.add_child(_tabbar)
+	# Las pestañas van al tope del roster (mejor uso del espacio).
+	root.move_child(_tabbar_margin, 0)
 	_tab_contacts = _tab_button("Contactos", 0)
 	_tabbar.add_child(_tab_contacts)
 	_tab_rooms = _tab_button("Salas", 1)
@@ -263,6 +265,8 @@ func _tab_button(p_text: String, p_index: int) -> Button:
 	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	b.rect_min_size = Vector2(0, 32)
 	b.add_font_override("font", XatTheme.font(P.FONT_MEDIUM, P.FONT_SIZE - 1))
+	b.add_stylebox_override("focus", StyleBoxEmpty.new())
+	b.add_stylebox_override("hover", XatTheme.box(P.BG2.darkened(0.15), 8))
 	b.connect("pressed", self, "_on_tab", [p_index])
 	return b
 
@@ -270,13 +274,21 @@ func _on_tab(p_index: int) -> void:
 	_set_tab(p_index)
 
 # Cambia la pestaña activa (0 = Contactos, 1 = Salas) y muestra su página.
+# La activa se resalta como control segmentado (fondo), no sólo el color de texto.
 func _set_tab(p_index: int) -> void:
 	_tab = int(clamp(p_index, 0, 1))
+	var on = XatTheme.box(P.BG2, 8)
+	var off = StyleBoxEmpty.new()
 	if _tab_contacts != null:
+		_tab_contacts.add_stylebox_override("normal", on if _tab == 0 else off)
+		_tab_contacts.add_stylebox_override("pressed", on)
 		_tab_contacts.add_color_override("font_color", P.TEXT if _tab == 0 else P.TEXT_DIM)
 	if _tab_rooms != null:
+		_tab_rooms.add_stylebox_override("normal", on if _tab == 1 else off)
+		_tab_rooms.add_stylebox_override("pressed", on)
 		_tab_rooms.add_color_override("font_color", P.TEXT if _tab == 1 else P.TEXT_DIM)
 	if _columns > 1:
+		_rebuild_grid()
 		return
 	if _scroll != null:
 		_scroll.visible = _tab == 0
@@ -291,8 +303,15 @@ func _update_tab_labels() -> void:
 
 # Swipe horizontal (táctil) para cambiar de pestaña: izquierda -> Salas,
 # derecha -> Contactos. En la vista multicolumna (landscape) no aplica.
+func _active_scroll() -> ScrollContainer:
+	if _columns > 1:
+		return _grid_scroll
+	if _tab == 1:
+		return _rooms_scroll
+	return _scroll
+
 func _input(p_event) -> void:
-	if not visible or _columns > 1:
+	if not visible:
 		return
 	if p_event is InputEventScreenTouch:
 		if p_event.pressed:
@@ -304,9 +323,17 @@ func _input(p_event) -> void:
 	elif p_event is InputEventScreenDrag and _touch_active and not _swipe_consumed:
 		var dx = p_event.position.x - _touch_start.x
 		var dy = p_event.position.y - _touch_start.y
-		if abs(dx) > 60.0 and abs(dx) > abs(dy) * 1.5:
+		# Swipe horizontal: cambia de pestaña (sólo con pestañas, no en grid).
+		if _columns <= 1 and abs(dx) > 60.0 and abs(dx) > abs(dy) * 1.5:
 			_swipe_consumed = true
 			_set_tab(1 if dx < 0.0 else 0)
+			get_tree().set_input_as_handled()
+			return
+		# Arrastre vertical: scrollea la lista. Las filas son Buttons y consumen
+		# el press, así que el ScrollContainer no recibe el gesto de touch acá.
+		var sc = _active_scroll()
+		if sc != null and abs(p_event.relative.y) > 0.01:
+			sc.scroll_vertical = max(0, sc.scroll_vertical - int(p_event.relative.y))
 			get_tree().set_input_as_handled()
 
 # Fija tu identidad en la cabecera (foto de perfil y nombre de la cuenta).
@@ -672,16 +699,19 @@ func set_columns(p_n: int) -> void:
 		return
 	_columns = p_n
 	var grid = _columns > 1
+	# Las pestañas siguen visibles también en multicolumna (filtra Contactos/Salas).
 	if _tabbar_margin != null:
-		_tabbar_margin.visible = not grid
+		_tabbar_margin.visible = true
 	if _scroll != null:
 		_scroll.visible = (not grid) and _tab == 0
 	if _rooms_scroll != null:
 		_rooms_scroll.visible = (not grid) and _tab == 1
 	if _grid_scroll != null:
 		_grid_scroll.visible = grid
-	_rebuild()
-	if not grid:
+	if grid:
+		_rebuild_grid()
+	else:
+		_rebuild()
 		_rebuild_rooms()
 
 func _make_room_row(p_room: String) -> Button:
@@ -763,6 +793,17 @@ func _settle_scale() -> void:
 		fz.settle(self)
 
 # Multicolumna (landscape): reparte contactos y salas en `_columns` columnas,
+# Encabezado de sección en la vista multicolumna (Salas / Contactos).
+func _grid_header(p_text: String) -> Label:
+	var h = Label.new()
+	h.text = p_text
+	h.add_color_override("font_color", P.TEXT_DIM)
+	h.add_font_override("font", XatTheme.font(P.FONT_MEDIUM, P.FONT_SIZE - 2))
+	h.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	h.rect_min_size = Vector2(0, 24)
+	h.valign = Label.VALIGN_CENTER
+	return h
+
 # llenando de izquierda a derecha (orden de lectura) y con scroll lateral.
 func _rebuild_grid() -> void:
 	for c in _grid.get_children():
@@ -771,16 +812,12 @@ func _rebuild_grid() -> void:
 	if _rooms_box != null:
 		_rooms_box.visible = false
 	var items := []
-	if not _rooms.empty():
-		var hdr = Label.new()
-		hdr.text = "Salas"
-		hdr.add_color_override("font_color", P.TEXT_DIM)
-		hdr.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		items.append(hdr)
+	if _tab == 1:
 		for b in _sorted_rooms():
 			items.append(_make_room_row(str(b)))
-	for b in _sorted():
-		items.append(_make_row(str(b)))
+	else:
+		for b in _sorted():
+			items.append(_make_row(str(b)))
 	var n = max(1, _columns)
 	var cols := []
 	for i in range(n):

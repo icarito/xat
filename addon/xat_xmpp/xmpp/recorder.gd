@@ -100,15 +100,19 @@ func start() -> bool:
 	var d = Directory.new()
 	if not d.dir_exists(MEDIA_DIR):
 		d.make_dir_recursive(MEDIA_DIR)
-	_path = MEDIA_DIR + "voz_%d.wav" % OS.get_ticks_msec()
-	_player = AudioStreamPlayer.new()
-	_player.stream = AudioStreamMicrophone.new()
-	_player.bus = BUS
-	# Ganancia de captura: el mic crudo llega muy bajo. El bus va mudo a Master
-	# (sin feedback), así que amplificar acá sólo sube lo que captura el efecto.
-	_player.volume_db = MIC_GAIN_DB
-	add_child(_player)
-	_player.play()
+	_path = MEDIA_DIR + "voz_%d.%s" % [OS.get_ticks_msec(), "opus" if ClassDB.class_exists("OpusCodec") else "wav"]
+	# El player del micrófono se crea UNA vez y queda andando: parar/recrear la
+	# captura OpenSL entre grabaciones disparaba un SIGSEGV en el callback
+	# (AudioRecord/IBufferQueue_Enqueue). Sólo se togglea la grabación del efecto.
+	if _player == null:
+		_player = AudioStreamPlayer.new()
+		_player.stream = AudioStreamMicrophone.new()
+		_player.bus = BUS
+		# Ganancia de captura: el mic crudo llega muy bajo. El bus va mudo a Master
+		# (sin feedback), así que amplificar acá sólo sube lo que captura el efecto.
+		_player.volume_db = MIC_GAIN_DB
+		add_child(_player)
+		_player.play()
 	_effect.set_recording_active(true)
 	_start_ms = OS.get_ticks_msec()
 	is_recording = true
@@ -123,10 +127,9 @@ func stop(p_discard: bool = false) -> Dictionary:
 		return {}
 	is_recording = false
 	_effect.set_recording_active(false)
-	if _player != null:
-		_player.stop()
-		_player.queue_free()
-		_player = null
+	# OJO: no se detiene `_player` (el micrófono queda abierto). Pararlo y
+	# recrearlo dispara el SIGSEGV de OpenSL descrito arriba. Se reusa en la
+	# próxima grabación.
 	var duration_ms = int(OS.get_ticks_msec() - _start_ms)
 	var sample = _effect.get_recording()
 	if p_discard or sample == null:
@@ -143,7 +146,7 @@ func stop(p_discard: bool = false) -> Dictionary:
 		"duration_ms": duration_ms,
 	}
 	_start_encode_thread()
-	return {"path": _path, "duration_ms": duration_ms, "mime": "audio/wav", "pending": true}
+	return {"path": _path, "duration_ms": duration_ms, "mime": "audio/opus" if ClassDB.class_exists("OpusCodec") else "audio/wav", "pending": true}
 
 func _start_encode_thread() -> void:
 	# Si quedó un encode anterior sin recoger, se junta antes de pisar `_thread`:
@@ -176,9 +179,30 @@ func _encode_pcm(p_job: Dictionary) -> Dictionary:
 	if pcm.empty():
 		return {"ok": false, "reason": "vacio"}
 	var mono = Media.downmix_resample(pcm, int(p_job["channels"]), int(p_job["rate"]), VOICE_RATE)
+	# Opus (módulo nativo) cuando está disponible; si no, ADPCM WAV.
+	if ClassDB.class_exists("OpusCodec"):
+		var codec = ClassDB.instance("OpusCodec")
+		if codec != null:
+			var ogg = codec.encode(mono, VOICE_RATE, VOICE_CHANNELS, 24000)
+			if ogg.size() > 0:
+				return {"ok": true, "wav": ogg, "path": str(p_job["path"]), "duration_ms": int(p_job["duration_ms"]), "bytes": ogg.size()}
 	var enc = Adpcm.encode(mono, VOICE_CHANNELS, VOICE_RATE)
 	var wav = Media.build_wav_adpcm(enc)
 	return {"ok": true, "wav": wav, "path": str(p_job["path"]), "duration_ms": int(p_job["duration_ms"]), "bytes": wav.size()}
+
+static func _peak(p_data: PoolByteArray) -> int:
+	var peak = 0
+	var i = 0
+	while i < p_data.size() / 2:
+		var v = p_data[i * 2] | (p_data[i * 2 + 1] << 8)
+		if v >= 32768:
+			v -= 65536
+		if v < 0:
+			v = -v
+		if v > peak:
+			peak = v
+		i += 1
+	return peak
 
 # Vuelve al hilo principal: escribe el archivo y emite el resultado.
 func _finish_encode(p_res: Dictionary) -> void:

@@ -41,6 +41,8 @@ func _init():
 	check(b.selected_text().find("hola") >= 0, "ajuste por tirador mantiene la selección")
 	b.end_selection_drag()
 	check(not b.is_handle_dragging(), "soltar termina el ajuste")
+	check(b.selected_text() != "", "la selección sobrevive al soltar")
+	check(b.copy_text().find("hola") >= 0, "copy_text devuelve la porción seleccionada")
 	b.end_selection()
 	check(b.is_text_visible(), "texto visible con selección soportada")
 	b.queue_free()

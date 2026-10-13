@@ -27,7 +27,12 @@ VER="$(cat "$XAT/.github/box3d_release" | tr -d '[:space:]')"
 [ -n "$VER" ] || { echo "pin .github/box3d_release vacío" >&2; exit 1; }
 
 export ANDROID_SDK_ROOT="$SDK" ANDROID_HOME="$SDK"
-export ANDROID_NDK_ROOT="$SDK/ndk/29.0.14206865"
+# Godot 3.6 fija el NDK 23.2; otro NDK falla las comprobaciones ABI y la
+# plantilla local crashea al primer frame (GLThread). Preferimos 23.2 si está.
+NDK_DIR="$SDK/ndk/23.2.8568313"
+[ -d "$NDK_DIR" ] || NDK_DIR="$SDK/ndk/29.0.14206865"
+export ANDROID_NDK_ROOT="$NDK_DIR"
+export ANDROID_NDK_HOME="$NDK_DIR"
 export JAVA_HOME="${JAVA_HOME_17:-/usr/lib/jvm/java-17-openjdk}"
 export GRADLE_USER_HOME="$WORK/gradle-home"
 export SCONS_CACHE="${SCONS_CACHE-$HOME/.cache/scons-godot3}"

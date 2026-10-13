@@ -65,6 +65,7 @@ var _room_panel           # pane de participantes de la sala (XEP-0045)
 var _room_agent := ""     # bare del ocupante agente mostrado en la mente (sala)
 var _room_pane_open := false # pane de participantes abierto (vista angosta)
 var _participants_btn
+var _version_label
 var _roster_toggle
 var _search_toggle
 var _plus_btn
@@ -1286,7 +1287,9 @@ func _on_recording_finished(p_path: String, p_duration_ms: int, _bytes: int) -> 
 	_rec_pending_peer = ""
 	if peer == "" or p_path == "":
 		return
-	_send_attachment(peer, p_path, "audio/wav", p_duration_ms, "")
+	var ext = Media.extension_of(p_path)
+	var mime = "audio/opus" if ext == "opus" else ("audio/ogg" if ext in ["ogg", "oga"] else "audio/wav")
+	_send_attachment(peer, p_path, mime, p_duration_ms, "")
 
 func _on_recording_failed(p_reason: String) -> void:
 	_rec_pending_peer = ""
@@ -1881,6 +1884,15 @@ func _build_sidebar() -> void:
 	_sb_font_bigger = _sidebar_icon_action("text_plus", "Agrandar la letra")
 	_sb_font_bigger.connect("pressed", self, "_on_font_scale_requested", [1])
 	font_row.add_child(_sb_font_bigger)
+	# Indicador de versión, al pie del sidebar (landscape), debajo de las acciones.
+	_version_label = Label.new()
+	_version_label.text = "v%s" % str(ProjectSettings.get_setting("application/config/version"))
+	_version_label.align = Label.ALIGN_CENTER
+	_version_label.clip_text = true
+	_version_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_version_label.add_color_override("font_color", P.TEXT_DIM)
+	_version_label.add_font_override("font", XatTheme.font(P.FONT_MONO, P.FONT_SIZE - 4))
+	sv.add_child(_version_label)
 	_init_sidebar_settings()
 	_split.add_child(_sidebar)
 
@@ -2017,7 +2029,8 @@ func _refresh_sidebar() -> void:
 	_sb_act.visible = in_room
 	_sb_leave.visible = in_room
 
-# Columnas del roster en landscape: más ancho → más columnas (2–4).
+# Columnas del roster en landscape: más ancho → más columnas (2–4). Las pestañas
+# Contactos | Salas siguen visibles y filtran qué lista se muestra en columnas.
 func _landscape_columns() -> int:
 	if not _is_mobile_landscape():
 		return 1
