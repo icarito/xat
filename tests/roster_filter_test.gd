@@ -1,0 +1,144 @@
+extends SceneTree
+
+# Filtro segmentado del roster (Todos/Agentes/Contactos/Salas) y guard
+# drag-vs-tap: un arrastre no debe abrir el chat, un toque sí.
+
+var _fail := 0
+var _selected := []
+var _r
+
+func _on_peer_selected(p_bare: String) -> void:
+	_selected.append(p_bare)
+
+func _init():
+	var RosterPanel = load("res://addons/xat_xmpp/ui/roster_panel.gd")
+	_r = RosterPanel.new()
+	get_root().add_child(_r)
+	_r.connect("peer_selected", self, "_on_peer_selected")
+
+	_r.set_peers(["ag@h", "per@h"])
+	_r.set_online("per@h", true)
+	_r.set_agent_state("ag@h", {"activity": "available"})
+	_r.set_rooms(["sala@conference.h"])
+
+	check(_row_bares(_r._box) == ["ag@h", "per@h"], "lista completa con Todos")
+
+	_r._set_filter(1)
+	check(_row_bares(_r._box) == ["ag@h"], "filtro Agentes deja sólo agentes")
+	_r._set_filter(2)
+	check(_row_bares(_r._box) == ["per@h"], "filtro Contactos deja sólo personas")
+	_r._set_filter(0)
+	check(_row_bares(_r._box) == ["ag@h", "per@h"], "Todos vuelve a mostrar ambos")
+
+	check(_r._tab_rooms.text.find("Salas (1)") >= 0, "etiqueta Salas con conteo")
+	check(_r._tab_contacts.text.find("Contactos (1)") >= 0, "etiqueta Contactos con conteo")
+
+	_r._set_filter(3)
+	check(_r._rooms_scroll.visible and not _r._scroll.visible, "filtro Salas muestra la vista de salas")
+	check(_r._tab == 1 and _r._rooms_box.get_child_count() == 1, "página Salas con su fila")
+	_r._set_filter(0)
+	check(_r._scroll.visible and not _r._rooms_scroll.visible, "filtro de contactos vuelve a la lista")
+
+	# Alta del agente: filtro por caps se recomputa al reconstruir.
+	_r.set_last_message("ag@h", "ag@h", "hola", "2026-10-14T10:00:00Z")
+	check(_row_height(_r, "ag@h") == 70, "tarjeta de agente con último mensaje tiene más alto")
+	var ag_row = _r._box.get_node_or_null("row_ag_h")
+	var st = ag_row.get_stylebox("normal")
+	check(st.content_margin_top == 8 and st.content_margin_left == 12, "tarjeta de agente con padding interno")
+
+	# Guard drag-vs-tap vía eventos reales: touch con arrastre no abre; toque sí.
+	_selected.clear()
+	_r._set_filter(0)
+	var t = InputEventScreenTouch.new()
+	t.position = Vector2(100, 200)
+	t.pressed = true
+	_r._input(t)
+	var d = InputEventScreenDrag.new()
+	d.position = Vector2(100, 240)
+	d.relative = Vector2(0, 40)
+	_r._input(d)
+	check(_r._pointer_moved, "arrastre touch marca moved")
+	_r._on_row("per@h")
+	check(_selected.empty(), "tap tras arrastre no abre el chat")
+	var up = InputEventScreenTouch.new()
+	up.position = Vector2(100, 240)
+	up.pressed = false
+	_r._input(up)
+
+	_selected.clear()
+	var t2 = InputEventScreenTouch.new()
+	t2.position = Vector2(100, 200)
+	t2.pressed = true
+	_r._input(t2)
+	var d2 = InputEventScreenDrag.new()
+	d2.position = Vector2(103, 202)
+	d2.relative = Vector2(3, 2)
+	_r._input(d2)
+	check(not _r._pointer_moved, "movimiento bajo el umbral sigue siendo tap")
+	_r._on_row("per@h")
+	check(_selected == ["per@h"], "tap liviano abre el chat")
+	var up2 = InputEventScreenTouch.new()
+	up2.position = Vector2(103, 202)
+	up2.pressed = false
+	_r._input(up2)
+
+	# Mouse: botón izquierdo con arrastre también suprime.
+	_selected.clear()
+	var mb = InputEventMouseButton.new()
+	mb.button_index = BUTTON_LEFT
+	mb.pressed = true
+	mb.position = Vector2(50, 50)
+	_r._input(mb)
+	var mm = InputEventMouseMotion.new()
+	mm.position = Vector2(90, 50)
+	mm.relative = Vector2(40, 0)
+	mm.button_mask = BUTTON_LEFT
+	_r._input(mm)
+	check(_r._pointer_moved, "arrastre de mouse marca moved")
+	_r._on_row("per@h")
+	check(_selected.empty(), "click arrastrado de mouse no abre el chat")
+	var mup = InputEventMouseButton.new()
+	mup.button_index = BUTTON_LEFT
+	mup.pressed = false
+	mup.position = Vector2(90, 50)
+	_r._input(mup)
+
+	# Swipe horizontal cambia de filtro (sólo en lista simple).
+	_r._set_filter(0)
+	var s = InputEventScreenTouch.new()
+	s.position = Vector2(250, 200)
+	s.pressed = true
+	_r._input(s)
+	var sd = InputEventScreenDrag.new()
+	sd.position = Vector2(140, 200)
+	sd.relative = Vector2(-110, 0)
+	_r._input(sd)
+	check(_r._filter == 1, "swipe izquierda avanza el filtro")
+	_r._cycle_filter(1)
+	_r._cycle_filter(1)
+	check(_r._filter == 3, "el filtro llega a Salas")
+	_r._cycle_filter(1)
+	check(_r._filter == 0, "el filtro se envuelve a Todos")
+
+	_r.free()
+	if _fail == 0:
+		print("ROSTER_FILTER_CHECK_OK")
+	quit()
+
+func _row_bares(p_box) -> Array:
+	var out := []
+	for c in p_box.get_children():
+		out.append(str(c.get_meta("bare")))
+	return out
+
+func _row_height(p_r, p_bare: String) -> int:
+	var row = p_r._box.get_node_or_null(p_r._row_name(p_bare))
+	return int(row.rect_min_size.y) if row != null else -1
+
+func check(cond: bool, label: String) -> void:
+	if cond:
+		print("ok %s" % label)
+	else:
+		_fail += 1
+		print("FAIL %s" % label)
+		OS.exit_code = 1

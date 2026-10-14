@@ -60,14 +60,25 @@ var _id_btn: Button
 var _id_avatar
 var _id_name: Label
 
-# Pestañas Contactos | Salas (arrastrables con swipe en táctil).
+# Filtro segmentado Todos | Agentes | Contactos | Salas (arrastrable con swipe
+# en táctil). `_tab` sólo conserva la página (0 contactos, 1 salas) para no
+# romper las llamadas históricas de main.gd (`_set_tab`).
 var _tabbar_margin: MarginContainer
 var _tabbar: HBoxContainer
-var _tab_contacts: Button
-var _tab_rooms: Button
+var _filter_btns := [] # [Todos, Agentes, Contactos, Salas]
+var _tab_contacts: Button # alias del botón "Contactos" (índice 2)
+var _tab_rooms: Button # alias del botón "Salas" (índice 3)
 var _rooms_scroll: ScrollContainer
 var _rooms_empty: Label
 var _tab := 0
+var _filter := 0 # 0 Todos, 1 Agentes, 2 Contactos, 3 Salas
+
+# Drag vs tap: un press que se mueve más de TAP_SLOP (o dispara scroll) no debe
+# abrir el chat. Cubre touch (ScreenTouch/ScreenDrag) y mouse (botón izq.).
+const TAP_SLOP := 10.0
+var _pointer_down := false
+var _pointer_start := Vector2.ZERO
+var _pointer_moved := false
 var _touch_start := Vector2.ZERO
 var _touch_active := false
 var _swipe_consumed := false
@@ -95,7 +106,8 @@ func _init() -> void:
 	req_margin.add_constant_override("margin_right", COLUMN_MARGIN)
 	req_margin.add_child(_req_box)
 	root.add_child(req_margin)
-	# Pestañas Contactos | Salas (cada panel con su título).
+	# Filtro segmentado Todos | Agentes | Contactos | Salas (cada uno con su
+	# vista o su recorte del roster de contactos).
 	_tabbar_margin = MarginContainer.new()
 	_tabbar_margin.add_constant_override("margin_left", COLUMN_MARGIN)
 	_tabbar_margin.add_constant_override("margin_right", COLUMN_MARGIN)
@@ -104,12 +116,13 @@ func _init() -> void:
 	_tabbar = HBoxContainer.new()
 	_tabbar.add_constant_override("separation", 4)
 	_tabbar_margin.add_child(_tabbar)
-	# Las pestañas van al tope del roster (mejor uso del espacio).
+	# El filtro va al tope del roster (mejor uso del espacio).
 	root.move_child(_tabbar_margin, 0)
-	_tab_contacts = _tab_button("Contactos", 0)
-	_tabbar.add_child(_tab_contacts)
-	_tab_rooms = _tab_button("Salas", 1)
-	_tabbar.add_child(_tab_rooms)
+	_tab_contacts = _tab_button("Contactos", 2)
+	_tab_rooms = _tab_button("Salas", 3)
+	_filter_btns = [_tab_button("Todos", 0), _tab_button("Agentes", 1), _tab_contacts, _tab_rooms]
+	for b in _filter_btns:
+		_tabbar.add_child(b)
 	# Página Contactos.
 	var sc = ScrollContainer.new()
 	_scroll = sc
@@ -201,7 +214,7 @@ func _init() -> void:
 	var bigger = _icon_button("text_plus", "Agrandar la letra")
 	bigger.connect("pressed", self, "_on_font_bigger")
 	foot.add_child(bigger)
-	_set_tab(0)
+	_set_filter(0)
 	set_process_input(true)
 
 # Encabezado del roster: tu identidad (foto + nombre) y las acciones.
@@ -378,52 +391,84 @@ func _tab_button(p_text: String, p_index: int) -> Button:
 	var b = Button.new()
 	b.text = p_text
 	b.flat = true
+	b.clip_text = true
 	b.focus_mode = Control.FOCUS_NONE
 	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	b.rect_min_size = Vector2(0, 32)
-	b.add_font_override("font", XatTheme.font(P.FONT_MEDIUM, P.FONT_SIZE - 1))
+	b.rect_min_size = Vector2(0, 44) # objetivo táctil >=44 px
+	b.add_font_override("font", XatTheme.font(P.FONT_MEDIUM, P.FONT_SIZE - 2))
 	b.add_stylebox_override("focus", StyleBoxEmpty.new())
 	b.add_stylebox_override("hover", XatTheme.box(P.BG2.darkened(0.15), 8))
-	b.connect("pressed", self, "_on_tab", [p_index])
+	b.connect("pressed", self, "_on_filter", [p_index])
 	return b
 
-func _on_tab(p_index: int) -> void:
-	_set_tab(p_index)
+func _on_filter(p_index: int) -> void:
+	_set_filter(p_index)
 
-# Cambia la pestaña activa (0 = Contactos, 1 = Salas) y muestra su página.
-# La activa se resalta como control segmentado (fondo), no sólo el color de texto.
+# Compatibilidad con main.gd: 0 -> Todos, 1 -> Salas. La página (`_tab`) se
+# deriva del filtro para conservar `_scroll`/`_rooms_scroll` como antes.
 func _set_tab(p_index: int) -> void:
-	_tab = int(clamp(p_index, 0, 1))
+	_set_filter(3 if int(p_index) == 1 else 0)
+
+# Cambia el filtro activo (0 Todos, 1 Agentes, 2 Contactos, 3 Salas) y muestra
+# su vista. El activo se resalta como control segmentado (fondo), no sólo texto.
+func _set_filter(p_index: int) -> void:
+	_filter = int(clamp(p_index, 0, 3))
+	_tab = 1 if _filter == 3 else 0
 	var on = XatTheme.box(P.BG2, 8)
 	var off = StyleBoxEmpty.new()
-	if _tab_contacts != null:
-		_tab_contacts.add_stylebox_override("normal", on if _tab == 0 else off)
-		_tab_contacts.add_stylebox_override("pressed", on)
-		_tab_contacts.add_color_override("font_color", P.TEXT if _tab == 0 else P.TEXT_DIM)
-	if _tab_rooms != null:
-		_tab_rooms.add_stylebox_override("normal", on if _tab == 1 else off)
-		_tab_rooms.add_stylebox_override("pressed", on)
-		_tab_rooms.add_color_override("font_color", P.TEXT if _tab == 1 else P.TEXT_DIM)
+	for i in range(_filter_btns.size()):
+		var b = _filter_btns[i]
+		b.add_stylebox_override("normal", on if i == _filter else off)
+		b.add_stylebox_override("pressed", on)
+		b.add_color_override("font_color", P.TEXT if i == _filter else P.TEXT_DIM)
+	_apply_filter_view()
+
+# Muestra la página que corresponde al filtro (salas aparte; el resto recorta
+# el grid/lista de contactos). En multicolumna lo resuelve `_rebuild_grid`.
+func _apply_filter_view() -> void:
 	if _columns > 1:
 		_rebuild_grid()
 		return
+	var rooms = _filter == 3
 	if _scroll != null:
-		_scroll.visible = _tab == 0
+		_scroll.visible = not rooms
 	if _rooms_scroll != null:
-		_rooms_scroll.visible = _tab == 1
+		_rooms_scroll.visible = rooms
+	if rooms:
+		_rebuild_rooms()
+	else:
+		_rebuild()
 
 func _update_tab_labels() -> void:
+	var n_agents := 0
+	for b in _peers:
+		if _agents.has(str(b)):
+			n_agents += 1
+	var n_contacts = _peers.size() - n_agents
+	if _filter_btns.size() >= 4:
+		_filter_btns[1].text = ("Agentes (%d)" % n_agents) if n_agents > 0 else "Agentes"
 	if _tab_contacts != null:
-		_tab_contacts.text = ("Contactos (%d)" % _peers.size()) if not _peers.empty() else "Contactos"
+		_tab_contacts.text = ("Contactos (%d)" % n_contacts) if n_contacts > 0 else "Contactos"
 	if _tab_rooms != null:
 		_tab_rooms.text = ("Salas (%d)" % _rooms.size()) if not _rooms.empty() else "Salas"
 
-# Swipe horizontal (táctil) para cambiar de pestaña: izquierda -> Salas,
-# derecha -> Contactos. En la vista multicolumna (landscape) no aplica.
+# Roster recortado por el filtro (Todos/Agentes/Contactos). Salas se maneja aparte.
+func _filtered_peers() -> Array:
+	var out := []
+	for b in _sorted():
+		var is_agent = _agents.has(str(b))
+		if _filter == 1 and not is_agent:
+			continue
+		if _filter == 2 and is_agent:
+			continue
+		out.append(b)
+	return out
+
+# Scroll que recibe el arrastre vertical: salas cuando ese filtro está activo.
 func _active_scroll() -> ScrollContainer:
 	if _columns > 1:
 		return _grid_scroll
-	if _tab == 1:
+	if _filter == 3:
 		return _rooms_scroll
 	return _scroll
 
@@ -432,26 +477,60 @@ func _input(p_event) -> void:
 		return
 	if p_event is InputEventScreenTouch:
 		if p_event.pressed:
-			_touch_start = p_event.position
-			_touch_active = true
-			_swipe_consumed = false
+			_begin_pointer(p_event.position)
 		else:
-			_touch_active = false
-	elif p_event is InputEventScreenDrag and _touch_active and not _swipe_consumed:
-		var dx = p_event.position.x - _touch_start.x
-		var dy = p_event.position.y - _touch_start.y
-		# Swipe horizontal: cambia de pestaña (sólo con pestañas, no en grid).
-		if _columns <= 1 and abs(dx) > 60.0 and abs(dx) > abs(dy) * 1.5:
-			_swipe_consumed = true
-			_set_tab(1 if dx < 0.0 else 0)
-			get_tree().set_input_as_handled()
-			return
-		# Arrastre vertical: scrollea la lista. Las filas son Buttons y consumen
-		# el press, así que el ScrollContainer no recibe el gesto de touch acá.
-		var sc = _active_scroll()
-		if sc != null and abs(p_event.relative.y) > 0.01:
-			sc.scroll_vertical = max(0, sc.scroll_vertical - int(p_event.relative.y))
-			get_tree().set_input_as_handled()
+			_end_pointer()
+	elif p_event is InputEventScreenDrag:
+		if _pointer_down:
+			_move_pointer(p_event.position, p_event.relative)
+	elif p_event is InputEventMouseButton and p_event.button_index == BUTTON_LEFT:
+		if p_event.pressed:
+			_begin_pointer(p_event.position)
+		else:
+			_end_pointer()
+	elif p_event is InputEventMouseMotion:
+		if _pointer_down:
+			_move_pointer(p_event.position, p_event.relative)
+
+# Arranca un gesto: la próxima fila sólo emitirá tap si no se movió.
+func _begin_pointer(p_pos: Vector2) -> void:
+	_pointer_down = true
+	_pointer_start = p_pos
+	_pointer_moved = false
+	_touch_start = p_pos
+	_touch_active = true
+	_swipe_consumed = false
+
+func _end_pointer() -> void:
+	_pointer_down = false
+	_touch_active = false
+
+# Movimiento del puntero: al pasar TAP_SLOP deja de ser tap y pasa a arrastre
+# (swipe horizontal entre filtros / scroll vertical de la lista).
+func _move_pointer(p_pos: Vector2, p_relative: Vector2) -> void:
+	if not _pointer_moved and p_pos.distance_to(_pointer_start) > TAP_SLOP:
+		_pointer_moved = true
+	if not _pointer_moved:
+		return
+	var dx = p_pos.x - _touch_start.x
+	var dy = p_pos.y - _touch_start.y
+	# Swipe horizontal: cambia de filtro (sólo lista simple, no grid lateral).
+	if _columns <= 1 and not _swipe_consumed and abs(dx) > 60.0 and abs(dx) > abs(dy) * 1.5:
+		_swipe_consumed = true
+		_cycle_filter(1 if dx < 0.0 else -1)
+		get_tree().set_input_as_handled()
+		return
+	# Arrastre vertical: scrollea la lista. Las filas son Buttons y consumen el
+	# press, así que el ScrollContainer no recibe el gesto de touch acá.
+	var sc = _active_scroll()
+	if sc != null and abs(p_relative.y) > 0.01:
+		sc.scroll_vertical = max(0, sc.scroll_vertical - int(p_relative.y))
+		get_tree().set_input_as_handled()
+
+# Avanza/retrocede un filtro con wrap (swipe táctil).
+func _cycle_filter(p_step: int) -> void:
+	_set_filter(int(posmod(_filter + p_step, 4)))
+
 
 # Fija tu identidad en la cabecera (foto de perfil y nombre de la cuenta).
 func set_identity(p_bare: String, p_tex) -> void:
@@ -737,7 +816,7 @@ func touch(p_bare: String, p_ts: String) -> void:
 	var shown = []
 	for row in _box.get_children():
 		shown.append(row.get_meta("bare"))
-	if shown != _sorted():
+	if shown != _filtered_peers():
 		_rebuild()
 
 # Orden: actividad reciente primero (ISO compara como texto), luego en línea, luego nombre.
@@ -907,13 +986,13 @@ func set_columns(p_n: int) -> void:
 		return
 	_columns = p_n
 	var grid = _columns > 1
-	# Las pestañas siguen visibles también en multicolumna (filtra Contactos/Salas).
+	# El filtro sigue visible también en multicolumna (recorta Agentes/Contactos).
 	if _tabbar_margin != null:
 		_tabbar_margin.visible = true
 	if _scroll != null:
-		_scroll.visible = (not grid) and _tab == 0
+		_scroll.visible = (not grid) and _filter != 3
 	if _rooms_scroll != null:
-		_rooms_scroll.visible = (not grid) and _tab == 1
+		_rooms_scroll.visible = (not grid) and _filter == 3
 	if _grid_scroll != null:
 		_grid_scroll.visible = grid
 	if grid:
@@ -1079,13 +1158,17 @@ func _occupant_stack(p_occupants: Array) -> Control:
 	return c
 
 func _rebuild() -> void:
+	_update_tab_labels()
 	for c in _box.get_children():
 		_box.remove_child(c)
 		c.queue_free()
 	if _columns > 1:
 		_rebuild_grid()
 		return
-	for b in _sorted():
+	if _filter == 3:
+		_settle_scale()
+		return # la vista de salas se arma en `_rebuild_rooms`
+	for b in _filtered_peers():
 		var row = _make_row(str(b))
 		_box.add_child(row)
 		# El orbe anima con Tween: aplicar estado ya dentro del árbol.
@@ -1114,20 +1197,21 @@ func _grid_header(p_text: String) -> Label:
 
 # llenando de izquierda a derecha (orden de lectura) y con scroll lateral.
 func _rebuild_grid() -> void:
+	_update_tab_labels()
 	for c in _grid.get_children():
 		_grid.remove_child(c)
 		c.queue_free()
 	if _rooms_box != null:
 		_rooms_box.visible = false
 	var items := []
-	if _tab == 1:
+	if _filter == 3:
 		for room in _deferred.keys():
 			if not _rooms.has(str(room)):
 				items.append(_make_deferred_row(str(room)))
 		for b in _sorted_rooms():
 			items.append(_make_room_row(str(b)))
 	else:
-		for b in _sorted():
+		for b in _filtered_peers():
 			items.append(_make_row(str(b)))
 	var n = max(1, _columns)
 	var cols := []
@@ -1154,21 +1238,23 @@ func _make_row(p_bare: String) -> Button:
 	row.name = _row_name(p_bare)
 	row.toggle_mode = true
 	row.mouse_filter = Control.MOUSE_FILTER_PASS # el arrastre debe llegar al ScrollContainer
-	# X2.2: el contacto con caps de agente es una tarjeta (borde AGENT_EDGE).
+	# X2.2: el contacto con caps de agente es una tarjeta (borde AGENT_EDGE),
+	# con más aire interno que antes (vertical y horizontal).
 	if is_agent:
-		row.add_stylebox_override("normal", XatTheme.with_border(XatTheme.box(P.BG2, 10, 8, 6), P.AGENT_EDGE))
-		row.add_stylebox_override("hover", XatTheme.with_border(XatTheme.box(P.BG2.lightened(0.1), 10, 8, 6), P.AGENT_EDGE))
+		row.add_stylebox_override("normal", XatTheme.with_border(XatTheme.box(P.BG2, 10, 12, 8), P.AGENT_EDGE))
+		row.add_stylebox_override("hover", XatTheme.with_border(XatTheme.box(P.BG2.lightened(0.1), 10, 12, 8), P.AGENT_EDGE))
 		row.add_stylebox_override("focus", StyleBoxEmpty.new())
-		row.add_stylebox_override("pressed", XatTheme.with_border(XatTheme.box(P.BG2, 10, 8, 6), P.LINE))
+		row.add_stylebox_override("pressed", XatTheme.with_border(XatTheme.box(P.BG2, 10, 12, 8), P.LINE))
 	else:
 		row.add_stylebox_override("normal", StyleBoxEmpty.new())
 		row.add_stylebox_override("hover", XatTheme.box(P.BG2.darkened(0.15), 10))
 		row.add_stylebox_override("focus", StyleBoxEmpty.new())
 		row.add_stylebox_override("pressed", XatTheme.with_border(XatTheme.box(P.BG2, 10), P.LINE))
 	row.pressed = p_bare == _selected
-	# Tarjeta de agente más compacta; los contactos normales mantienen su alto.
+	# Tarjeta de agente: alto cómodo (dos o tres líneas); los contactos normales
+	# mantienen su alto de lista.
 	if is_agent:
-		row.rect_min_size = Vector2(0, 62 if last_body != "" else 54)
+		row.rect_min_size = Vector2(0, 70 if last_body != "" else 60)
 	else:
 		row.rect_min_size = Vector2(0, 60)
 	row.set_meta("bare", p_bare)
@@ -1178,8 +1264,9 @@ func _make_row(p_bare: String) -> Button:
 	var h = HBoxContainer.new()
 	h.anchor_right = 1.0
 	h.anchor_bottom = 1.0
-	h.margin_left = 8
-	h.margin_right = -8
+	var pad = 12 if is_agent else 8
+	h.margin_left = pad
+	h.margin_right = -pad
 	h.alignment = BoxContainer.ALIGN_CENTER
 	h.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	h.add_constant_override("separation", 0)
@@ -1210,7 +1297,7 @@ func _make_row(p_bare: String) -> Button:
 	v.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	v.alignment = BoxContainer.ALIGN_CENTER
 	v.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	v.add_constant_override("separation", 0)
+	v.add_constant_override("separation", 3 if is_agent else 0)
 	inner.add_child(v)
 	var name_l = Label.new()
 	name_l.text = str(_names.get(p_bare, p_bare.split("@")[0]))
@@ -1296,8 +1383,9 @@ func _ring(p_bare: String) -> Color:
 	return P.OK
 
 func _on_row(p_bare: String) -> void:
-	if _scrolling:
-		return # el toque fue parte de un arrastre para desplazar la lista
+	# El toque fue parte de un arrastre (scroll o swipe): no abrir el chat.
+	if _pointer_moved or _scrolling:
+		return
 	select(p_bare)
 	emit_signal("peer_selected", p_bare)
 

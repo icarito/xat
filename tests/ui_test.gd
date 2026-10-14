@@ -160,6 +160,15 @@ func _init():
 	m._roster.remove_invite("otra@conference.h")
 	check(not m._roster._req_box.visible, "roster: banda oculta sin invitaciones")
 
+	# Filtro segmentado (Todos/Agentes/Contactos/Salas): recorta el roster.
+	m._roster.set_agent_state("a@h", {"activity": "available"})
+	m._roster._set_filter(1)
+	check(m._roster._box.get_child_count() == 1 and m._roster._box.get_child(0).get_meta("bare") == "a@h", "roster: filtro Agentes")
+	m._roster._set_filter(2)
+	check(m._roster._box.get_child_count() == 1 and m._roster._box.get_child(0).get_meta("bare") == "b@h", "roster: filtro Contactos")
+	m._roster._set_filter(0)
+	check(m._roster._box.get_child_count() == 2, "roster: filtro Todos")
+
 	# Chat en modo sala: ocupantes, chip de remitente y @mención.
 	m._chat.set_room("sala@conference.h", "yo", [{"nick": "ana"}, {"nick": "yo"}])
 	check(m._chat._room == "sala@conference.h" and m._chat._occ_btn.visible and m._chat._leave_btn.visible, "chat: modo sala")
