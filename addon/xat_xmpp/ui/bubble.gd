@@ -37,8 +37,21 @@ static func encryption_chip_text(p_omemo_available: bool) -> String:
 # dibuja como chip de sistema, nunca como texto del agente.
 const OMEMO_NOTICE := "Mensaje cifrado con OMEMO"
 
+# Marcas del body de respaldo en inglés que otros clientes ponen en mensajes
+# OMEMO (p. ej. "[This message is OMEMO encrypted]"): también son un aviso.
+const OMEMO_FALLBACK_MARKERS := [
+	"omemo encrypted", "encrypted with omemo", "encrypted using omemo",
+	"doesn't support omemo", "does not support omemo", "cifrado con omemo",
+]
+
 static func is_omemo_notice(p_body: String) -> bool:
-	return p_body.find(OMEMO_NOTICE) >= 0
+	var t = p_body.to_lower()
+	if t.find(OMEMO_NOTICE.to_lower()) >= 0:
+		return true
+	for m in OMEMO_FALLBACK_MARKERS:
+		if t.find(m) >= 0:
+			return true
+	return false
 
 # Texto legible del aviso de sistema, sin el glifo (roto) del placeholder.
 static func notice_text(p_body: String) -> String:

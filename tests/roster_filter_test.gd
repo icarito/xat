@@ -39,12 +39,32 @@ func _init():
 	_r._set_filter(0)
 	check(_r._scroll.visible and not _r._rooms_scroll.visible, "filtro de contactos vuelve a la lista")
 
-	# Alta del agente: filtro por caps se recomputa al reconstruir.
-	_r.set_last_message("ag@h", "ag@h", "hola", "2026-10-14T10:00:00Z")
-	check(_row_height(_r, "ag@h") == 70, "tarjeta de agente con último mensaje tiene más alto")
+	# Card de agente: compacta por defecto (sin preview), recorta su contenido y
+	# un chevron despliega el preview por agente.
+	_r.set_last_message("ag@h", "ag@h", "hola mundo", "2026-10-14T10:00:00Z")
+	check(_row_height(_r, "ag@h") == 64, "card de agente compacta por defecto")
 	var ag_row = _r._box.get_node_or_null("row_ag_h")
-	var st = ag_row.get_stylebox("normal")
-	check(st.content_margin_top == 8 and st.content_margin_left == 12, "tarjeta de agente con padding interno")
+	check(ag_row.rect_clip_content, "la card recorta su contenido (no desborda)")
+	var stb = ag_row.get_stylebox("normal")
+	check(stb.content_margin_top == 8 and stb.content_margin_left == 12, "card con padding interno")
+	check(not _has_label_text(ag_row, "hola mundo"), "preview colapsado por defecto")
+	check(_find_chevron(ag_row) != null, "chevron de disclosure presente")
+	_r._on_preview_toggle("ag@h")
+	check(_row_height(_r, "ag@h") == 100, "card expandida crece por el preview")
+	check(_has_label_text(_r._box.get_node_or_null("row_ag_h"), "hola mundo"), "preview visible al expandir")
+	# Tocar el chevron no abre el chat (no propaga a `_on_row`).
+	_selected.clear()
+	_r._on_preview_toggle("ag@h") # colapsa
+	_r._on_row("ag@h")
+	check(_selected.empty(), "el toggle del chevron no abre el chat")
+	_r._on_preview_toggle("ag@h") # expande
+	_r._on_preview_toggle("ag@h") # colapsa
+	check(not bool(_r._expanded.get("ag@h", true)), "estado de expansión por agente vuelve a colapsado")
+
+	# Preview honesto: placeholder OMEMO legible o vacío; sin datos = sin preview.
+	check(_r.preview_body("Mensaje cifrado con OMEMO: xat todavía no puede leerlo.") == "mensaje cifrado", "placeholder OMEMO legible")
+	check(_r.preview_body("") == "", "sin cuerpo = sin preview")
+	check(_r.preview_body("  hola  ") == "hola", "preview recorta espacios")
 
 	# Guard drag-vs-tap vía eventos reales: touch con arrastre no abre; toque sí.
 	_selected.clear()
@@ -134,6 +154,23 @@ func _row_bares(p_box) -> Array:
 func _row_height(p_r, p_bare: String) -> int:
 	var row = p_r._box.get_node_or_null(p_r._row_name(p_bare))
 	return int(row.rect_min_size.y) if row != null else -1
+
+func _has_label_text(p_node, p_text: String) -> bool:
+	if p_node is Label and p_node.text == p_text:
+		return true
+	for c in p_node.get_children():
+		if _has_label_text(c, p_text):
+			return true
+	return false
+
+func _find_chevron(p_node):
+	if p_node is Button and str(p_node.name).begins_with("chev_"):
+		return p_node
+	for c in p_node.get_children():
+		var r = _find_chevron(c)
+		if r != null:
+			return r
+	return null
 
 func check(cond: bool, label: String) -> void:
 	if cond:

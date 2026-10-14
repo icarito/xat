@@ -43,6 +43,7 @@ var _invites := {} # sala -> {from, reason} (invitaciones MUC pendientes)
 var _deferred := {} # sala -> {from, reason} ("Ahora no": pendiente en Salas)
 var _names := {} # bare -> nombre visible del roster (X2.4 humaniza la invitación)
 var _last_msg := {} # bare -> {from, body, ts} último mensaje, para la tarjeta de agente (X2.2)
+var _expanded := {} # bare -> bool: preview del último mensaje desplegado (colapsa por defecto)
 var _room_info := {} # sala -> {subject, last_from, last_body, last_ts, occupants} (X3.1)
 var _fleet := {} # resumen del snapshot de flota (X2.5); {} = sin datos
 var _fleet_strip: Button
@@ -79,6 +80,7 @@ const TAP_SLOP := 10.0
 var _pointer_down := false
 var _pointer_start := Vector2.ZERO
 var _pointer_moved := false
+var _pending_chev := "" # bare cuyo chevron acaba de togglear (no abrir el chat)
 var _touch_start := Vector2.ZERO
 var _touch_active := false
 var _swipe_consumed := false
@@ -87,6 +89,10 @@ var _swipe_consumed := false
 # quedan alineados entre filas (no pegados al borde izquierdo a pantalla completa).
 const COLUMN_MAX := 320.0
 const COLUMN_MARGIN := 18.0
+# Gutter derecho reservado en cada card de contacto/agente para el chevron de
+# preview (>=44 px de objetivo táctil); se reserva en todas las filas para que
+# los avatares queden alineados entre agentes y personas.
+const CARD_GUTTER := 44.0
 
 func _init() -> void:
 	name = "RosterPanel"
@@ -497,6 +503,7 @@ func _begin_pointer(p_pos: Vector2) -> void:
 	_pointer_down = true
 	_pointer_start = p_pos
 	_pointer_moved = false
+	_pending_chev = ""
 	_touch_start = p_pos
 	_touch_active = true
 	_swipe_consumed = false
@@ -1008,6 +1015,7 @@ func _make_room_row(p_room: String) -> Button:
 	row.name = _room_row_name(p_room)
 	row.toggle_mode = true
 	row.mouse_filter = Control.MOUSE_FILTER_PASS
+	row.rect_clip_content = true # el Button no recorta: evita solaparse con la fila siguiente
 	# X3.1: cada sala es una tarjeta.
 	row.add_stylebox_override("normal", XatTheme.with_border(XatTheme.box(P.BG2, 10, 8, 6), P.LINE))
 	row.add_stylebox_override("focus", StyleBoxEmpty.new())
@@ -1233,13 +1241,16 @@ func _rebuild_grid() -> void:
 
 func _make_row(p_bare: String) -> Button:
 	var is_agent = _agents.has(p_bare)
-	var last_body = str(_last_msg.get(p_bare, {}).get("body", "")) if _last_msg.has(p_bare) else ""
+	var preview = preview_body(str(_last_msg.get(p_bare, {}).get("body", ""))) if _last_msg.has(p_bare) else ""
+	var expanded = is_agent and bool(_expanded.get(p_bare, false))
 	var row = Button.new()
 	row.name = _row_name(p_bare)
 	row.toggle_mode = true
 	row.mouse_filter = Control.MOUSE_FILTER_PASS # el arrastre debe llegar al ScrollContainer
-	# X2.2: el contacto con caps de agente es una tarjeta (borde AGENT_EDGE),
-	# con más aire interno que antes (vertical y horizontal).
+	# El Button no recorta por defecto: sin esto el preview se dibuja sobre la
+	# fila siguiente. `rect_clip_content` garantiza que nada flote entre tarjetas.
+	row.rect_clip_content = true
+	# X2.2: el contacto con caps de agente es una tarjeta (borde AGENT_EDGE).
 	if is_agent:
 		row.add_stylebox_override("normal", XatTheme.with_border(XatTheme.box(P.BG2, 10, 12, 8), P.AGENT_EDGE))
 		row.add_stylebox_override("hover", XatTheme.with_border(XatTheme.box(P.BG2.lightened(0.1), 10, 12, 8), P.AGENT_EDGE))
@@ -1251,10 +1262,10 @@ func _make_row(p_bare: String) -> Button:
 		row.add_stylebox_override("focus", StyleBoxEmpty.new())
 		row.add_stylebox_override("pressed", XatTheme.with_border(XatTheme.box(P.BG2, 10), P.LINE))
 	row.pressed = p_bare == _selected
-	# Tarjeta de agente: alto cómodo (dos o tres líneas); los contactos normales
-	# mantienen su alto de lista.
+	# Card compacta: orbe (48) + nombre + actividad. Expandida suma ~2 líneas de
+	# preview. Mismo alto en 1 o N columnas (mobile y desktop).
 	if is_agent:
-		row.rect_min_size = Vector2(0, 70 if last_body != "" else 60)
+		row.rect_min_size = Vector2(0, 100 if expanded else 64)
 	else:
 		row.rect_min_size = Vector2(0, 60)
 	row.set_meta("bare", p_bare)
@@ -1272,13 +1283,14 @@ func _make_row(p_bare: String) -> Button:
 	h.add_constant_override("separation", 0)
 	row.add_child(h)
 	var inner = HBoxContainer.new()
-	inner.rect_min_size.x = _column_width()
+	inner.rect_min_size.x = _card_inner_width()
 	inner.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	inner.add_constant_override("separation", 10)
 	h.add_child(inner)
 	row.set_meta("inner", inner)
+	row.set_meta("gutter", true) # reserva el gutter derecho (chevron) al reescalar
 	var online = _online.get(p_bare, false)
-	if _agents.has(p_bare) and not _avatars.has(p_bare):
+	if is_agent and not _avatars.has(p_bare):
 		var orb = AgentOrb.new()
 		orb.set_compact(true)
 		orb.mouse_filter = Control.MOUSE_FILTER_IGNORE
@@ -1303,6 +1315,7 @@ func _make_row(p_bare: String) -> Button:
 	name_l.text = str(_names.get(p_bare, p_bare.split("@")[0]))
 	name_l.clip_text = true
 	name_l.hint_tooltip = p_bare
+	name_l.add_font_override("font", XatTheme.font(P.FONT_MEDIUM, P.FONT_SIZE - 1))
 	v.add_child(name_l)
 	var st = Label.new()
 	st.text = _status_text(p_bare)
@@ -1310,15 +1323,64 @@ func _make_row(p_bare: String) -> Button:
 	st.add_color_override("font_color", P.activity_color(_agents[p_bare].get("activity", "")) if _agents.has(p_bare) and online else P.TEXT_DIM)
 	v.add_child(st)
 	row.set_meta("status", st)
-	# X2.2: último mensaje en la tarjeta del agente.
-	if is_agent and last_body != "":
+	# Preview del último mensaje: colapsado por defecto; máx. 2 líneas.
+	if is_agent and expanded and preview != "":
 		var lm = Label.new()
-		lm.text = last_body
+		lm.text = preview
+		lm.autowrap = true
+		lm.max_lines_visible = 2
 		lm.clip_text = true
 		lm.add_color_override("font_color", P.TEXT_DIM)
 		lm.add_font_override("font", XatTheme.font(P.FONT_REGULAR, P.FONT_SIZE - 3))
 		v.add_child(lm)
+	# Chevron de disclosure (>=44 px). Button hijo con mouse_filter STOP: consume
+	# el clic y NO dispara `_on_row`, así no abre el chat.
+	var tail = Control.new()
+	tail.rect_min_size = Vector2(CARD_GUTTER, 0)
+	tail.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	h.add_child(tail)
+	if is_agent:
+		var chev = Button.new()
+		chev.name = "chev_" + p_bare.replace("@", "_").replace(".", "_")
+		chev.text = "▾" if expanded else "▸"
+		chev.flat = true
+		chev.focus_mode = Control.FOCUS_NONE
+		chev.rect_min_size = Vector2(CARD_GUTTER, 44)
+		chev.anchor_top = 0.5
+		chev.anchor_bottom = 0.5
+		chev.anchor_left = 1.0
+		chev.anchor_right = 1.0
+		chev.margin_top = -22
+		chev.margin_bottom = 22
+		chev.margin_left = -CARD_GUTTER
+		chev.add_color_override("font_color", P.TEXT_DIM)
+		chev.add_color_override("font_color_hover", P.TEXT)
+		for sbox in ["normal", "hover", "pressed", "focus"]:
+			chev.add_stylebox_override(sbox, StyleBoxEmpty.new())
+		chev.connect("pressed", self, "_on_preview_toggle", [p_bare])
+		tail.add_child(chev)
 	return row
+
+# Despliega/colapsa el preview del último mensaje de ESE agente (estado por JID).
+func _on_preview_toggle(p_bare: String) -> void:
+	_expanded[p_bare] = not bool(_expanded.get(p_bare, false))
+	_pending_chev = p_bare # si el press se propaga al Button padre, no abrir el chat
+	_rebuild()
+
+# Ancho útil del contenido de la card (sin el gutter del chevron).
+func _card_inner_width() -> float:
+	return max(120.0, _column_width() - CARD_GUTTER)
+
+# Texto de preview legible. Sin cuerpo o placeholder de cifrado OMEMO => sin
+# texto crudo (honestidad: no inventar ni mostrar "no se pudo leerlo").
+static func preview_body(p_body: String) -> String:
+	var b = str(p_body).strip_edges()
+	if b == "":
+		return ""
+	if b.find("OMEMO") >= 0 and (b.find("cifrado") >= 0 or b.find("no puede leerlo") >= 0):
+		return "mensaje cifrado"
+	return b
+
 
 # Ancho de la columna: acotado a COLUMN_MAX y con margen simétrico; si el panel
 # es angosto (sidebar de escritorio), ocupa el ancho disponible.
@@ -1339,9 +1401,10 @@ func _column_width() -> float:
 
 func _on_resized() -> void:
 	var w = _column_width()
+	var w_card = _card_inner_width()
 	for row in _box.get_children():
 		if row.has_meta("inner"):
-			row.get_meta("inner").rect_min_size.x = w
+			row.get_meta("inner").rect_min_size.x = w_card if row.has_meta("gutter") else w
 	if _rooms_box != null:
 		for row in _rooms_box.get_children():
 			if row.has_meta("inner"):
@@ -1350,7 +1413,7 @@ func _on_resized() -> void:
 		for col in _grid.get_children():
 			for row in col.get_children():
 				if row.has_meta("inner"):
-					row.get_meta("inner").rect_min_size.x = w
+					row.get_meta("inner").rect_min_size.x = w_card if row.has_meta("gutter") else w
 
 func _on_scroll_started() -> void:
 	_scrolling = true
@@ -1383,6 +1446,10 @@ func _ring(p_bare: String) -> Color:
 	return P.OK
 
 func _on_row(p_bare: String) -> void:
+	# El toque fue el chevron de preview: no abrir el chat.
+	if _pending_chev == p_bare:
+		_pending_chev = ""
+		return
 	# El toque fue parte de un arrastre (scroll o swipe): no abrir el chat.
 	if _pointer_moved or _scrolling:
 		return

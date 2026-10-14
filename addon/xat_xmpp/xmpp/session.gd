@@ -83,6 +83,24 @@ const OmemoDevice = preload("res://addons/xat_xmpp/xmpp/omemo_device.gd")
 const OmemoEngine = preload("res://addons/xat_xmpp/xmpp/omemo_session.gd")
 
 const OMEMO_PLACEHOLDER := "🔒 Mensaje cifrado con OMEMO: xat todavía no puede leerlo."
+
+# Marcas del body de respaldo que otros clientes ponen en mensajes OMEMO cuando
+# no pueden incluir a este dispositivo (p. ej. "[This message is OMEMO encrypted]"
+# de Conversations). Son textos cortos en inglés; los normalizamos al aviso local.
+const OMEMO_FALLBACK_MARKERS := [
+	"omemo encrypted", "encrypted with omemo", "encrypted using omemo",
+	"cifrado con omemo", "doesn't support omemo", "does not support omemo",
+	"no soporta omemo", "mensaje cifrado con omemo",
+]
+
+static func is_omemo_fallback_body(p_body: String) -> bool:
+	var t = p_body.strip_edges().to_lower()
+	if t == "" or t.length() > 160:
+		return false
+	for m in OMEMO_FALLBACK_MARKERS:
+		if t.find(m) >= 0:
+			return true
+	return false
 const RESOURCE_BASE := "xat"
 const RESOURCE_PATH := "user://xat_resource"
 const PING_INTERVAL := 180.0
@@ -1208,6 +1226,12 @@ func _on_message(p_stanza) -> void:
 		_on_mam_fin(p_stanza)
 		return
 	var rec = Message.parse(p_stanza)
+	# Body de respaldo de otro cliente para un mensaje OMEMO que no pudimos leer:
+	# normalizarlo al aviso local para no mostrar texto crudo en el chat ni en el
+	# preview del roster.
+	if is_omemo_fallback_body(str(rec.get("body", ""))):
+		rec["body"] = OMEMO_PLACEHOLDER
+		rec["encrypted"] = true
 	# La historia de MUC puede reenviar la misma stanza tras reconectar. La
 	# sesión Signal ya avanzó al descifrarla en vivo; no volver a descifrarla.
 	if rec["type"] == "groupchat" and store != null and store.available():
