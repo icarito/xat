@@ -19,6 +19,7 @@ func _init():
 	_r.set_peers(["ag@h", "per@h"])
 	_r.set_online("per@h", true)
 	_r.set_agent_state("ag@h", {"activity": "available"})
+	_r._flush()
 	_r.set_rooms(["sala@conference.h"])
 
 	# Sin preview (todavía no hay último mensaje) no debe aparecer el chevron.
@@ -46,15 +47,26 @@ func _init():
 	# Card de agente: compacta por defecto (sin preview), recorta su contenido y
 	# un chevron despliega el preview por agente.
 	_r.set_last_message("ag@h", "ag@h", "hola mundo", "2026-10-14T10:00:00Z")
-	check(_row_height(_r, "ag@h") == 64, "card de agente compacta por defecto")
+	_r._flush()
+	check(_row_height(_r, "ag@h") >= 56 and _row_height(_r, "ag@h") <= 72, "card de agente compacta por defecto")
 	var ag_row = _r._box.get_node_or_null("row_ag_h")
 	check(ag_row.rect_clip_content, "la card recorta su contenido (no desborda)")
 	var stb = ag_row.get_stylebox("normal")
 	check(stb.content_margin_top == 8 and stb.content_margin_left == 12, "card con padding interno")
 	check(not _has_label_text(ag_row, "hola mundo"), "preview colapsado por defecto")
 	check(_find_chevron(ag_row) != null, "chevron de disclosure presente")
+	# Responsive: `inner` se estira (sin ancho mínimo fijo) => el chevron entra
+	# siempre. Glow cyan SÓLO en la stylebox "pressed" (fila seleccionada).
+	var inner_node = _find_named(ag_row, "inner")
+	check(inner_node != null and inner_node.rect_min_size.x == 0.0, "inner responsive (sin ancho mínimo)")
+	check(inner_node != null and inner_node.size_flags_horizontal == Control.SIZE_EXPAND_FILL, "inner se estira al ancho disponible")
+	var normal_box = ag_row.get_stylebox("normal")
+	check(normal_box.border_width_top == 1 and normal_box.border_color.a > 0.99, "card no seleccionada: borde neutro fino (sin cyan)")
+	var sel_box = ag_row.get_stylebox("pressed")
+	check(sel_box.border_width_top == 2 and sel_box.border_color.a > 0.4 and sel_box.border_color.a < 0.7, "seleccionado: glow cyan suave")
+	check(sel_box.shadow_size >= 2 and sel_box.shadow_color.a > 0.1, "seleccionado: halo tenue")
 	_r._on_preview_toggle("ag@h")
-	check(_row_height(_r, "ag@h") == 100, "card expandida crece por el preview")
+	check(_row_height(_r, "ag@h") > 64, "card expandida crece por el preview")
 	check(_has_label_text(_r._box.get_node_or_null("row_ag_h"), "hola mundo"), "preview visible al expandir")
 	# Tocar el chevron no abre el chat (no propaga a `_on_row`).
 	_selected.clear()
@@ -172,6 +184,15 @@ func _find_chevron(p_node):
 		return p_node
 	for c in p_node.get_children():
 		var r = _find_chevron(c)
+		if r != null:
+			return r
+	return null
+
+func _find_named(p_node, p_name: String):
+	if p_node is Node and p_node.name == p_name:
+		return p_node
+	for c in p_node.get_children():
+		var r = _find_named(c, p_name)
 		if r != null:
 			return r
 	return null

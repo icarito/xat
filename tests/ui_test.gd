@@ -47,6 +47,7 @@ func _init():
 	m._roster.set_online("a@h", true)
 	check(m._roster._peers.size() == 2, "roster con dos peers")
 	m._roster.touch("b@h", "2026-10-08T10:00:00Z")
+	m._roster._flush() # el reorden es diferido: forzamos para inspeccionar
 	check(m._roster._sorted()[0] == "b@h" and m._roster._box.get_child(0).get_meta("bare") == "b@h", "roster ordenado por actividad")
 
 	# Contactos: botón de alta y validación del diálogo.

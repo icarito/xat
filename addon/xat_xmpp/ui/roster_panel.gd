@@ -84,14 +84,13 @@ var _pending_chev := "" # bare cuyo chevron acaba de togglear (no abrir el chat)
 var _touch_start := Vector2.ZERO
 var _touch_active := false
 var _swipe_consumed := false
+var _dirty := false # rebuild diferido: coalesce ráfagas de presencia/estado
 
-# La lista es una columna de ancho fijo, centrada en el panel: los avatares
-# quedan alineados entre filas (no pegados al borde izquierdo a pantalla completa).
-const COLUMN_MAX := 320.0
+# Margen lateral del roster (encabezado y páginas). Los anchos de fila ya no se
+# fijan a mano: la fila se estira al ancho disponible (responsive).
 const COLUMN_MARGIN := 18.0
-# Gutter derecho reservado en cada card de contacto/agente para el chevron de
-# preview (>=44 px de objetivo táctil); se reserva en todas las filas para que
-# los avatares queden alineados entre agentes y personas.
+# Gutter derecho reservado en una card para el chevron de preview (>=44 px de
+# objetivo táctil). Sólo existe cuando la fila tiene preview que mostrar.
 const CARD_GUTTER := 44.0
 
 func _init() -> void:
@@ -191,8 +190,7 @@ func _init() -> void:
 	_grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_grid.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_grid_scroll.add_child(_grid)
-	# Recoloca la columna cuando cambia el ancho (móvil portrait/landscape).
-	connect("resized", self, "_on_resized")
+	# Sin anchos fijos: las filas se estiran al ancho disponible (responsive).
 	# Pie: ajustes (sonido / vibración / avatar / acerca) con los mismos iconos
 	# vectoriales que el sidebar de landscape, para no mezclar estilos.
 	var foot = HBoxContainer.new()
@@ -789,25 +787,49 @@ func refresh() -> void:
 
 func set_online(p_bare: String, p_online: bool) -> void:
 	_online[p_bare] = p_online
-	_rebuild()
+	# Actualiza la fila existente en el lugar (sin recrear orbes/badges).
+	var row = _find_row(p_bare)
+	if row == null:
+		_mark_dirty()
+		return
+	_refresh_row_presence(row, p_bare, p_online)
 
-# ponytail: rebuild completo por evento; con roster grande, actualizar sólo la fila.
+# Estado de presencia de una fila ya montada: orbe, badge y línea de estado.
+func _refresh_row_presence(row, p_bare: String, p_online: bool) -> void:
+	if row.has_meta("orb"):
+		row.get_meta("orb").set_connected(p_online)
+	elif row.has_meta("badge"):
+		row.get_meta("badge").modulate.a = 1.0 if p_online else 0.55
+		row.get_meta("badge").set_ring(_ring(p_bare))
+	if row.has_meta("status"):
+		var st = row.get_meta("status")
+		st.text = _status_text(p_bare)
+		st.add_color_override("font_color", _status_color(p_bare))
+
 func set_agent_state(p_bare: String, p_state: Dictionary) -> void:
 	var was_agent = _agents.has(p_bare)
 	_agents[p_bare] = p_state
-	var row = _box.get_node_or_null(_row_name(p_bare))
+	var row = _find_row(p_bare)
 	if was_agent and row != null:
 		if row.has_meta("orb"):
 			row.get_meta("orb").set_state(p_state)
-		else:
+		elif row.has_meta("badge"):
 			row.get_meta("badge").set_ring(_ring(p_bare))
-		row.get_meta("status").text = _status_text(p_bare)
+		if row.has_meta("status"):
+			var st = row.get_meta("status")
+			st.text = _status_text(p_bare)
+			st.add_color_override("font_color", _status_color(p_bare))
 	else:
-		_rebuild()
+		_mark_dirty() # agente nuevo (o fila no visible): repintar el roster
 
 func set_avatar(p_bare: String, p_tex) -> void:
 	_avatars[p_bare] = p_tex
-	_rebuild()
+	var row = _find_row(p_bare)
+	# Si la fila ya muestra un badge, cambia la textura en el lugar.
+	if row != null and row.has_meta("badge"):
+		row.get_meta("badge").set_texture(p_tex)
+	else:
+		_mark_dirty() # orbe->badge (agente sin avatar) o fila no visible
 
 # Último mensaje con el peer/sala: si cambia el orden, se reordena.
 func touch(p_bare: String, p_ts: String) -> void:
@@ -824,7 +846,7 @@ func touch(p_bare: String, p_ts: String) -> void:
 	for row in _box.get_children():
 		shown.append(row.get_meta("bare"))
 	if shown != _filtered_peers():
-		_rebuild()
+		_mark_dirty()
 
 # Orden: actividad reciente primero (ISO compara como texto), luego en línea, luego nombre.
 func _sorted() -> Array:
@@ -852,7 +874,7 @@ func set_unread(p_bare: String, p_n: int) -> void:
 	_unread[p_bare] = p_n
 	if p_n == 0:
 		if had:
-			_rebuild() # restaura el color de estado
+			_mark_dirty() # restaura el color de estado
 		return
 	var row = _find_row(p_bare)
 	if row != null:
@@ -905,7 +927,7 @@ func set_display_name(p_bare: String, p_name: String) -> void:
 func set_last_message(p_bare: String, p_from: String, p_body: String, p_ts: String = "") -> void:
 	_last_msg[p_bare] = {"from": p_from, "body": p_body, "ts": p_ts}
 	if _agents.has(p_bare):
-		_rebuild()
+		_mark_dirty()
 
 # X2.5: resumen del snapshot de flota (mismo formato que fleet_snapshot.parse).
 func set_fleet_state(p_fleet: Dictionary) -> void:
@@ -1036,11 +1058,12 @@ func _make_room_row(p_room: String) -> Button:
 	h.add_constant_override("separation", 0)
 	row.add_child(h)
 	var inner = HBoxContainer.new()
-	inner.rect_min_size.x = _column_width()
+	inner.name = "inner"
+	inner.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	inner.rect_min_size.x = 0.0
 	inner.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	inner.add_constant_override("separation", 10)
 	h.add_child(inner)
-	row.set_meta("inner", inner)
 	# X3.2: el "#" vive en un contenedor de 44 px y queda centrado siempre.
 	inner.add_child(_hash_box())
 	var v = VBoxContainer.new()
@@ -1165,7 +1188,23 @@ func _occupant_stack(p_occupants: Array) -> Control:
 		c.add_child(more)
 	return c
 
+# Rebuild diferido: una ráfaga de eventos de presencia/estado no reconstruye N
+# veces; el flush corre al final del frame (o a mano desde los tests).
+func _mark_dirty() -> void:
+	if _dirty:
+		return
+	_dirty = true
+	call_deferred("_flush")
+
+# Fuerza el rebuild pendiente ahora (tests/acciones que necesitan sync).
+func _flush() -> void:
+	if not _dirty:
+		return
+	_dirty = false
+	_rebuild()
+
 func _rebuild() -> void:
+	_dirty = false
 	_update_tab_labels()
 	for c in _box.get_children():
 		_box.remove_child(c)
@@ -1252,28 +1291,23 @@ func _make_row(p_bare: String) -> Button:
 	# El Button no recorta por defecto: sin esto el preview se dibuja sobre la
 	# fila siguiente. `rect_clip_content` garantiza que nada flote entre tarjetas.
 	row.rect_clip_content = true
-	# X2.2: el contacto con caps de agente es una tarjeta (borde AGENT_EDGE).
+	# Card neutra (borde sutil P.LINE / sin cyan). El glow cyan queda SÓLO en el
+	# stylebox "pressed", que es el que dibuja la fila cuando `row.pressed==true`.
 	if is_agent:
-		row.add_stylebox_override("normal", XatTheme.with_border(XatTheme.box(P.BG2, 10, 12, 8), P.AGENT_EDGE))
-		row.add_stylebox_override("hover", XatTheme.with_border(XatTheme.box(P.BG2.lightened(0.1), 10, 12, 8), P.AGENT_EDGE))
+		row.add_stylebox_override("normal", XatTheme.with_border(XatTheme.box(P.BG2, 10, 12, 8), P.LINE))
+		row.add_stylebox_override("hover", XatTheme.with_border(XatTheme.box(P.BG2.lightened(0.1), 10, 12, 8), P.LINE))
 		row.add_stylebox_override("focus", StyleBoxEmpty.new())
-		row.add_stylebox_override("pressed", XatTheme.with_border(XatTheme.box(P.BG2, 10, 12, 8), P.LINE))
+		row.add_stylebox_override("pressed", _selected_box())
 	else:
 		row.add_stylebox_override("normal", StyleBoxEmpty.new())
 		row.add_stylebox_override("hover", XatTheme.box(P.BG2.darkened(0.15), 10))
 		row.add_stylebox_override("focus", StyleBoxEmpty.new())
-		row.add_stylebox_override("pressed", XatTheme.with_border(XatTheme.box(P.BG2, 10), P.LINE))
+		row.add_stylebox_override("pressed", _selected_box())
 	row.pressed = p_bare == _selected
-	# Card compacta: orbe (48) + nombre + actividad. Expandida suma ~2 líneas de
-	# preview. Mismo alto en 1 o N columnas (mobile y desktop).
-	if is_agent:
-		row.rect_min_size = Vector2(0, 100 if expanded else 64)
-	else:
-		row.rect_min_size = Vector2(0, 60)
 	row.set_meta("bare", p_bare)
 	row.connect("pressed", self, "_on_row", [p_bare])
-	# h llena la fila y centra el contenido; la columna (inner) tiene ancho fijo,
-	# así los avatares quedan alineados en vertical.
+	# h llena la fila; `inner` se estira al ancho disponible (sin mínimo fijo), así
+	# el nombre/estado eliden con clip_text y el chevron nunca queda fuera.
 	var h = HBoxContainer.new()
 	h.anchor_right = 1.0
 	h.anchor_bottom = 1.0
@@ -1285,11 +1319,12 @@ func _make_row(p_bare: String) -> Button:
 	h.add_constant_override("separation", 0)
 	row.add_child(h)
 	var inner = HBoxContainer.new()
-	inner.rect_min_size.x = _card_inner_width() if has_gutter else _column_width()
+	inner.name = "inner"
+	inner.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	inner.rect_min_size.x = 0.0
 	inner.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	inner.add_constant_override("separation", 10)
 	h.add_child(inner)
-	row.set_meta("inner", inner)
 	var online = _online.get(p_bare, false)
 	if is_agent and not _avatars.has(p_bare):
 		var orb = AgentOrb.new()
@@ -1321,18 +1356,23 @@ func _make_row(p_bare: String) -> Button:
 	var st = Label.new()
 	st.text = _status_text(p_bare)
 	st.clip_text = true
-	st.add_color_override("font_color", P.activity_color(_agents[p_bare].get("activity", "")) if _agents.has(p_bare) and online else P.TEXT_DIM)
+	st.add_color_override("font_color", _status_color(p_bare))
 	v.add_child(st)
 	row.set_meta("status", st)
 	# Preview del último mensaje: colapsado por defecto; máx. 2 líneas.
 	if is_agent and expanded and preview != "":
+		var pfont = XatTheme.font(P.FONT_REGULAR, P.FONT_SIZE - 3)
 		var lm = Label.new()
 		lm.text = preview
+		# Con autowrap NO usar clip_text: en Godot 3 deja el label en 1x1 px y no
+		# se ve nada. Se acotan 2 líneas con max_lines_visible + alto explícito.
 		lm.autowrap = true
+		lm.clip_text = false
 		lm.max_lines_visible = 2
-		lm.clip_text = true
+		lm.hint_tooltip = preview
+		lm.rect_min_size = Vector2(0, pfont.get_height() * 2.0)
 		lm.add_color_override("font_color", P.TEXT_DIM)
-		lm.add_font_override("font", XatTheme.font(P.FONT_REGULAR, P.FONT_SIZE - 3))
+		lm.add_font_override("font", pfont)
 		v.add_child(lm)
 	# Chevron de disclosure: SÓLO si hay preview que mostrar. Va en un gutter de
 	# CARD_GUTTER px; Button hijo con mouse_filter STOP para no abrir el chat.
@@ -1341,7 +1381,6 @@ func _make_row(p_bare: String) -> Button:
 		tail.rect_min_size = Vector2(CARD_GUTTER, 0)
 		tail.mouse_filter = Control.MOUSE_FILTER_IGNORE
 		h.add_child(tail)
-		row.set_meta("gutter", true) # reserva el gutter derecho al reescalar
 		var chev = Button.new()
 		chev.name = "chev_" + p_bare.replace("@", "_").replace(".", "_")
 		chev.text = "▾" if expanded else "▸"
@@ -1361,6 +1400,10 @@ func _make_row(p_bare: String) -> Button:
 			chev.add_stylebox_override(sbox, StyleBoxEmpty.new())
 		chev.connect("pressed", self, "_on_preview_toggle", [p_bare])
 		tail.add_child(chev)
+	# Alto según el contenido (no fijo): así el preview nunca se recorta a
+	# cualquier escala de fuente. Mínimo el orbe (48) + padding de la card.
+	var content_h = max(48.0, v.get_combined_minimum_size().y)
+	row.rect_min_size = Vector2(0, max(64.0 if is_agent else 60.0, content_h + 2.0 * float(pad)))
 	return row
 
 # Despliega/colapsa el preview del último mensaje de ESE agente (estado por JID).
@@ -1369,9 +1412,16 @@ func _on_preview_toggle(p_bare: String) -> void:
 	_pending_chev = p_bare # si el press se propaga al Button padre, no abrir el chat
 	_rebuild()
 
-# Ancho útil del contenido de la card (sin el gutter del chevron).
-func _card_inner_width() -> float:
-	return max(120.0, _column_width() - CARD_GUTTER)
+# Glow cyan suave para la fila SELECCIONADA (stylebox "pressed" con
+# `row.pressed==true`): borde de 2px a media opacidad + halo tenue. No se usa en
+# normal/hover, así el cyan no aparece en las filas no seleccionadas.
+func _selected_box() -> StyleBoxFlat:
+	var s = XatTheme.box(P.BG2, 10, 12, 8)
+	s.border_color = Color(P.AGENT_EDGE.r, P.AGENT_EDGE.g, P.AGENT_EDGE.b, 0.5)
+	s.set_border_width_all(2)
+	s.shadow_color = Color(P.AGENT_EDGE.r, P.AGENT_EDGE.g, P.AGENT_EDGE.b, 0.18)
+	s.shadow_size = 3
+	return s
 
 # Texto de preview legible. Sin cuerpo o placeholder de cifrado OMEMO => sin
 # texto crudo (honestidad: no inventar ni mostrar "no se pudo leerlo").
@@ -1384,44 +1434,20 @@ static func preview_body(p_body: String) -> String:
 	return b
 
 
-# Ancho de la columna: acotado a COLUMN_MAX y con margen simétrico; si el panel
-# es angosto (sidebar de escritorio), ocupa el ancho disponible.
-func _column_width() -> float:
-	var avail := 0.0
-	if _columns > 1:
-		avail = rect_size.x
-	elif _scroll != null:
-		avail = _scroll.rect_size.x
-	if avail <= 0.0:
-		avail = rect_size.x
-	if avail <= 0.0:
-		return COLUMN_MAX
-	if _columns > 1:
-		# Ancho de celda: reparte el ancho entre las columnas.
-		return max(160.0, (avail - 2.0 * COLUMN_MARGIN) / float(_columns))
-	return min(max(140.0, avail - 2.0 * COLUMN_MARGIN), COLUMN_MAX)
-
-func _on_resized() -> void:
-	var w = _column_width()
-	var w_card = _card_inner_width()
-	for row in _box.get_children():
-		if row.has_meta("inner"):
-			row.get_meta("inner").rect_min_size.x = w_card if row.has_meta("gutter") else w
-	if _rooms_box != null:
-		for row in _rooms_box.get_children():
-			if row.has_meta("inner"):
-				row.get_meta("inner").rect_min_size.x = w
-	if _columns > 1 and _grid != null:
-		for col in _grid.get_children():
-			for row in col.get_children():
-				if row.has_meta("inner"):
-					row.get_meta("inner").rect_min_size.x = w_card if row.has_meta("gutter") else w
-
 func _on_scroll_started() -> void:
 	_scrolling = true
 
 func _on_scroll_ended() -> void:
 	_scrolling = false
+
+# Color de la línea de estado: no leídos ámbar, actividad del agente en línea, o
+# gris. Compartido por `_make_row` y las actualizaciones en el lugar.
+func _status_color(p_bare: String) -> Color:
+	if int(_unread.get(p_bare, 0)) > 0:
+		return P.PENDING
+	if _agents.has(p_bare) and _online.get(p_bare, false):
+		return P.activity_color(str(_agents[p_bare].get("activity", "")))
+	return P.TEXT_DIM
 
 func _status_text(p_bare: String) -> String:
 	var n = int(_unread.get(p_bare, 0))

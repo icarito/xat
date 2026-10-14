@@ -171,7 +171,7 @@ var _rec_phase := "idle"        # idle | armed | held | locked | cancel
 var _rec_index := -1            # índice de toque que posee el gesto (-2 = mouse)
 # Histéresis del botón de cola: tras cambiar de modo (mic<->enviar) ignora toques
 # por un momento, para no "apretar" el modo nuevo antes de que se asiente.
-var tail_hysteresis_ms := 250
+var tail_hysteresis_ms := 350
 var _tail_mode_ms := 0
 var _rec_origin := Vector2.ZERO
 var _rec_arm_timer: Timer

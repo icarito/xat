@@ -126,6 +126,7 @@ var _playing_path := ""
 var _playing_id := ""
 var _playing_active := false
 var _rec_pending_peer := ""
+var _rec_pending_start := false
 var _forward_rec := {}
 var _forward_dialog
 var _native_media = null          # singleton XatMedia (selector/cámara nativa)
@@ -1346,22 +1347,40 @@ func _on_voice_toggle(peer: String, start: bool) -> void:
 			_chat.set_recording(false, 0)
 			juice.toast("Concedé el permiso de micrófono y reintentá", P.ERROR)
 			return
-		_rec_start_ms = OS.get_ticks_msec()
-		if _recorder.start():
-			_rec_timer.start()
-		else:
-			_chat.set_recording(false, 0)
-			juice.toast("No se pudo acceder al micrófono", P.ERROR)
+		# Arrancar el micrófono crea el AudioRecord por JNI y puede bloquear el
+		# hilo principal ~100 ms. Se difiere un frame para que el UI pinte el
+		# indicador de grabación antes (si no, parece que se colgó).
+		_rec_pending_start = true
+		call_deferred("_start_recorder")
+		return
 	else:
 		_rec_timer.stop()
 		_chat.set_recording(false, 0)
+		if _rec_pending_start:
+			# Se soltó antes de que arrancara (diferido): no hay nada que parar.
+			_rec_pending_start = false
+			return
 		# El encode va a un Thread: esperamos recording_finished para subir.
 		_rec_pending_peer = peer
 		var r = _recorder.stop()
 		if r.empty():
 			_rec_pending_peer = ""
-		elif not r.get("pending", false):
+		elif r.get("pending", false):
+			if juice != null:
+				juice.toast("Enviando nota de voz…")
+		else:
 			_on_recording_finished(str(r["path"]), int(r["duration_ms"]), 0)
+
+func _start_recorder() -> void:
+	if not _rec_pending_start:
+		return
+	_rec_pending_start = false
+	_rec_start_ms = OS.get_ticks_msec()
+	if _recorder.start():
+		_rec_timer.start()
+	else:
+		_chat.set_recording(false, 0)
+		juice.toast("No se pudo acceder al micrófono", P.ERROR)
 
 # El Recorder terminó de comprimir/guardar (vuelve desde el thread).
 func _on_recording_finished(p_path: String, p_duration_ms: int, _bytes: int) -> void:
@@ -1384,6 +1403,7 @@ func _mic_permitted() -> bool:
 
 func _on_voice_cancel(_peer: String) -> void:
 	_rec_timer.stop()
+	_rec_pending_start = false
 	_chat.set_recording(false, 0)
 	_recorder.cancel()
 
