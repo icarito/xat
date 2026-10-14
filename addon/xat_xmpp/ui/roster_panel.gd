@@ -1242,7 +1242,9 @@ func _rebuild_grid() -> void:
 func _make_row(p_bare: String) -> Button:
 	var is_agent = _agents.has(p_bare)
 	var preview = preview_body(str(_last_msg.get(p_bare, {}).get("body", ""))) if _last_msg.has(p_bare) else ""
-	var expanded = is_agent and bool(_expanded.get(p_bare, false))
+	# El chevron de disclosure sólo tiene sentido si hay preview que mostrar.
+	var has_gutter = is_agent and preview != ""
+	var expanded = has_gutter and bool(_expanded.get(p_bare, false))
 	var row = Button.new()
 	row.name = _row_name(p_bare)
 	row.toggle_mode = true
@@ -1283,12 +1285,11 @@ func _make_row(p_bare: String) -> Button:
 	h.add_constant_override("separation", 0)
 	row.add_child(h)
 	var inner = HBoxContainer.new()
-	inner.rect_min_size.x = _card_inner_width()
+	inner.rect_min_size.x = _card_inner_width() if has_gutter else _column_width()
 	inner.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	inner.add_constant_override("separation", 10)
 	h.add_child(inner)
 	row.set_meta("inner", inner)
-	row.set_meta("gutter", true) # reserva el gutter derecho (chevron) al reescalar
 	var online = _online.get(p_bare, false)
 	if is_agent and not _avatars.has(p_bare):
 		var orb = AgentOrb.new()
@@ -1333,13 +1334,14 @@ func _make_row(p_bare: String) -> Button:
 		lm.add_color_override("font_color", P.TEXT_DIM)
 		lm.add_font_override("font", XatTheme.font(P.FONT_REGULAR, P.FONT_SIZE - 3))
 		v.add_child(lm)
-	# Chevron de disclosure (>=44 px). Button hijo con mouse_filter STOP: consume
-	# el clic y NO dispara `_on_row`, así no abre el chat.
-	var tail = Control.new()
-	tail.rect_min_size = Vector2(CARD_GUTTER, 0)
-	tail.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	h.add_child(tail)
-	if is_agent:
+	# Chevron de disclosure: SÓLO si hay preview que mostrar. Va en un gutter de
+	# CARD_GUTTER px; Button hijo con mouse_filter STOP para no abrir el chat.
+	if has_gutter:
+		var tail = Control.new()
+		tail.rect_min_size = Vector2(CARD_GUTTER, 0)
+		tail.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		h.add_child(tail)
+		row.set_meta("gutter", true) # reserva el gutter derecho al reescalar
 		var chev = Button.new()
 		chev.name = "chev_" + p_bare.replace("@", "_").replace(".", "_")
 		chev.text = "▾" if expanded else "▸"

@@ -21,6 +21,10 @@ func _init():
 	_r.set_agent_state("ag@h", {"activity": "available"})
 	_r.set_rooms(["sala@conference.h"])
 
+	# Sin preview (todavía no hay último mensaje) no debe aparecer el chevron.
+	var ag_row0 = _r._box.get_node_or_null("row_ag_h")
+	check(ag_row0 != null and _find_chevron(ag_row0) == null, "sin preview => sin chevron")
+
 	check(_row_bares(_r._box) == ["ag@h", "per@h"], "lista completa con Todos")
 
 	_r._set_filter(1)
