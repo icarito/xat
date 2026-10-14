@@ -375,6 +375,103 @@ static func occupant_nicks(p_state: Dictionary) -> Array:
 	out.sort()
 	return out
 
+# --- Agrupación y roles (X9) ---
+
+# Afiliación -> lenguaje humano (X9.2). Sólo mostramos lo que el protocolo trae:
+# `none`/`outcast` no son etiquetas de persona y quedan vacíos.
+static func affiliation_label(p_affiliation: String) -> String:
+	match p_affiliation:
+		"owner":
+			return "dueño"
+		"admin":
+			return "admin"
+		"member":
+			return "miembro"
+	return ""
+
+# Rol -> lenguaje humano (X9.2).
+static func role_label(p_role: String) -> String:
+	match p_role:
+		"moderator":
+			return "moderador"
+	return ""
+
+# Rango para elegir la afiliación/rol "más alto" al fusionar recursos.
+const AFFILIATION_RANK := {"owner": 4, "admin": 3, "member": 2, "none": 1}
+const ROLE_RANK := {"moderator": 3, "participant": 2, "visitor": 1, "none": 0}
+
+# Agrupa ocupantes por JID real (sala no anónima: `<item jid>`), fusionando
+# recursos del mismo bare en una sola persona ("N dispositivos"). En sala
+# anónima (sin `occupant_jid`) cada nick queda como grupo propio: no se agrupa.
+# `p_agents` es {bare -> truthy} de agentes conocidos por caps; también permite
+# resolver ocupantes anónimos por localpart del nick (mismo criterio que el UI).
+# Devuelve grupos ordenados: agentes primero, luego personas, estables por orden
+# de aparición. Función pura y testeable headless.
+static func group_occupants(p_occupants: Array, p_agents: Dictionary = {}) -> Array:
+	var groups := {}
+	var order := []
+	for occ in p_occupants:
+		var nick = str(occ.get("nick", ""))
+		if nick == "":
+			continue
+		var occ_jid = str(occ.get("jid", ""))
+		var bare = bare_of(occ_jid) if occ_jid != "" else _agent_bare_for_nick(nick, p_agents)
+		var key = bare if bare != "" else ("nick:" + nick)
+		if not groups.has(key):
+			groups[key] = {
+				"key": key,
+				"bare": bare,
+				"nicks": [],
+				"jids": [],
+				"nick": nick,
+				"affiliation": "",
+				"role": "",
+				"_aff": -1,
+				"_role": -2,
+			}
+			order.append(key)
+		var g = groups[key]
+		g["nicks"].append(nick)
+		if occ_jid != "":
+			g["jids"].append(occ_jid)
+		var aff = str(occ.get("affiliation", ""))
+		var role = str(occ.get("role", ""))
+		if int(AFFILIATION_RANK.get(aff, 0)) > int(g["_aff"]):
+			g["_aff"] = int(AFFILIATION_RANK.get(aff, 0))
+			g["affiliation"] = aff
+		if int(ROLE_RANK.get(role, -1)) > int(g["_role"]):
+			g["_role"] = int(ROLE_RANK.get(role, -1))
+			g["role"] = role
+	var agents_out := []
+	var people_out := []
+	for key in order:
+		var g = groups[key]
+		g.erase("_aff")
+		g.erase("_role")
+		g["devices"] = g["nicks"].size()
+		g["is_agent"] = g["bare"] != "" and p_agents.has(g["bare"])
+		g["kind"] = "agent" if g["is_agent"] else "person"
+		g["affiliation_label"] = affiliation_label(g["affiliation"])
+		g["role_label"] = role_label(g["role"])
+		if g["is_agent"]:
+			agents_out.append(g)
+		else:
+			people_out.append(g)
+	return agents_out + people_out
+
+# Bare JID de un full (o del propio bare si no trae recurso).
+static func bare_of(p_full: String) -> String:
+	var slash = p_full.find("/")
+	return p_full if slash < 0 else p_full.substr(0, slash)
+
+# Bare conocido cuyo localpart coincide con el nick (resolución de salas
+# anónimas). Devuelve "" si no hay coincidencia.
+static func _agent_bare_for_nick(p_nick: String, p_agents: Dictionary) -> String:
+	for b in p_agents.keys():
+		if str(b).split("@")[0] == p_nick:
+			return str(b)
+	return ""
+
 # --- Discovery ---
 
 # ¿El componente anuncia MUC en disco#info? (reusa los builders de Media).

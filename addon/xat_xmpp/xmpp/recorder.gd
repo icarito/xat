@@ -94,6 +94,10 @@ func available() -> bool:
 func start() -> bool:
 	if is_recording or _effect == null:
 		return false
+	# El build exportado puede no traer `audio/enable_audio_input`; sin eso,
+	# AudioStreamPlaybackMicrophone::start hace early-return y el micro nunca
+	# se abre (grabación muda). Forzarlo antes de reproducir el micrófono.
+	ProjectSettings.set_setting("audio/enable_audio_input", true)
 	if not available():
 		emit_signal("recording_failed", "sin-microfono")
 		return false
@@ -101,18 +105,14 @@ func start() -> bool:
 	if not d.dir_exists(MEDIA_DIR):
 		d.make_dir_recursive(MEDIA_DIR)
 	_path = MEDIA_DIR + "voz_%d.%s" % [OS.get_ticks_msec(), "opus" if ClassDB.class_exists("OpusCodec") else "wav"]
-	# El player del micrófono se crea UNA vez y queda andando: parar/recrear la
-	# captura OpenSL entre grabaciones disparaba un SIGSEGV en el callback
-	# (AudioRecord/IBufferQueue_Enqueue). Sólo se togglea la grabación del efecto.
-	if _player == null:
-		_player = AudioStreamPlayer.new()
-		_player.stream = AudioStreamMicrophone.new()
-		_player.bus = BUS
-		# Ganancia de captura: el mic crudo llega muy bajo. El bus va mudo a Master
-		# (sin feedback), así que amplificar acá sólo sube lo que captura el efecto.
-		_player.volume_db = MIC_GAIN_DB
-		add_child(_player)
-		_player.play()
+	_player = AudioStreamPlayer.new()
+	_player.stream = AudioStreamMicrophone.new()
+	_player.bus = BUS
+	# Ganancia de captura: el mic crudo llega muy bajo. El bus va mudo a Master
+	# (sin feedback), así que amplificar acá sólo sube lo que captura el efecto.
+	_player.volume_db = MIC_GAIN_DB
+	add_child(_player)
+	_player.play()
 	_effect.set_recording_active(true)
 	_start_ms = OS.get_ticks_msec()
 	is_recording = true
@@ -127,9 +127,10 @@ func stop(p_discard: bool = false) -> Dictionary:
 		return {}
 	is_recording = false
 	_effect.set_recording_active(false)
-	# OJO: no se detiene `_player` (el micrófono queda abierto). Pararlo y
-	# recrearlo dispara el SIGSEGV de OpenSL descrito arriba. Se reusa en la
-	# próxima grabación.
+	if _player != null:
+		_player.stop()
+		_player.queue_free()
+		_player = null
 	var duration_ms = int(OS.get_ticks_msec() - _start_ms)
 	var sample = _effect.get_recording()
 	if p_discard or sample == null:

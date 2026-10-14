@@ -9,8 +9,13 @@ signal back_requested() # vista de un panel (móvil): volver al chat
 const P = preload("res://addons/xat_xmpp/ui/palette.gd")
 const Orb = preload("res://addons/xat_xmpp/ui/agent_orb.gd")
 const SmoothScroll = preload("res://addons/xat_xmpp/ui/smooth_scroll.gd")
-const CHIPS := [["status", P.TEXT], ["context", P.TEXT], ["compact", P.OK], ["model", P.TEXT], ["new", P.TEXT], ["abort", P.ERROR]]
+# Chips en DOS filas con semántica: seguros (consulta, sin efectos) y de
+# mantenimiento (mutan la sesión). Ver docs/ui.md. abort/new piden confirmación.
+const CHIPS_SAFE := [["status", P.TEXT], ["context", P.TEXT], ["model", P.TEXT]]
+const CHIPS_MAINT := [["compact", P.OK], ["new", P.TEXT], ["abort", P.ERROR]]
+const CONFIRM_MS := 3000
 const MAX_NOTES := 3
+const MAX_EVENTS := 5
 
 var _orb
 var _back: Button
@@ -19,6 +24,12 @@ var _model: Label
 var _grid: GridContainer
 var _badge: Label
 var _notes: VBoxContainer
+var _timeline: VBoxContainer
+var _tl_title: Label
+var _events := [] # últimos hooks con significado: {ts, event, label, color}
+var _armed := {} # comando -> expira_ms para confirmaciones de doble toque
+var _brain: Button
+var _brain_url := ""
 var _scroll: ScrollContainer
 var _smooth = SmoothScroll.new()
 var _tween: Tween
@@ -54,9 +65,19 @@ func _init():
 	_back.flat = true
 	_back.visible = false
 	_back.focus_mode = Control.FOCUS_NONE
-	_back.rect_min_size = Vector2(40, 32)
+	_back.rect_min_size = Vector2(44, 44)
 	_back.connect("pressed", self, "emit_signal", ["back_requested"])
 	bar.add_child(_back)
+	# Cerebro (fleet-wiki) del agente, si la proyección declara un brain-url https.
+	# Hook: main.gd debe llamar set_brain_url(FleetSnapshot.brain_url(...)).
+	_brain = Button.new()
+	_brain.text = "Brain"
+	_brain.flat = true
+	_brain.visible = false
+	_brain.focus_mode = Control.FOCUS_NONE
+	_brain.rect_min_size = Vector2(64, 44)
+	_brain.connect("pressed", self, "_on_brain")
+	bar.add_child(_brain)
 	_orb = Orb.new()
 	_orb.mouse_filter = Control.MOUSE_FILTER_PASS
 	_orb.connect("clicked", self, "emit_signal", ["command_requested", "status"])
@@ -84,16 +105,22 @@ func _init():
 	_grid.add_constant_override("hseparation", 10)
 	_grid.add_constant_override("vseparation", 4)
 	v.add_child(_grid)
-	# Chips de comandos, fijos al pie del panel.
+	# Línea de tiempo: últimos hooks con significado (activity/progress/error).
+	_tl_title = _label("Actividad reciente", P.TEXT_DIM, P.FONT_REGULAR, 11)
+	_tl_title.visible = false
+	v.add_child(_tl_title)
+	_timeline = VBoxContainer.new()
+	_timeline.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_timeline.add_constant_override("separation", 2)
+	_timeline.visible = false
+	v.add_child(_timeline)
+	# Chips de comandos en DOS filas: seguros (consulta) y mantenimiento
+	# (mutan la sesión; new/abort piden confirmación por doble toque).
 	var chips := VBoxContainer.new()
 	chips.add_constant_override("separation", 6)
 	root.add_child(chips)
-	for r in 2:
-		var h := HBoxContainer.new()
-		h.add_constant_override("separation", 6)
-		chips.add_child(h)
-		for c in CHIPS.slice(r * 3, r * 3 + 2):
-			h.add_child(_chip(c[0], c[1]))
+	_add_chip_row(chips, CHIPS_SAFE, 0)
+	_add_chip_row(chips, CHIPS_MAINT, CONFIRM_MS)
 	_tween = Tween.new()
 	add_child(_tween)
 	set_state({})
@@ -140,10 +167,11 @@ func set_state(p_state: Dictionary) -> void:
 	if tk is Dictionary and not tk.empty():
 		rows.append(["Tokens", "in %s · out %s" % [fmt_n(float(tk.get("input", 0))), fmt_n(float(tk.get("output", 0)))], P.TEXT])
 	var costs := []
+	var pricing_known := p_state.has("model_pricing") or p_state.has("pricing")
 	for k in [["session_cost", "sesión"], ["day_cost", "hoy"]]:
 		var c = p_state.get(k[0], {})
-		if c is Dictionary and c.has("usd"):
-			costs.append("$%.4f %s" % [float(c["usd"]), k[1]])
+		if c is Dictionary and (c.has("usd") or not c.empty()):
+			costs.append("%s %s" % [fmt_cost(c.get("usd", null), pricing_known), k[1]])
 	if not costs.empty():
 		rows.append(["Costo", PoolStringArray(costs).join(" · "), P.TEXT])
 	var ss := str(p_state.get("session_status", ""))
@@ -151,7 +179,7 @@ func set_state(p_state: Dictionary) -> void:
 		rows.append(["Sesión", ss, P.TEXT])
 	if not rows.empty() or model != "":
 		var t := str(p_state.get("tool", ""))
-		rows.append(["Tool", t if t != "" else "—", P.TOOL if t != "" else P.TEXT_DIM])
+		rows.append(["Tool", t if t != "" else "ninguna", P.TOOL if t != "" else P.TEXT_DIM])
 	_fill(rows)
 	var n := 0
 	var now := OS.get_unix_time() * 1000
@@ -221,18 +249,141 @@ static func fmt_n(p_n: float) -> String:
 		return "%.1fk" % (p_n / 1000.0)
 	return str(int(p_n))
 
-func _chip(p_node: String, p_tint: Color) -> Button:
+# Costo honesto: nunca "$0.0000". Ausente o 0 -> "sin tarifa"; si el modelo no
+# publica precio, la etiqueta lo aclara. Valor real -> formato USD.
+static func fmt_cost(p_usd, p_pricing_known := true) -> String:
+	var v = _cost_value(p_usd)
+	if v == null or v <= 0.0:
+		return "sin tarifa" if p_pricing_known else "sin tarifa (el modelo no publica precio)"
+	if v < 0.00005:
+		return "<$0.0001"
+	return "$%.4f" % v
+
+# float del valor si es numérico; null si ausente/no parseable.
+static func _cost_value(p_usd):
+	if p_usd == null:
+		return null
+	if p_usd is int or p_usd is float:
+		return float(p_usd)
+	if p_usd is String and p_usd.is_valid_float():
+		return float(p_usd)
+	return null
+
+# Hooks con significado (activity/progress/error) para la línea de tiempo.
+# Hook pendiente de cablear desde main.gd (ver AGENTS/follow-up).
+func record_hook(p_hook: Dictionary) -> void:
+	var ev := str(p_hook.get("event", ""))
+	if not (ev in ["activity", "progress", "error"]):
+		return
+	_events.append(_event_row(p_hook))
+	while _events.size() > MAX_EVENTS:
+		_events.pop_front()
+	_render_timeline()
+
+func _event_row(p_hook: Dictionary) -> Dictionary:
+	var ev := str(p_hook.get("event", ""))
+	var detail := str(p_hook.get("detail", p_hook.get("state", p_hook.get("message", ""))))
+	var color := P.TEXT_DIM
+	var text := ""
+	match ev:
+		"activity":
+			color = P.activity_color(str(p_hook.get("state", "")))
+			text = "actividad · %s" % (str(p_hook.get("state", "")) if detail == "" else detail)
+		"progress":
+			color = P.PROCESSING
+			text = "progreso · %s" % (detail if detail != "" else str(p_hook.get("state", "")))
+		"error":
+			color = P.ERROR
+			text = "error · %s" % (detail if detail != "" else "sin detalle")
+	var ts := int(p_hook.get("at", p_hook.get("timestamp", p_hook.get("ts", 0))))
+	if ts <= 0:
+		ts = OS.get_unix_time() * 1000
+	return {"ts": ts, "text": text, "color": color}
+
+func _render_timeline() -> void:
+	for c in _timeline.get_children():
+		_timeline.remove_child(c)
+		c.queue_free()
+	var show := not _events.empty()
+	_tl_title.visible = show
+	_timeline.visible = show
+	if not show:
+		return
+	for e in _events:
+		var h := HBoxContainer.new()
+		h.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		h.add_constant_override("separation", 6)
+		h.add_child(_label(_clock(int(e["ts"])), P.TEXT_DIM, P.FONT_MONO, 11))
+		var l := _label(str(e["text"]), e["color"], P.FONT_REGULAR, 12)
+		l.size_flags_horizontal = SIZE_EXPAND_FILL
+		l.clip_text = true
+		h.add_child(l)
+		_timeline.add_child(h)
+	_settle_scale()
+
+func _clock(p_ms: int) -> String:
+	var t = OS.get_time()
+	# La hora del hook no viene con zona; usamos la hora local del equipo.
+	if p_ms > 0:
+		var secs := int(p_ms / 1000)
+		if secs > 0:
+			var d = OS.get_datetime_from_unix_time(secs)
+			return "%02d:%02d" % [int(d.hour), int(d.minute)]
+	return "%02d:%02d" % [int(t.hour), int(t.minute)]
+
+func set_brain_url(p_url: String) -> void:
+	var ok := p_url.begins_with("https://")
+	_brain_url = p_url if ok else ""
+	_brain.visible = ok
+	_brain.hint_tooltip = p_url if ok else ""
+
+func _on_brain() -> void:
+	if _brain_url != "":
+		OS.shell_open(_brain_url)
+
+func _add_chip_row(p_parent: Node, p_chips: Array, p_confirm_ms: int) -> void:
+	var h := HBoxContainer.new()
+	h.add_constant_override("separation", 6)
+	p_parent.add_child(h)
+	for c in p_chips:
+		h.add_child(_chip(c[0], c[1], p_confirm_ms))
+
+func _chip(p_node: String, p_tint: Color, p_confirm_ms := 0) -> Button:
 	var b := Button.new()
 	b.text = p_node
 	b.focus_mode = Control.FOCUS_NONE
+	b.rect_min_size = Vector2(0, 44)
 	b.size_flags_horizontal = SIZE_EXPAND_FILL
 	b.add_color_override("font_color", p_tint)
 	b.add_color_override("font_color_hover", p_tint.lightened(0.3))
 	b.add_stylebox_override("normal", _box(P.BG2, 12, 5, p_tint.linear_interpolate(P.LINE, 0.7)))
 	b.add_stylebox_override("hover", _box(P.LINE, 12, 5, p_tint))
 	b.add_stylebox_override("pressed", _box(P.BG0, 12, 5, p_tint))
-	b.connect("pressed", self, "emit_signal", ["command_requested", p_node])
+	if p_confirm_ms > 0:
+		b.connect("pressed", self, "_on_chip_press", [p_node, p_confirm_ms])
+	else:
+		b.connect("pressed", self, "emit_signal", ["command_requested", p_node])
 	return b
+
+# Comandos destructivos: primer toque arma y avisa; segundo dentro de la ventana
+# (p_confirm_ms) ejecuta. Nada se emite sin confirmación real del usuario.
+func _on_chip_press(p_node: String, p_confirm_ms: int) -> void:
+	var now := OS.get_unix_time() * 1000
+	var until := int(_armed.get(p_node, 0))
+	if now < until:
+		_armed.erase(p_node)
+		emit_signal("command_requested", p_node)
+		return
+	_armed[p_node] = now + p_confirm_ms
+	show_note(_confirm_note(p_node))
+
+func _confirm_note(p_node: String) -> String:
+	match p_node:
+		"abort":
+			return "Toca de nuevo para abortar"
+		"new":
+			return "Toca de nuevo para iniciar una sesión nueva"
+	return "Toca de nuevo para confirmar"
 
 func _label(p_text: String, p_color: Color, p_font: String, p_size: int) -> Label:
 	var l := Label.new()

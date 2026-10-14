@@ -15,6 +15,8 @@ const FAKE_ACCOUNT := {
 
 var _fail := 0
 var _original_autoconnect := ""
+var _retry_step := ""
+var _outcome := ""
 var _Session
 
 func _init():
@@ -29,6 +31,9 @@ func _init():
 	OS.set_environment("XAT_AUTOCONNECT", "")
 	_Session = load("res://addons/xat_xmpp/xmpp/session.gd")
 	_clear_account()
+
+	# X1.1: pasos reales del splash (marca, anillo, fallo + Reintentar, skip MAM).
+	yield(_check_splash_steps(), "completed")
 
 	# No saved account keeps the normal login form visible.
 	var empty_main = _new_main()
@@ -112,3 +117,120 @@ func check(p_condition: bool, p_label: String) -> void:
 	else:
 		_fail += 1
 		print("FAIL ", p_label)
+
+# X1.1: el splash muestra los pasos reales; un paso no confirmado nunca es verde
+# y el anillo sólo avanza con pasos confirmados (honestidad P1).
+func _check_splash_steps():
+	var Splash = load("res://addons/xat_xmpp/ui/startup_splash.gd")
+	var s = Splash.new()
+	get_root().add_child(s)
+	s.start()
+	check(s.step_status("tls") == "active", "start marks TLS active")
+	check(s.steps_done() == 0, "no step is done before confirmation")
+	check(s._orb._state.get("context", {}).get("used", -1) == 0, "ring starts empty")
+	s.set_step("tls", "done")
+	check(s.step_status("tls") == "done" and s._step_rows["tls"]["indicator"].text == "✓", "confirmed step gets a check mark")
+	check(s._orb._state.get("context", {}).get("used", -1) == 1, "ring advances with each confirmed step")
+	s.set_step("sasl", "done")
+	s.set_step("roster", "done")
+	s.set_step("fleet", "done")
+	check(s.steps_done() == 4 and s._orb._state.get("context", {}).get("used", -1) == 4, "ring follows confirmed steps")
+	s.fail_step("mam", "sin respuesta del servidor")
+	check(s.step_status("mam") == "failed" and s.steps_done() == 4, "failed step is not counted as done")
+	check(s._step_rows["mam"]["retry"].visible and s._step_rows["mam"]["reason"].visible, "failed step shows reason and Reintentar")
+	check(s._step_rows["mam"]["reason"].text == "sin respuesta del servidor", "failure reason is shown verbatim")
+	check(s._step_rows["mam"]["indicator"].text == "×", "failed step indicator is a red x")
+	s.connect("retry_requested", self, "_on_retry_requested")
+	s._step_rows["mam"]["retry"].emit_signal("pressed")
+	check(s.step_status("mam") == "active" and _retry_step == "mam", "Reintentar re-arms the step and requests a retry")
+	s.queue_free()
+	yield(self, "idle_frame")
+
+	# show_success() con wait_for_history: espera MAM y ofrece "Entrar sin esperar".
+	var s2 = Splash.new()
+	s2.wait_for_history = true
+	get_root().add_child(s2)
+	s2.start()
+	s2.show_success()
+	check(s2.state == "success" and s2._skip_history.visible, "success with pending history offers Entrar sin esperar")
+	check(s2.step_status("tls") == "done" and s2.step_status("sasl") == "done", "CONNECTED confirms TLS and SASL")
+	check(s2.step_status("mam") != "done", "history stays unconfirmed until MAM arrives")
+	_outcome = ""
+	s2.connect("completed", self, "_on_completed")
+	s2._skip_history.emit_signal("pressed")
+	yield(create_timer(0.45), "timeout")
+	check(_outcome == "connected", "Entrar sin esperar completes as connected")
+	check(s2.step_status("mam") != "done", "skipping history does not fake MAM as done")
+	s2.queue_free()
+	yield(self, "idle_frame")
+
+	# bind_session: las señales reales de la sesión mueven los pasos.
+	var s3 = Splash.new()
+	var fake = FakeSession.new()
+	get_root().add_child(s3)
+	get_root().add_child(fake)
+	s3.start()
+	s3.bind_session(fake, "fleet@example.invalid", "urn:openclaw:fleet:0")
+	fake.set_connected(true)
+	fake.emit_signal("state_changed", 2)
+	check(s3.step_status("tls") == "done" and s3.step_status("sasl") == "done", "session CONNECTED confirms TLS+SASL")
+	check(s3.step_status("roster") == "active", "roster becomes active after connect")
+	fake.emit_signal("roster_changed")
+	check(s3.step_status("roster") == "done", "roster_changed completes the roster step")
+	fake.emit_signal("pubsub_items_received", "fleet@example.invalid", "urn:openclaw:fleet:0", [])
+	check(s3.step_status("fleet") == "done", "fleet snapshot completes the fleet step")
+	fake.emit_signal("history_fetched", "a@b", [], true)
+	check(s3.step_status("mam") == "done", "history_fetched completes MAM")
+	check(s3.steps_done() == 5, "all real steps finish in order")
+	fake.emit_signal("auth_failed")
+	check(s3.step_status("sasl") != "failed", "auth_failed after success does not regress a done step")
+	s3.queue_free()
+	fake.queue_free()
+	yield(self, "idle_frame")
+
+	# auth_failed vía la sesión marca SASL en rojo, nunca verde.
+	var s4 = Splash.new()
+	var f2 = FakeSession.new()
+	get_root().add_child(s4)
+	get_root().add_child(f2)
+	s4.start()
+	s4.bind_session(f2)
+	f2.emit_signal("auth_failed")
+	check(s4.step_status("sasl") == "failed" and s4.steps_done() == 0, "auth_failed marks SASL failed, not done")
+	s4.queue_free()
+	f2.queue_free()
+	yield(self, "idle_frame")
+
+	# finish("auth_failed") de main.gd también refleja el paso fallido.
+	var s5 = Splash.new()
+	get_root().add_child(s5)
+	s5.start()
+	s5.finish("auth_failed")
+	check(s5.step_status("sasl") == "failed", "finish(auth_failed) surfaces the failed SASL step")
+	s5.queue_free()
+	yield(self, "idle_frame")
+
+func _on_retry_requested(p_step: String) -> void:
+	_retry_step = p_step
+
+func _on_completed(p_outcome: String) -> void:
+	_outcome = p_outcome
+
+# Doble mínimo de Session: sólo las señales y el predicado que consume el splash.
+class FakeSession:
+	extends Node
+
+	signal state_changed(state)
+	signal roster_changed()
+	signal history_fetched(bare_jid, rows, complete)
+	signal auth_failed()
+	signal pubsub_items_received(from_jid, node, items)
+
+	var _connected := false
+
+	func set_connected(p_connected: bool) -> void:
+		_connected = p_connected
+
+	func is_connected_to_server() -> bool:
+		return _connected
+

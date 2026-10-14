@@ -182,3 +182,24 @@ func _glyph(g: String, c: Vector2, r: float, col: Color) -> void:
 			draw_line(c + Vector2(r * 0.14, -r * 0.72), c + Vector2(r * 0.34, r * 0.72), col, w, true)
 			draw_line(c + Vector2(-r * 0.7, -r * 0.18), c + Vector2(r * 0.7, -r * 0.32), col, w, true)
 			draw_line(c + Vector2(-r * 0.7, r * 0.32), c + Vector2(r * 0.7, r * 0.18), col, w, true)
+		"search":
+			# Lupa: aro + mango hacia abajo-derecha.
+			draw_arc(c + Vector2(-r * 0.14, -r * 0.14), r * 0.5, 0.0, TAU, 26, col, w, true)
+			draw_line(c + Vector2(r * 0.22, r * 0.22), c + Vector2(r * 0.68, r * 0.68), col, w, true)
+		"group":
+			# Dos personas: la de atrás asoma a la derecha, la de adelante a la izq.
+			draw_arc(c + Vector2(r * 0.4, -r * 0.26), r * 0.28, 0.0, TAU, 20, col, w, true)
+			draw_arc(c + Vector2(r * 0.42, r * 0.86), r * 0.64, PI + 0.5, TAU - 0.5, 20, col, w, true)
+			draw_arc(c + Vector2(-r * 0.28, -r * 0.32), r * 0.32, 0.0, TAU, 22, col, w, true)
+			draw_arc(c + Vector2(-r * 0.28, r * 0.92), r * 0.78, PI + 0.42, TAU - 0.42, 22, col, w, true)
+		"menu":
+			# Kebab vertical: tres puntos, el patrón estándar de "más opciones".
+			draw_circle(c + Vector2(0, -r * 0.5), w * 1.3, col)
+			draw_circle(c, w * 1.3, col)
+			draw_circle(c + Vector2(0, r * 0.5), w * 1.3, col)
+		"back":
+			# Flecha a la izquierda (volver).
+			draw_line(c + Vector2(r * 0.55, 0), c + Vector2(-r * 0.5, 0), col, w, true)
+			draw_polyline(PoolVector2Array([
+				c + Vector2(-r * 0.05, -r * 0.46), c + Vector2(-r * 0.55, 0),
+				c + Vector2(-r * 0.05, r * 0.46)]), col, w, true)

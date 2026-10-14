@@ -48,6 +48,10 @@ const FleetSourceDialog = preload("res://fleet_source_dialog.gd")
 const MIND_MIN_WIDTH := 1000
 # Por debajo de este ancho: un panel por vez (roster o chat, con ←).
 const SINGLE_PANE_MAX := 700
+# Modo compacto: por debajo de este ancho la barra inferior es navegación
+# (Inicio · Flota · Salas · Yo) en vez del pie de ajustes del roster.
+const BOTTOM_NAV_MAX := 640.0
+const BOTTOM_NAV_HEIGHT := 56
 # Lado corto lógico en móvil. Al girar, se recalcula la base de stretch con este
 # lado corto para que la letra no encoja en landscape (ver _apply_mobile_stretch).
 const MOBILE_BASE_SHORT := 420.0
@@ -88,6 +92,10 @@ var _zoom_target := 1.0 # factor de zoom objetivo (se aplica coalescido en _proc
 var _sidebar
 var _sidebar_title
 var _sidebar_identity
+var _bottom_nav
+var _nav_buttons := []
+var _nav_tab := 0
+var _yo_visible := false # vista "Yo" (ajustes de la cuenta) sobre el split
 var _sb_back
 var _sb_add
 var _sb_room
@@ -205,6 +213,12 @@ func _ready() -> void:
 	add_child(_account)
 	_account.connect("connect_requested", self, "_on_connect_requested")
 	_account.connect("register_requested", self, "_on_register_requested")
+	# Vista "Yo": zoom de letra y acciones de cuenta desde el propio panel.
+	_account.connect("font_scale_requested", self, "_on_font_scale_requested")
+	_account.connect("avatar_requested", self, "_on_avatar_requested")
+	_account.connect("updates_requested", self, "_on_updates_requested")
+	_account.set_juice(juice)
+	_account.set_font_label(_zoom_target)
 
 	_credentials = Credentials.new()
 	var saved = _credentials.load_with_env(Credentials.DEFAULT_PATH)
@@ -233,6 +247,9 @@ func _ready() -> void:
 	_roster.connect("join_room_requested", self, "_on_join_room_requested")
 	_roster.connect("room_invite_accept", self, "_on_room_invite_accept")
 	_roster.connect("room_invite_ignore", self, "_on_room_invite_ignore")
+	# X2.5: la franja de flota abre la vista Flota. X2.3: chips de pregunta rápida.
+	_roster.connect("fleet_requested", self, "_open_fleet_monitor")
+	_roster.connect("quick_question_requested", self, "_on_roster_quick")
 	_roster.set_juice(juice)
 	_chat = ChatPanel.new()
 	_split.add_child(_chat)
@@ -247,6 +264,8 @@ func _ready() -> void:
 	_chat.connect("reaction_toggled", self, "_on_reaction_toggled")
 	_chat.connect("action_selected", self, "_on_action_selected")
 	_chat.connect("quick_selected", self, "_on_quick_selected")
+	# X4.1: tocar la identidad de la cabecera abre la Mente (igual que el orbe).
+	_chat.connect("mind_requested", self, "_on_header_orb")
 	_chat.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	# "Escribiendo…" puede quedar colgado si el par nunca manda <active/> (pasa
 	# en salas: el agente anuncia <composing/> y la limpieza se pierde). Un
@@ -267,25 +286,22 @@ func _ready() -> void:
 	_split.add_child(_room_panel)
 	_room_panel.connect("occupant_selected", self, "_on_occupant_selected")
 	_room_panel.connect("back_requested", self, "_on_room_panel_back")
+	# X9.3: "Mencionar" inserta @nick en el composer del chat.
+	_room_panel.connect("mention_requested", self, "_on_mention_requested")
 	# Sidebar de navegación/acciones (sólo móvil landscape), a la derecha.
 	_build_sidebar()
+	# Barra inferior de navegación (modo compacto, una columna).
+	_build_bottom_nav()
 	# Mini-orbe en el header del chat: abre/cierra la mente en pantallas angostas.
-	# Botón ☰ para colapsar/mostrar el roster en desktop (donde ambos paneles no
-	# siempre caben). En pantallas de un panel el propio header ya navega.
-	_roster_toggle = Button.new()
-	_roster_toggle.text = "\u2630"
-	_roster_toggle.flat = true
-	_roster_toggle.focus_mode = Control.FOCUS_NONE
-	_roster_toggle.hint_tooltip = "Mostrar/ocultar contactos"
+	# Botón de menú (kebab) para colapsar/mostrar el roster en desktop (donde
+	# ambos paneles no siempre caben). En pantallas de un panel el header navega.
+	# X4.1: glifos vectoriales en vez de caracteres sin fuente (☰, ＋, 🔍, 👥).
+	_roster_toggle = _header_icon_button("menu", "Mostrar/ocultar contactos")
 	_roster_toggle.connect("pressed", self, "_toggle_roster")
 	_chat.header_slot.add_child(_roster_toggle)
-	# Botón ＋ (desktop): añadir contacto, unirse a sala o ajustes. Reemplaza los
+	# Botón + (desktop): añadir contacto, unirse a sala o ajustes. Reemplaza los
 	# botones del roster (que estorban sobre la vista de mensajes).
-	_plus_btn = Button.new()
-	_plus_btn.text = "＋"
-	_plus_btn.flat = true
-	_plus_btn.focus_mode = Control.FOCUS_NONE
-	_plus_btn.hint_tooltip = "Nuevo: contacto, sala o ajustes"
+	_plus_btn = _header_icon_button("plus", "Nuevo: contacto, sala o ajustes")
 	_plus_btn.connect("pressed", self, "_on_plus")
 	_chat.header_slot.add_child(_plus_btn)
 	_plus_menu = PopupMenu.new()
@@ -295,19 +311,11 @@ func _ready() -> void:
 	_plus_menu.add_item("Ajustes de la cuenta", 3)
 	_plus_menu.connect("id_pressed", self, "_on_plus_menu")
 	add_child(_plus_menu)
-	_search_toggle = Button.new()
-	_search_toggle.text = "🔍"
-	_search_toggle.flat = true
-	_search_toggle.focus_mode = Control.FOCUS_NONE
-	_search_toggle.hint_tooltip = "Buscar en la conversación"
+	_search_toggle = _header_icon_button("search", "Buscar en la conversación")
 	_search_toggle.connect("pressed", self, "_on_search_toggle")
 	_chat.header_slot.add_child(_search_toggle)
 	# Participantes (sólo en salas): muestra/oculta el pane de ocupantes.
-	_participants_btn = Button.new()
-	_participants_btn.text = "👥"
-	_participants_btn.flat = true
-	_participants_btn.focus_mode = Control.FOCUS_NONE
-	_participants_btn.hint_tooltip = "Participantes de la sala"
+	_participants_btn = _header_icon_button("group", "Participantes de la sala")
 	_participants_btn.visible = false
 	_participants_btn.connect("pressed", self, "_toggle_room_pane")
 	_chat.header_slot.add_child(_participants_btn)
@@ -426,6 +434,12 @@ func _ready() -> void:
 		_startup_splash = StartupSplash.new()
 		_startup_splash.connect("canceled", self, "_on_startup_canceled")
 		_startup_splash.connect("completed", self, "_on_startup_completed")
+		# X1.1: traducir las señales reales de la sesión a pasos del splash.
+		# NOTA (tanda 2): NO se activa `wait_for_history`. Durante el arranque la
+		# app no pide MAM (load_history sólo corre al abrir un peer/sala), así que
+		# show_success() quedaría esperando un paso que nunca llega —y detiene su
+		# timer—: el splash no se cerraría solo. Ver reporte de integración.
+		_startup_splash.bind_session(session, _fleet_monitoring_jid(), _fleet_monitoring_node())
 		add_child(_startup_splash)
 		_startup_splash.start()
 		call_deferred("_autoconnect")
@@ -508,6 +522,7 @@ func _on_state_changed(p_state: int) -> void:
 			session.request_pubsub_items(session.bare(), Ns.AVATAR_METADATA, 1)
 			_account.visible = false
 			_split.visible = true
+			_yo_visible = false
 			if _notifier != null:
 				_notifier.set_connected()
 				if OS.get_name() in ["Android", "iOS"]:
@@ -529,6 +544,9 @@ func _on_state_changed(p_state: int) -> void:
 		SessionScript.State.DISCONNECTED:
 			_account.set_busy(false)
 			_account.set_status("Desconectado.")
+			# X4.1: la cabecera no simula un agente en línea si la sesión cayó.
+			if _chat != null:
+				_chat.set_agent_status({}, false)
 
 func _on_pubsub_items(p_from: String, p_node: String, p_items: Array) -> void:
 	# Avatar propio (XEP-0084): pedimos nuestro metadata al conectar para mostrar
@@ -563,6 +581,8 @@ func _on_pubsub_items(p_from: String, p_node: String, p_items: Array) -> void:
 	# Sólo repintar si la vista está abierta; el snapshot se guarda igual.
 	if _fleet_monitor.visible:
 		_fleet_monitor.show_snapshot(_fleet_snapshot)
+	_roster.set_fleet_state(_fleet_snapshot) # X2.5: franja de flota del roster
+	_refresh_brain() # X6.3/X6.5: brain del peer según la proyección
 	_update_mind_visibility()
 
 # Fija el avatar propio ya resuelto (caché) en roster y cabecera.
@@ -580,6 +600,8 @@ func _on_pubsub_event(p_from: String, p_event: Dictionary) -> void:
 	# Sólo repintar si la vista está abierta; el snapshot se guarda igual.
 	if _fleet_monitor.visible:
 		_fleet_monitor.show_snapshot(_fleet_snapshot)
+	_roster.set_fleet_state(_fleet_snapshot) # X2.5: franja de flota del roster
+	_refresh_brain() # X6.3/X6.5: brain del peer según la proyección
 	_update_mind_visibility()
 
 func _open_fleet_monitor() -> void:
@@ -594,8 +616,19 @@ func _open_brain() -> void:
 	if url != "":
 		OS.shell_open(url)
 
+# X6.3/X6.5: sincroniza el brain del peer activo con la proyección de flota.
+# Sin declaración (o en salas) el botón/brain quedan ocultos: no se inventa.
+func _refresh_brain() -> void:
+	var url = FleetSnapshot.brain_url(_fleet_snapshot, _peer)
+	if _mind != null:
+		_mind.set_brain_url(url)
+	if _brain_button != null:
+		_brain_button.visible = url != ""
+
 func _close_fleet_monitor() -> void:
 	_fleet_monitor.visible = false
+	# La pestaña Flota es una acción: al cerrar, la selección vuelve a Inicio.
+	_set_nav_tab(0)
 
 func _fleet_monitoring_jid() -> String:
 	var configured = str(juice.settings.get("fleet_monitor_jid", "")).strip_edges()
@@ -626,6 +659,7 @@ func _on_fleet_source_saved(p_jid: String, p_node: String) -> void:
 	_fleet_snapshot = {}
 	_fleet_monitor.set_node(p_node)
 	_fleet_monitor.show_snapshot(_fleet_snapshot)
+	_roster.set_fleet_state(_fleet_snapshot) # X2.5: sin datos tras reconfigurar
 	_request_fleet_monitoring()
 	_open_fleet_monitor()
 
@@ -638,21 +672,38 @@ func _on_roster_changed() -> void:
 	_sync_roster_identity()
 	# Orden por actividad: último mensaje guardado de cada contacto.
 	for b in session.roster_model.bare_jids():
-		var last = session.get_recent_history(b, 1)
+		var bare = str(b)
+		# X2.4: nombre visible (humaniza invitaciones). X2.2: último mensaje.
+		_roster.set_display_name(bare, _display_name(bare))
+		var last = session.get_recent_history(bare, 1)
 		if not last.empty():
-			_roster.touch(b, str(last.back().get("ts", "")))
+			var rec = last.back()
+			_roster.touch(bare, str(rec.get("ts", "")))
+			_roster.set_last_message(bare, _last_message_from(rec, bare), str(rec.get("body", "")), str(rec.get("ts", "")))
 	print("xat: roster con %d contactos" % session.roster_model.bare_jids().size())
+
+# Remitente visible de un mensaje guardado: propio si salió, si no el `sender`.
+func _last_message_from(p_rec: Dictionary, p_bare: String) -> String:
+	if str(p_rec.get("direction", "in")) == "out":
+		return session.bare()
+	var sender = str(p_rec.get("sender", "")).strip_edges()
+	return sender if sender != "" else p_bare
 
 func _on_presence_changed(p_bare: String) -> void:
 	_roster.set_online(p_bare, session.presence_model.is_online(p_bare))
+	_roster.set_display_name(p_bare, _display_name(p_bare))
 	if p_bare == _peer:
 		_mind.set_connected(session.presence_model.is_online(p_bare))
+		# X4.1: la línea de estado de la cabecera también refleja la conexión.
+		_chat.set_agent_status(session.agent_model.get_state(p_bare) if session.agent_model.has_agent(p_bare) else {}, session.presence_model.is_online(p_bare))
 
 func _on_peer_selected(p_bare: String) -> void:
 	_peer = p_bare
 	_on_typing_timeout()
 	if _notifier != null:
 		_notifier.clear(p_bare)
+	# X6.3/X6.5: el brain se resuelve desde el snapshot para este peer ("" en salas).
+	_refresh_brain()
 	if session.is_room(p_bare):
 		_open_room(p_bare)
 		return
@@ -662,10 +713,15 @@ func _on_peer_selected(p_bare: String) -> void:
 	_header_avatar.bare = p_bare
 	_header_avatar.set_texture(session.avatars.get(p_bare))
 	_mind.set_agent(p_bare)
-	_mind.set_state(session.agent_model.get_state(p_bare) if session.agent_model.has_agent(p_bare) else {})
-	_mind.set_connected(session.presence_model.is_online(p_bare))
+	var peer_state = session.agent_model.get_state(p_bare) if session.agent_model.has_agent(p_bare) else {}
+	var peer_online = session.presence_model.is_online(p_bare)
+	_mind.set_state(peer_state)
+	_mind.set_connected(peer_online)
+	# X4.1: estado real del agente + cifrado en la cabecera del chat.
+	_chat.set_agent_status(peer_state, peer_online)
+	_chat.set_encryption_status(session.omemo_available())
 	if session.agent_model.has_agent(p_bare):
-		_header_orb.set_state(session.agent_model.get_state(p_bare))
+		_header_orb.set_state(peer_state)
 	_last_tool[p_bare] = ""
 	_show_roster = false
 	_update_mind_visibility()
@@ -706,6 +762,24 @@ func _refresh_rooms() -> void:
 	for r in session.saved_rooms():
 		rooms.append(str(r.get("bare_jid", "")))
 	_roster.set_rooms(rooms)
+	# X3.1: alimentar sujeto/último mensaje/ocupantes de cada sala guardada.
+	for room in rooms:
+		_feed_room_info(str(room))
+
+# X3.1: calcula y publica los metadatos de una sala en el roster. Nunca inventa:
+# lo ausente queda vacío.
+func _feed_room_info(p_room: String) -> void:
+	if _roster == null or p_room == "":
+		return
+	var last = session.get_recent_history(p_room, 1)
+	var rec = last.back() if not last.empty() else {}
+	_roster.set_room_info(p_room, {
+		"subject": session.room_subject(p_room),
+		"last_from": _last_message_from(rec, p_room) if not rec.empty() else "",
+		"last_body": str(rec.get("body", "")),
+		"last_ts": str(rec.get("ts", "")),
+		"occupants": session.muc_occupants(p_room),
+	})
 
 func _open_room(p_room: String) -> void:
 	_on_typing_timeout()
@@ -718,6 +792,9 @@ func _open_room(p_room: String) -> void:
 	_sync_room_agents()
 	_update_mind_visibility()
 	_chat.set_room(p_room, session.room_nick(p_room), session.muc_occupants(p_room), session.muc_affiliation(p_room), session.muc_role(p_room))
+	# X4.3: chip de cifrado (se oculta en salas; set_encryption_status lo decide).
+	_chat.set_encryption_status(session.omemo_available())
+	_feed_room_info(p_room)
 	if not (OS.get_name() in ["Android", "iOS"]):
 		_chat.focus_composer()
 	_load_room(p_room)
@@ -793,8 +870,10 @@ func _on_muc_left(p_room: String, _reason: String) -> void:
 func _on_muc_subject(p_room: String, p_subject: String) -> void:
 	if p_room == _peer:
 		_chat.set_room_subject(p_subject)
+	_feed_room_info(p_room) # X3.1: refrescar el sujeto en la tarjeta del roster
 
 func _on_muc_occupants_changed(p_room: String) -> void:
+	_feed_room_info(p_room) # X3.1: ocupantes/último mensaje en la tarjeta
 	if p_room == _peer:
 		_chat.update_occupants(session.muc_occupants(p_room))
 		_chat.set_room_caps(session.muc_affiliation(p_room), session.muc_role(p_room))
@@ -1141,6 +1220,9 @@ func _on_message_received(p_rec: Dictionary) -> void:
 		peer = p_rec.get("to", "")
 	peer = _bare(peer)
 	_roster.touch(peer, str(p_rec.get("timestamp", "")) if str(p_rec.get("timestamp", "")) != "" else _now_iso())
+	# X2.2: el último mensaje vivo refresca la tarjeta del agente (no MAM/viejo).
+	if not p_rec.get("is_mam", false) and not p_rec.get("stale", false) and str(p_rec.get("body", "")) != "":
+		_roster.set_last_message(peer, _last_message_from(p_rec, peer), str(p_rec.get("body", "")), str(p_rec.get("timestamp", "")))
 	# Sonido sólo para mensajes vivos entrantes (no MAM, no carbons propios, no viejos).
 	if p_rec.get("direction", "in") != "out" and not p_rec.get("is_mam", false) and not p_rec.get("stale", false) and str(p_rec.get("body", "")) != "":
 		juice.play("receive")
@@ -1512,6 +1594,15 @@ func _on_quick_selected(p_bare: String, p_value: String) -> void:
 	_celebrate()
 	session.send_message(p_bare, p_value)
 
+# X2.3: chip de pregunta rápida tocado en la tarjeta del agente del roster:
+# abre (o ya está en) esa conversación y envía el texto por el camino estándar.
+func _on_roster_quick(p_bare: String, p_text: String) -> void:
+	if p_bare == "" or p_text.strip_edges() == "":
+		return
+	if _peer != p_bare:
+		_on_peer_selected(p_bare)
+	_on_message_submitted(p_bare, p_text)
+
 func _on_command_form(p_from_jid: String, p_resp: Dictionary) -> void:
 	_pending_command = {
 		"jid": p_from_jid,
@@ -1718,6 +1809,8 @@ func _on_agent_state(p_bare: String, p_state: Dictionary) -> void:
 		_room_panel.set_agent(p_bare, p_state, session.presence_model.is_online(p_bare))
 	if p_bare == _peer:
 		_mind.set_state(p_state)
+		# X4.1: la cabecera del chat muestra el estado real del agente activo.
+		_chat.set_agent_status(p_state, session.presence_model.is_online(p_bare))
 		_header_orb.set_state(p_state)
 		_chat.set_thinking(str(p_state.get("activity", "")) in ["processing", "busy"])
 		_update_mind_visibility()
@@ -1896,6 +1989,137 @@ func _build_sidebar() -> void:
 	_init_sidebar_settings()
 	_split.add_child(_sidebar)
 
+# --- Barra inferior de navegación (modo compacto) ---
+# < 640 px y una columna: la barra inferior navega Inicio · Flota · Salas · Yo.
+# En desktop/landscape no se muestra (sigue mandando el sidebar de acciones).
+
+func _build_bottom_nav() -> void:
+	_bottom_nav = PanelContainer.new()
+	_bottom_nav.visible = false
+	_bottom_nav.anchor_right = 1.0
+	_bottom_nav.anchor_top = 1.0
+	_bottom_nav.anchor_bottom = 1.0
+	_bottom_nav.margin_top = -BOTTOM_NAV_HEIGHT
+	_bottom_nav.margin_bottom = 0
+	var sb = XatTheme.box(P.BG1, 0, 0, 0)
+	sb.border_width_top = 1
+	sb.border_color = P.LINE
+	_bottom_nav.add_stylebox_override("panel", sb)
+	var m = MarginContainer.new()
+	m.add_constant_override("margin_left", 6)
+	m.add_constant_override("margin_right", 6)
+	m.add_constant_override("margin_top", 4)
+	m.add_constant_override("margin_bottom", 4)
+	var row = HBoxContainer.new()
+	row.add_constant_override("separation", 4)
+	m.add_child(row)
+	_bottom_nav.add_child(m)
+	_nav_buttons = []
+	for pair in [["Inicio", 0], ["Flota", 1], ["Salas", 2], ["Yo", 3]]:
+		var b = _nav_button(str(pair[0]), int(pair[1]))
+		row.add_child(b)
+		_nav_buttons.append(b)
+	_set_nav_tab(0)
+	add_child(_bottom_nav)
+
+func _nav_button(p_text: String, p_index: int) -> Button:
+	var b = Button.new()
+	b.text = p_text
+	b.flat = true
+	b.focus_mode = Control.FOCUS_NONE
+	b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	b.rect_min_size = Vector2(0, 48)
+	b.add_font_override("font", XatTheme.font(P.FONT_MEDIUM, P.FONT_SIZE - 1))
+	b.add_stylebox_override("focus", StyleBoxEmpty.new())
+	b.connect("pressed", self, "_on_nav", [p_index])
+	return b
+
+# Pestaña activa como control segmentado; el resto queda tenue.
+func _set_nav_tab(p_index: int) -> void:
+	if _nav_buttons.empty():
+		return
+	_nav_tab = int(clamp(p_index, 0, _nav_buttons.size() - 1))
+	var on = XatTheme.box(P.BG2, 8, 8, 6)
+	var off = StyleBoxEmpty.new()
+	for i in range(_nav_buttons.size()):
+		var b = _nav_buttons[i]
+		b.add_stylebox_override("normal", on if i == _nav_tab else off)
+		b.add_stylebox_override("hover", XatTheme.box(P.BG2.darkened(0.15), 8, 8, 6))
+		b.add_stylebox_override("pressed", on)
+		b.add_color_override("font_color", P.TEXT if i == _nav_tab else P.TEXT_DIM)
+		b.add_color_override("font_color_hover", P.TEXT)
+
+func _on_nav(p_index: int) -> void:
+	match p_index:
+		0:
+			_nav_home()
+		1:
+			_nav_fleet()
+		2:
+			_nav_rooms()
+		3:
+			_nav_yo()
+
+# Inicio: roster (lista de contactos) y, en desktop/landscape, el chat.
+func _nav_home() -> void:
+	_yo_visible = false
+	_split.visible = true
+	if session.state == SessionScript.State.CONNECTED:
+		_account.visible = false
+	_show_roster = true
+	if _roster != null and _roster.has_method("_set_tab"):
+		_roster._set_tab(0)
+	_set_nav_tab(0)
+	_update_mind_visibility()
+
+# Flota: abre el monitor de flota (overlay); al cerrar vuelve a Inicio.
+func _nav_fleet() -> void:
+	_set_nav_tab(1)
+	_open_fleet_monitor()
+
+# Salas: roster en su pestaña Salas.
+func _nav_rooms() -> void:
+	_yo_visible = false
+	_split.visible = true
+	if session.state == SessionScript.State.CONNECTED:
+		_account.visible = false
+	_show_roster = true
+	if _roster != null and _roster.has_method("_set_tab"):
+		_roster._set_tab(1)
+	_set_nav_tab(2)
+	_update_mind_visibility()
+
+# Yo: la cuenta como ajustes (sonido/vibración/animación/letra) sobre el split.
+func _nav_yo() -> void:
+	_yo_visible = true
+	_split.visible = false
+	_account.visible = true
+	_set_nav_tab(3)
+	_apply_bottom_nav()
+
+# ¿Corresponde la barra inferior? Sólo compacto (<640, una columna), no landscape.
+func _bottom_nav_wanted() -> bool:
+	if _is_mobile_landscape():
+		return false
+	if rect_size.x <= 0.0 or rect_size.x >= BOTTOM_NAV_MAX:
+		return false
+	return _split.visible or _yo_visible
+
+# Muestra/oculta la barra y reserva su alto en el split (sin pisar el teclado).
+func _apply_bottom_nav() -> void:
+	if _bottom_nav == null or _split == null:
+		return
+	var kb := 0
+	if OS.get_name() in ["Android", "iOS"]:
+		kb = OS.get_virtual_keyboard_height()
+	var show := _bottom_nav_wanted() and kb <= 0
+	_bottom_nav.visible = show
+	if kb > 0:
+		var ratio = get_viewport().get_visible_rect().size.y / max(1.0, OS.window_size.y)
+		_split.margin_bottom = -kb * ratio
+	else:
+		_split.margin_bottom = -BOTTOM_NAV_HEIGHT if show else 0
+
 func _sidebar_sep() -> HSeparator:
 	return HSeparator.new()
 
@@ -2054,6 +2278,8 @@ func _on_command_response(p_resp: Dictionary) -> void:
 func _on_agent_hook(p_bare: String, p_hook: Dictionary) -> void:
 	if p_bare != _peer:
 		return
+	# X6.3: todo hook con significado alimenta la línea de tiempo de la Mente.
+	_mind.record_hook(p_hook)
 	match str(p_hook.get("event", "")):
 		"approval":
 			_chat.apply_approval_hook(p_hook)
@@ -2112,6 +2338,7 @@ func _update_panes(p_single: bool, p_mind: bool, p_room: bool) -> void:
 	if _roster.has_method("set_columns"):
 		_roster.set_columns(_landscape_columns())
 	_refresh_sidebar()
+	_apply_bottom_nav()
 
 # Mueve avatar/orbe entre la cabecera del chat y el sidebar según orientación.
 func _layout_identity(p_sidebar: bool) -> void:
@@ -2157,6 +2384,11 @@ func _on_room_panel_back() -> void:
 	_room_agent = ""
 	_update_mind_visibility()
 
+# X9.3: "Mencionar" en el pane de participantes inserta @nick en el composer.
+func _on_mention_requested(p_nick: String) -> void:
+	if _chat != null and p_nick != "":
+		_chat._insert_mention(p_nick)
+
 # Muestra/oculta el pane de participantes (vista angosta); vuelve a la lista.
 func _toggle_room_pane() -> void:
 	_room_agent = ""
@@ -2195,7 +2427,9 @@ func _notification(p_what: int) -> void:
 		# roster raíz (sin conversación abierta). Se desactiva el cierre
 		# automático en _ready (set_quit_on_go_back(false)), así que aquí se
 		# decide explícitamente.
-		if _fleet_source_dialog != null and _fleet_source_dialog.visible:
+		if _yo_visible:
+			_nav_home()
+		elif _fleet_source_dialog != null and _fleet_source_dialog.visible:
 			_fleet_source_dialog.hide()
 		elif _fleet_monitor != null and _fleet_monitor.visible:
 			_close_fleet_monitor()
@@ -2257,10 +2491,10 @@ func _update_safe_area() -> void:
 		_chat.set_bottom_inset(inset)
 
 func _follow_keyboard() -> void:
-	var kb = OS.get_virtual_keyboard_height()
-	var ratio = get_viewport().get_visible_rect().size.y / max(1.0, OS.window_size.y)
-	_split.margin_bottom = -kb * ratio
-	if _chat != null and kb > 0:
+	# El reserve de la barra inferior y el empuje del teclado comparten el
+	# margin_bottom del split: _apply_bottom_nav decide cuál aplica.
+	_apply_bottom_nav()
+	if _chat != null and OS.get_virtual_keyboard_height() > 0:
 		_chat.set_bottom_inset(0)
 
 func _on_header_orb() -> void:
@@ -2331,6 +2565,8 @@ func _on_font_scale_requested(p_dir: int) -> void:
 	_zoom(p_dir)
 	if juice != null:
 		juice.toast("Letra: %d%%" % int(round(_zoom_target * 100.0)))
+	if _account != null:
+		_account.set_font_label(_zoom_target)
 
 func _process(_delta: float) -> void:
 	# Zoom pendiente (coalescido). Se aplica ANTES del audio para que reproducir
@@ -2378,10 +2614,12 @@ func _sync_roster_identity() -> void:
 	_roster.set_identity(my_bare, session.avatars.get(my_bare))
 
 func _on_auth_failed() -> void:
+	_yo_visible = false
 	_account.visible = true
 	_split.visible = false
 	_account.set_busy(false)
 	_account.set_status("Usuario o contraseña incorrectos.")
+	_apply_bottom_nav()
 	if _startup_splash != null:
 		_startup_splash.finish("auth_failed")
 	juice.play("alert")
@@ -2392,10 +2630,12 @@ func _on_startup_canceled() -> void:
 	var splash = _startup_splash
 	_startup_splash = null
 	_pending_cfg = {}
+	_yo_visible = false
 	session.disconnect_account()
 	_account.visible = true
 	_account.set_busy(false)
 	_account.set_status("Conexión cancelada.")
+	_apply_bottom_nav()
 	if splash != null:
 		splash.queue_free()
 
@@ -2406,11 +2646,13 @@ func _on_startup_completed(p_outcome: String) -> void:
 		_pending_cfg = {}
 		session.disconnect_account()
 	if p_outcome != "connected":
+		_yo_visible = false
 		_account.visible = true
 		_split.visible = false
 		_account.set_busy(false)
 		if p_outcome == "timeout":
 			_account.set_status("La conexión tarda más de lo esperado. Puedes reintentar.")
+		_apply_bottom_nav()
 	if splash != null:
 		splash.queue_free()
 

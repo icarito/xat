@@ -5,8 +5,14 @@ extends PanelContainer
 
 signal connect_requested(cfg)
 signal register_requested(cfg)
+# Vista "Yo": reenvía a main el zoom y las acciones de cuenta.
+signal font_scale_requested(dir)
+signal avatar_requested()
+signal updates_requested()
 
 const XatXmpp = preload("res://addons/xat_xmpp/xat_xmpp.gd")
+const P = preload("res://addons/xat_xmpp/ui/palette.gd")
+const XatTheme = preload("res://addons/xat_xmpp/ui/xat_theme.gd")
 
 var _jid: LineEdit
 var _pass: LineEdit
@@ -17,6 +23,12 @@ var _email: LineEdit
 var _status: Label
 var _button: Button
 var _register_btn: Button
+# "Yo" (ajustes de la cuenta): mismos valores de user://xat_settings.json.
+var _juice = null
+var _yo_sound: Button
+var _yo_haptic: Button
+var _yo_motion: Button
+var _font_label: Label
 
 func _init() -> void:
 	name = "AccountPanel"
@@ -27,7 +39,15 @@ func _build() -> void:
 	margin.set("custom_constants/margin_left", 24)
 	margin.set("custom_constants/margin_right", 24)
 	margin.set("custom_constants/margin_top", 18)
-	margin.add_child(_make_form())
+	# La vista "Yo" agrega los ajustes debajo del formulario: con pantallas
+	# bajas (compacto) el contenido puede superar el alto, así que scrollea.
+	var sc = ScrollContainer.new()
+	sc.scroll_horizontal_enabled = false
+	sc.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	margin.add_child(sc)
+	var form = _make_form()
+	form.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	sc.add_child(form)
 	add_child(margin)
 
 func _make_form() -> VBoxContainer:
@@ -56,6 +76,8 @@ func _make_form() -> VBoxContainer:
 	_status.autowrap = true
 	v.add_child(_status)
 	v.add_child(_legal_links())
+	v.add_child(HSeparator.new())
+	v.add_child(_make_yo())
 	return v
 
 func _title() -> Label:
@@ -159,3 +181,122 @@ func _on_register() -> void:
 		return
 	set_status("Creando cuenta…")
 	emit_signal("register_requested", cfg)
+
+# --- Vista "Yo": ajustes de la cuenta ---
+# Sonido, vibración, animación y tamaño de letra viven acá (antes en el pie del
+# roster / sidebar). Persisten en user://xat_settings.json vía juice.
+
+func _make_yo() -> VBoxContainer:
+	var v = VBoxContainer.new()
+	v.add_constant_override("separation", 8)
+	var title = Label.new()
+	title.text = "Yo"
+	title.align = Label.ALIGN_CENTER
+	title.add_color_override("font_color", P.TEXT)
+	title.add_font_override("font", XatTheme.font(P.FONT_BOLD, P.FONT_SIZE + 2))
+	v.add_child(title)
+	_yo_sound = _setting_toggle("Sonido", "sound_enabled")
+	v.add_child(_yo_sound)
+	_yo_haptic = _setting_toggle("Vibración", "haptics_enabled")
+	v.add_child(_yo_haptic)
+	_yo_motion = _setting_toggle("Animación", "motion_enabled")
+	v.add_child(_yo_motion)
+	v.add_child(_font_row())
+	v.add_child(HSeparator.new())
+	v.add_child(_yo_action("Cambiar foto de perfil", "_on_yo_avatar"))
+	v.add_child(_yo_action("Privacidad y soporte", "_on_yo_about"))
+	v.add_child(_yo_action("Buscar actualizaciones", "_on_yo_updates"))
+	return v
+
+# Toggle grande (>=44 px) que escribe el ajuste y avisa con un toast.
+func _setting_toggle(p_label: String, p_key: String) -> Button:
+	var b = Button.new()
+	b.text = p_label
+	b.toggle_mode = true
+	b.focus_mode = Control.FOCUS_NONE
+	b.align = Button.ALIGN_LEFT
+	b.rect_min_size = Vector2(0, 48)
+	b.add_stylebox_override("normal", XatTheme.box(P.BG2, 10, 14, 8))
+	b.add_stylebox_override("hover", XatTheme.box(P.BG2.lightened(0.12), 10, 14, 8))
+	b.add_stylebox_override("pressed", XatTheme.box(P.USER.darkened(0.45), 10, 14, 8))
+	b.add_stylebox_override("focus", XatTheme.box(P.BG2, 10, 14, 8))
+	b.connect("toggled", self, "_on_setting_toggled", [p_key])
+	return b
+
+func _font_row() -> HBoxContainer:
+	var h = HBoxContainer.new()
+	h.add_constant_override("separation", 6)
+	var l = Label.new()
+	l.text = "Tamaño de letra"
+	l.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	l.rect_min_size = Vector2(0, 48)
+	l.valign = Label.VALIGN_CENTER
+	h.add_child(l)
+	var smaller = _square("A−", "Achicar la letra")
+	smaller.connect("pressed", self, "_on_font_smaller")
+	h.add_child(smaller)
+	_font_label = Label.new()
+	_font_label.align = Label.ALIGN_CENTER
+	_font_label.valign = Label.VALIGN_CENTER
+	_font_label.rect_min_size = Vector2(56, 48)
+	h.add_child(_font_label)
+	var bigger = _square("A+", "Agrandar la letra")
+	bigger.connect("pressed", self, "_on_font_bigger")
+	h.add_child(bigger)
+	return h
+
+func _square(p_text: String, p_tip: String) -> Button:
+	var b = Button.new()
+	b.text = p_text
+	b.hint_tooltip = p_tip
+	b.focus_mode = Control.FOCUS_NONE
+	b.rect_min_size = Vector2(52, 48)
+	b.add_stylebox_override("normal", XatTheme.box(P.BG2, 10, 8, 8))
+	b.add_stylebox_override("hover", XatTheme.box(P.BG2.lightened(0.12), 10, 8, 8))
+	b.add_stylebox_override("pressed", XatTheme.box(P.USER.darkened(0.45), 10, 8, 8))
+	b.add_stylebox_override("focus", XatTheme.box(P.BG2, 10, 8, 8))
+	return b
+
+func _yo_action(p_label: String, p_method: String) -> Button:
+	var b = Button.new()
+	b.text = p_label
+	b.focus_mode = Control.FOCUS_NONE
+	b.align = Button.ALIGN_LEFT
+	b.rect_min_size = Vector2(0, 48)
+	b.connect("pressed", self, p_method)
+	return b
+
+func _on_setting_toggled(p_on: bool, p_key: String) -> void:
+	if _juice == null:
+		return
+	_juice.set_setting(p_key, p_on)
+	var n = {"sound_enabled": "Sonido", "haptics_enabled": "Vibración", "motion_enabled": "Animación"}.get(p_key, "")
+	if n != "":
+		_juice.toast("%s %s" % [n, "activado" if p_on else "desactivado"])
+
+# Conecta juice (ajustes) y sincroniza el estado de los toggles.
+func set_juice(p_juice) -> void:
+	_juice = p_juice
+	for pair in [[_yo_sound, "sound_enabled"], [_yo_haptic, "haptics_enabled"], [_yo_motion, "motion_enabled"]]:
+		if pair[0] != null and _juice != null:
+			pair[0].pressed = bool(_juice.settings.get(pair[1], true))
+
+# main llama acá tras aplicar el zoom para reflejar el % actual.
+func set_font_label(p_scale: float) -> void:
+	if _font_label != null:
+		_font_label.text = "%d%%" % int(round(p_scale * 100.0))
+
+func _on_font_smaller() -> void:
+	emit_signal("font_scale_requested", -1)
+
+func _on_font_bigger() -> void:
+	emit_signal("font_scale_requested", 1)
+
+func _on_yo_avatar() -> void:
+	emit_signal("avatar_requested")
+
+func _on_yo_updates() -> void:
+	emit_signal("updates_requested")
+
+func _on_yo_about() -> void:
+	_open_url(XatXmpp.PRIVACY_URL)

@@ -5,6 +5,7 @@ extends PanelContainer
 # el modelo de mensajes para plegar correcciones 0308 y marcas de entrega 0184.
 
 signal back_requested() # vista de un panel (móvil): volver al roster
+signal mind_requested() # tocar el nombre/identidad de la cabecera abre la Mente
 signal message_submitted(bare, text)
 signal reply_submitted(bare, text, target)
 signal edit_submitted(bare, target, text)
@@ -44,6 +45,7 @@ const ApprovalCard = preload("res://addons/xat_xmpp/ui/approval_card.gd")
 const Shimmer = preload("res://addons/xat_xmpp/ui/fx/shimmer.gd")
 const IconButton = preload("res://addons/xat_xmpp/ui/icon_button.gd")
 const Waveform = preload("res://addons/xat_xmpp/ui/waveform.gd")
+const QuickQuestions = preload("res://addons/xat_xmpp/ui/quick_questions.gd")
 
 const MAX_LINES := 6
 # Umbrales del gesto de voz (px lógicos ≈ dp). Ver docs/input-bar-design.md §5.1.
@@ -90,6 +92,13 @@ var _head: PanelContainer      # franja de cabecera (ocultable en landscape)
 
 var _title: Label
 var back_button: Button
+var _identity: VBoxContainer  # nombre + línea de estado (tocar = abrir Mente)
+var _status: Label            # "activity · contexto % · modelo"
+var _compact := false         # cabecera compacta (52 px) con el teclado abierto
+var _sys_chip: PanelContainer # chip de sistema (cifrado)
+var _sys_chip_label: Label
+var _qq_scroll: ScrollContainer # fila de preguntas rápidas sobre el composer
+var _qq_row: HBoxContainer
 var _scroll: ScrollContainer
 var _list: VBoxContainer
 var _state: RichTextLabel
@@ -201,7 +210,22 @@ func _build() -> void:
 	back_button.rect_min_size = Vector2(40, 0)
 	back_button.connect("pressed", self, "emit_signal", ["back_requested"])
 	hh.add_child(back_button)
-	hh.add_child(_title)
+	# Identidad: el nombre y, debajo, una línea de estado real (REQ-X4.1). Tocar
+	# la identidad abre la Mente (como el orbe del header_slot).
+	_identity = VBoxContainer.new()
+	_identity.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_identity.mouse_filter = Control.MOUSE_FILTER_STOP
+	_identity.add_constant_override("separation", 0)
+	_identity.connect("gui_input", self, "_on_identity_input")
+	_identity.add_child(_title)
+	_status = Label.new()
+	_status.visible = false
+	_status.clip_text = true
+	_status.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_status.add_color_override("font_color", Palette.TEXT_DIM)
+	_status.add_font_override("font", XatTheme.font(Palette.FONT_REGULAR, Palette.FONT_SIZE - 3))
+	_identity.add_child(_status)
+	hh.add_child(_identity)
 	_occ_btn = Button.new()
 	_occ_btn.text = "Ocupantes"
 	_occ_btn.visible = false
@@ -338,6 +362,21 @@ func _build() -> void:
 	reply_row.add_child(reply_close)
 	_reply_bar.add_child(reply_row)
 	f.add_child(_reply_bar)
+	# Chip de sistema de cifrado (REQ-X4.3): sólo aparece si sabemos que el chat
+	# va en texto plano. Centrado, sobre el indicador "pensando".
+	var syswrap = CenterContainer.new()
+	syswrap.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_sys_chip = PanelContainer.new()
+	_sys_chip.visible = false
+	_sys_chip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_sys_chip.add_stylebox_override("panel", XatTheme.box(Palette.BG2, 99, 10, 4))
+	_sys_chip_label = Label.new()
+	_sys_chip_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_sys_chip_label.add_color_override("font_color", Palette.TEXT_DIM)
+	_sys_chip_label.add_font_override("font", XatTheme.font(Palette.FONT_REGULAR, Palette.FONT_SIZE - 3))
+	_sys_chip.add_child(_sys_chip_label)
+	syswrap.add_child(_sys_chip)
+	f.add_child(syswrap)
 	_state = RichTextLabel.new()
 	_state.bbcode_enabled = true
 	_state.fit_content_height = true
@@ -352,6 +391,17 @@ func _build() -> void:
 	_anim.wait_time = 0.05
 	_anim.connect("timeout", _state, "update")
 	add_child(_anim)
+	# Preguntas rápidas (REQ-X4.4): fila de chips sobre el composer. Se rellena
+	# al abrir un chat 1:1 (no en salas). Scroll horizontal si no caben.
+	_qq_scroll = ScrollContainer.new()
+	_qq_scroll.visible = false
+	_qq_scroll.scroll_vertical_enabled = false
+	_qq_scroll.scroll_horizontal_enabled = true
+	_qq_scroll.mouse_filter = Control.MOUSE_FILTER_PASS
+	_qq_row = HBoxContainer.new()
+	_qq_row.add_constant_override("separation", 6)
+	_qq_scroll.add_child(_qq_row)
+	f.add_child(_qq_scroll)
 	# Composer: una sola fila con iconos incrustados y botón cola que muta
 	# (mic <-> enviar). Ver docs/input-bar-design.md §3–§5.
 	_compose = MarginContainer.new()
@@ -634,6 +684,110 @@ func _clear_highlight() -> void:
 func search_open() -> bool:
 	return _search_bar != null and _search_bar.visible
 
+# --- Cabecera: identidad, estado y compactado (X4.1 / X5.1) ---
+
+# Tocar el nombre/identidad abre la Mente (main conecta `mind_requested`).
+func _on_identity_input(p_ev) -> void:
+	if p_ev is InputEventMouseButton and p_ev.pressed and p_ev.button_index == BUTTON_LEFT:
+		emit_signal("mind_requested")
+
+# Línea de estado "activity · contexto % · modelo" (pura, testeable).
+static func status_line(p_state, p_connected: bool = true) -> String:
+	if not p_connected:
+		return "desconectado"
+	if not (p_state is Dictionary):
+		return ""
+	var st = p_state as Dictionary
+	var parts := []
+	var act_label = {
+		"available": "disponible",
+		"processing": "trabajando",
+		"busy": "ocupado",
+		"pending": "esperando aprobación",
+		"paused": "en pausa",
+	}.get(str(st.get("activity", "")), "")
+	if act_label != "":
+		parts.append(act_label)
+	var ctx = st.get("context", {})
+	if ctx is Dictionary and float((ctx as Dictionary).get("max", 0)) > 0.0:
+		var used = float((ctx as Dictionary).get("used", 0))
+		var mx = float((ctx as Dictionary).get("max", 0))
+		parts.append("contexto %d%%" % int(round(100.0 * used / mx)))
+	var model = str(st.get("model", ""))
+	if model != "":
+		parts.append(model)
+	return " · ".join(parts)
+
+# Estado del agente activo en la cabecera. main lo empuja desde telemetría.
+func set_agent_status(p_state, p_connected: bool = true) -> void:
+	if _status == null:
+		return
+	var txt = status_line(p_state, p_connected)
+	_status.text = txt
+	_status.visible = txt != "" and not _compact
+
+# Cabecera compacta (52 px) con el teclado abierto; oculta la línea de estado.
+func set_compact_header(p_on: bool) -> void:
+	_compact = p_on
+	if _head != null:
+		_head.rect_min_size = Vector2(0, 52) if p_on else Vector2(0, 0)
+	if _status != null:
+		_status.visible = not p_on and _status.text != ""
+
+# Chip de cifrado de la conversación (REQ-X4.3). Sin chip si OMEMO está activo
+# o si el estado es desconocido: no inventamos cifrado.
+func set_encryption_status(p_omemo_available: bool) -> void:
+	if _sys_chip == null:
+		return
+	var txt = Bubble.encryption_chip_text(p_omemo_available)
+	if txt != "" and _sys_chip_label != null:
+		_sys_chip_label.text = txt
+	_sys_chip.visible = txt != "" and _room == ""
+
+# Al cambiar de conversación: búsqueda cerrada, estado y chips limpios.
+func _reset_header_state() -> void:
+	set_compact_header(false)
+	_close_search()
+	if _status != null:
+		_status.text = ""
+		_status.visible = false
+	if _sys_chip != null:
+		_sys_chip.visible = false
+	_refresh_quick()
+
+# --- Preguntas rápidas (REQ-X4.4) ---
+
+func _refresh_quick() -> void:
+	if _qq_row == null:
+		return
+	for c in _qq_row.get_children():
+		_qq_row.remove_child(c)
+		c.queue_free()
+	var show = _peer != "" and _room == ""
+	if _qq_scroll != null:
+		_qq_scroll.visible = show
+	if not show:
+		return
+	for q in QuickQuestions.load_chips():
+		var b = _pill_button(q)
+		b.rect_min_size = Vector2(0, 44) # objetivo táctil >= 44 px
+		b.connect("pressed", self, "_on_quick_question", [q])
+		_qq_row.add_child(b)
+
+func _on_quick_question(p_text: String) -> void:
+	if _peer == "" or p_text == "":
+		return
+	emit_signal("message_submitted", _peer, p_text)
+
+func quick_questions() -> Array:
+	var out := []
+	if _qq_row == null:
+		return out
+	for c in _qq_row.get_children():
+		if c is Button:
+			out.append(c.text)
+	return out
+
 # Juice (háptica/sonido) inyectado por main; opcional para instanciar en tests.
 func set_juice(p_juice) -> void:
 	juice = p_juice
@@ -867,6 +1021,11 @@ func _on_input_focus(p_entered: bool) -> void:
 	if _field == null:
 		return
 	_field.add_stylebox_override("panel", _pill_box(Palette.BG2, Palette.AGENT_EDGE if p_entered else Palette.LINE))
+	# Con el teclado abierto (composer enfocado) la cabecera se compacta y la
+	# búsqueda se cierra (REQ-X5.1).
+	if p_entered:
+		_close_search()
+	set_compact_header(p_entered)
 
 # Gesto del composer: rastrea el toque del botón cola por ÍNDICE. Godot 3 no
 # tiene pointer capture, así que se consume el evento acá y se sigue por drag.
@@ -1543,6 +1702,7 @@ func set_peer(p_bare: String) -> void:
 	_set_tools_visible(true)
 	_title.text = p_bare.split("@")[0]
 	_title.hint_tooltip = p_bare
+	_reset_header_state()
 	_messages = []
 	_pending_actions = null
 	_clear_actions()
@@ -1563,6 +1723,7 @@ func set_room(p_room: String, p_nick: String, p_occupants: Array = [], p_affilia
 	_room_role = p_role
 	_title.text = p_room.split("@")[0]
 	_title.hint_tooltip = p_room
+	_reset_header_state()
 	_occ_btn.visible = true
 	_leave_btn.visible = true
 	_room_menu_btn.visible = true
@@ -2090,7 +2251,11 @@ func _make_bubble(i: int, p_new: bool) -> void:
 	var b = Bubble.new()
 	b.connect("media_action", self, "_on_bubble_media_action")
 	b.connect("nick_clicked", self, "_on_nick_clicked")
-	b.set_record(rec, last, p_new, gap, p_new and dir == "in")
+	# Placeholder de OMEMO ilegible: chip de sistema, no texto del agente (X4.3).
+	var sys_notice = Bubble.is_omemo_notice(str(rec.get("body", "")))
+	if sys_notice:
+		b.set_system(true)
+	b.set_record(rec, last, p_new and not sys_notice, gap, p_new and dir == "in" and not sys_notice)
 	# Chip de remitente en salas: sólo el primer mensaje de cada grupo entrante.
 	if _room != "" and dir == "in":
 		var nick = _sender_of(rec)

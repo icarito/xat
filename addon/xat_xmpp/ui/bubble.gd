@@ -27,6 +27,26 @@ static func color_for(p_nick: String) -> Color:
 		return Palette.TEXT_DIM
 	return NICK_COLORS[int(abs(p_nick.hash())) % NICK_COLORS.size()]
 
+# Chip de sistema para el estado de cifrado de la conversación (REQ-X4.3):
+# sólo se muestra cuando sabemos que el chat va en texto plano. Con OMEMO
+# disponible (o estado desconocido) no hay chip: no inventamos cifrado.
+static func encryption_chip_text(p_omemo_available: bool) -> String:
+	return "" if p_omemo_available else "Chat sin OMEMO · texto plano"
+
+# Placeholder de sesión para un mensaje OMEMO que no se pudo descifrar: se
+# dibuja como chip de sistema, nunca como texto del agente.
+const OMEMO_NOTICE := "Mensaje cifrado con OMEMO"
+
+static func is_omemo_notice(p_body: String) -> bool:
+	return p_body.find(OMEMO_NOTICE) >= 0
+
+# Texto legible del aviso de sistema, sin el glifo (roto) del placeholder.
+static func notice_text(p_body: String) -> String:
+	var t = p_body.strip_edges()
+	if is_omemo_notice(t):
+		return "Mensaje cifrado con OMEMO · no se pudo leer"
+	return t
+
 const MAX_FRAC := 0.7
 const SLIDE := 14.0
 const THUMB_MAX := 240
@@ -71,6 +91,8 @@ var _reply_quote: Label
 var _reply_accent: ColorRect
 var _reactions_row: HBoxContainer
 var _search_hl := false
+var _system := false   # aviso de sistema (chip centrado) en vez de burbuja
+var _pad2: Control     # segundo espaciador (sólo para centrar un aviso)
 
 func set_search_highlight(p_on: bool) -> void:
 	_search_hl = p_on
@@ -198,6 +220,9 @@ func _init() -> void:
 	var pad = Control.new()
 	pad.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	pad.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_pad2 = Control.new()
+	_pad2.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_pad2.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_col = col
 	_row = row
 	_pad = pad
@@ -216,24 +241,37 @@ func _ready() -> void:
 func _on_font_scale_changed(_scale: float) -> void:
 	refresh()
 
+# Marca la burbuja como aviso de sistema (chip centrado, sin cola ni marca):
+# se usa para el placeholder de OMEMO ilegible (REQ-X4.3).
+func set_system(p_on: bool) -> void:
+	_system = p_on
+
 # p_gap: separación superior (GAP dentro del grupo, GROUP_GAP entre grupos).
 func set_record(p_rec: Dictionary, p_last: bool, p_new: bool, p_gap: int = Palette.GAP, p_reveal: bool = false) -> void:
 	rec = p_rec
 	_last = p_last
 	_gap = p_gap
-	var out = rec.get("direction", "in") == "out"
+	var out = rec.get("direction", "in") == "out" and not _system
 	if _col.get_parent() == null:
-		if out:
+		if _system:
 			_row.add_child(_pad)
 			_row.add_child(_col)
+			_row.add_child(_pad2)
+			_panel.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+			_metarow.alignment = BoxContainer.ALIGN_CENTER
+		elif out:
+			_row.add_child(_pad)
+			_row.add_child(_col)
+			_panel.size_flags_horizontal = Control.SIZE_SHRINK_END
+			_metarow.alignment = BoxContainer.ALIGN_END
 		else:
 			_row.add_child(_col)
 			_row.add_child(_pad)
-		_panel.size_flags_horizontal = Control.SIZE_SHRINK_END if out else 0
-		_metarow.alignment = BoxContainer.ALIGN_END if out else BoxContainer.ALIGN_BEGIN
+			_panel.size_flags_horizontal = 0
+			_metarow.alignment = BoxContainer.ALIGN_BEGIN
 	_spacer.rect_min_size.y = _gap
 	refresh()
-	if p_reveal:
+	if p_reveal and not _system:
 		# Máquina de escribir vía Tween sobre percent_visible: cada paso pide
 		# redibujo (un RichTextEffect se congela con low_processor_mode y la
 		# burbuja quedaba vacía). Tope 0.6 s aunque el mensaje sea largo.
@@ -246,7 +284,7 @@ func set_record(p_rec: Dictionary, p_last: bool, p_new: bool, p_gap: int = Palet
 			tw.start()
 		else:
 			_reveal_tw = tw
-	if p_new:
+	if p_new and not _system:
 		if is_inside_tree():
 			_animate()
 		else:
@@ -435,6 +473,21 @@ func refresh() -> void:
 	# Un motor anterior sigue mostrando Unicode normal. No sustituir por imágenes
 	# si no sabe devolver su secuencia original al seleccionar/copiar.
 	_emoji = EmojiInline.new(int(_font.get_height())) if _label.has_method("add_inline_image") else null
+	if _system:
+		# Aviso de sistema (p. ej. OMEMO ilegible): chip centrado, sin media,
+		# reacciones, cita ni marca de entrega.
+		_clear_media()
+		if _reply_box != null:
+			_reply_box.visible = false
+		if _reactions_row != null:
+			_reactions_row.visible = false
+		_label.visible = true
+		_label.bbcode_text = "[i]%s[/i]" % notice_text(str(rec.get("body", "")))
+		_fit_w = -1.0
+		_fit()
+		_style()
+		_update_meta()
+		return
 	_render_reply()
 	_render_reactions()
 	var attach = rec.get("attach", {})
@@ -658,6 +711,14 @@ func attach(p_node: Control) -> void:
 	add_child(m)
 
 func _style() -> void:
+	if _system:
+		# Chip de sistema: pastilla centrada, sin cola ni sombra fuerte.
+		var ss = XatTheme.box(Palette.BG2, 99, 12, 3)
+		if _search_hl:
+			ss.set_border_width_all(2)
+			ss.border_color = Palette.PENDING
+		_panel.add_stylebox_override("panel", ss)
+		return
 	var out = rec.get("direction", "in") == "out"
 	var s = XatTheme.box(Palette.USER if out else Palette.BG2, Palette.RADIUS, 12, 8)
 	if not out:
@@ -677,6 +738,12 @@ func _style() -> void:
 	_panel.add_stylebox_override("panel", s)
 
 func _update_meta() -> void:
+	if _system:
+		if _metarow != null:
+			_metarow.visible = false
+		if _sender_btn != null:
+			_sender_btn.visible = false
+		return
 	var t = _short_time(LocalTime.local_iso(str(rec.get("timestamp", ""))))
 	var parts := []
 	if t != "":
@@ -715,6 +782,8 @@ func _fit() -> void:
 	if max_w <= 40.0:
 		return
 	var body = str(rec.get("body", ""))
+	if _system:
+		body = notice_text(body)
 	var attach = rec.get("attach", {})
 	if attach is Dictionary and not (attach as Dictionary).empty():
 		body = Media.caption_of(body, str(attach.get("url", "")))

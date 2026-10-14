@@ -29,22 +29,23 @@ func _init():
 	check(m._roster._req_box.is_visible_in_tree(), "banda visible también en pestaña Salas")
 	m._roster._set_tab(0)
 
-	# La fila tiene los botones Unirse / Ignorar.
-	var accept = _find_button(m._roster._req_box, "Unirse")
-	var ignore = _find_button(m._roster._req_box, "Ignorar")
-	check(accept != null and ignore != null, "fila con botones Unirse/Ignorar")
+	# La fila tiene los botones Unirme / Ahora no (X2.4).
+	var accept = _find_button(m._roster._req_box, "Unirme")
+	var defer = _find_button(m._roster._req_box, "Ahora no")
+	check(accept != null and defer != null, "fila con botones Unirme/Ahora no")
 
-	# Ignorar quita la invitación y oculta la banda.
-	if ignore != null:
-		ignore.emit_signal("pressed")
+	# "Ahora no" saca la invitación de la banda pero la deja pendiente en Salas.
+	if defer != null:
+		defer.emit_signal("pressed")
 	yield(self, "idle_frame")
-	check(not m._roster._invites.has("sala@conference.h"), "Ignorar quita la invitación")
+	check(not m._roster._invites.has("sala@conference.h"), "Ahora no la saca de la banda")
 	check(not m._roster._req_box.visible, "banda se oculta sin invitaciones")
+	check(m._roster._deferred.has("sala@conference.h"), "Ahora no la deja pendiente en Salas")
 
-	# Otra invitación: Unirse emite room_invite_accept y limpia.
+	# Otra invitación: Unirme emite room_invite_accept y limpia.
 	m.session.emit_signal("muc_invite", "sala2@conference.h", "bob@h", "")
 	yield(self, "idle_frame")
-	accept = _find_button(m._roster._req_box, "Unirse")
+	accept = _find_button(m._roster._req_box, "Unirme")
 	check(accept != null, "segunda invitación renderizada")
 	if accept != null:
 		accept.emit_signal("pressed")

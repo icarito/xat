@@ -27,7 +27,8 @@ func _init():
 	for b in btns:
 		if b.text == "abort":
 			b.emit_signal("pressed")
-	check(_got == ["abort"], "chip emite command_requested")
+			b.emit_signal("pressed")
+	check(_got == ["abort"], "chip abort emite command_requested tras doble toque")
 	print("DONE fail=%d" % _fail)
 	OS.exit_code = 1 if _fail > 0 else 0
 	quit()

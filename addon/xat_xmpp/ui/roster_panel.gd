@@ -14,6 +14,8 @@ signal update_requested()
 signal font_scale_requested(dir) # -1 achicar, +1 agrandar letra
 signal room_invite_accept(room)
 signal room_invite_ignore(room)
+signal fleet_requested() # X2.5: tocar la franja de flota abre la vista Flota
+signal quick_question_requested(bare, text) # X2.3: chip de pregunta rápida
 
 const P = preload("res://addons/xat_xmpp/ui/palette.gd")
 const AgentOrb = preload("res://addons/xat_xmpp/ui/agent_orb.gd")
@@ -21,6 +23,7 @@ const XatTheme = preload("res://addons/xat_xmpp/ui/xat_theme.gd")
 const AvatarBadge = preload("res://addons/xat_xmpp/ui/avatar_badge.gd")
 const XatXmpp = preload("res://addons/xat_xmpp/xat_xmpp.gd")
 const IconButton = preload("res://addons/xat_xmpp/ui/icon_button.gd")
+const QuickQuestions = preload("res://addons/xat_xmpp/ui/quick_questions.gd")
 
 var _peers := []
 var _agents := {} # bare -> último state de agente
@@ -39,6 +42,14 @@ var _grid: HBoxContainer
 var _columns := 1 # 1 = lista simple; >1 = multicolumna (landscape) con scroll lateral
 var _requests := {} # bare -> status (solicitudes de suscripción pendientes)
 var _invites := {} # sala -> {from, reason} (invitaciones MUC pendientes)
+var _deferred := {} # sala -> {from, reason} ("Ahora no": pendiente en Salas)
+var _names := {} # bare -> nombre visible del roster (X2.4 humaniza la invitación)
+var _last_msg := {} # bare -> {from, body, ts} último mensaje, para la tarjeta de agente (X2.2)
+var _room_info := {} # sala -> {subject, last_from, last_body, last_ts, occupants} (X3.1)
+var _fleet := {} # resumen del snapshot de flota (X2.5); {} = sin datos
+var _fleet_strip: Button
+var _fleet_bar
+var _fleet_fresh: Label
 var _req_box: VBoxContainer
 var _scrolling := false
 var _juice = null
@@ -74,6 +85,8 @@ func _init() -> void:
 	var root = VBoxContainer.new()
 	add_child(root)
 	root.add_child(_make_header())
+	# X2.5: franja de flota (salud + frescura), justo bajo la identidad.
+	root.add_child(_make_fleet_wrap())
 	# Solicitudes de suscripción pendientes: banda arriba de la lista, oculta
 	# mientras no haya ninguna.
 	_req_box = VBoxContainer.new()
@@ -257,6 +270,112 @@ func _make_header() -> HBoxContainer:
 	h.add_child(room)
 	return h
 
+# X2.5: franja de flota. Barra de salud + frescura ("LIVE · hace 12 s"); toca
+# toda la franja (>=44 px) y emite `fleet_requested`. Sin datos = "sin datos"
+# en gris, nunca 0 ni verde (honestidad).
+func _make_fleet_wrap() -> MarginContainer:
+	var m = MarginContainer.new()
+	m.add_constant_override("margin_left", COLUMN_MARGIN)
+	m.add_constant_override("margin_right", COLUMN_MARGIN)
+	m.add_constant_override("margin_top", 2)
+	_fleet_strip = Button.new()
+	_fleet_strip.rect_min_size = Vector2(0, 44)
+	_fleet_strip.focus_mode = Control.FOCUS_NONE
+	_fleet_strip.hint_tooltip = "Abrir la flota"
+	_fleet_strip.add_stylebox_override("normal", XatTheme.box(P.BG2, 10, 10, 4))
+	_fleet_strip.add_stylebox_override("focus", StyleBoxEmpty.new())
+	_fleet_strip.add_stylebox_override("hover", XatTheme.box(P.BG2.lightened(0.12), 10, 10, 4))
+	_fleet_strip.add_stylebox_override("pressed", XatTheme.box(P.BG2.darkened(0.15), 10, 10, 4))
+	_fleet_strip.connect("pressed", self, "_on_fleet_pressed")
+	var h = HBoxContainer.new()
+	h.anchor_right = 1.0
+	h.anchor_bottom = 1.0
+	h.margin_left = 10
+	h.margin_right = -10
+	h.alignment = BoxContainer.ALIGN_CENTER
+	h.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	h.add_constant_override("separation", 8)
+	_fleet_strip.add_child(h)
+	var t = Label.new()
+	t.text = "Flota"
+	t.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	t.add_font_override("font", XatTheme.font(P.FONT_MEDIUM, P.FONT_SIZE - 1))
+	h.add_child(t)
+	_fleet_bar = ProgressBar.new()
+	_fleet_bar.percent_visible = false
+	_fleet_bar.min_value = 0
+	_fleet_bar.max_value = 100
+	_fleet_bar.value = 0
+	_fleet_bar.rect_min_size = Vector2(72, 8)
+	_fleet_bar.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_fleet_bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	h.add_child(_fleet_bar)
+	var sp = Label.new()
+	sp.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	sp.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	h.add_child(sp)
+	_fleet_fresh = Label.new()
+	_fleet_fresh.clip_text = true
+	_fleet_fresh.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_fleet_fresh.add_color_override("font_color", P.TEXT_DIM)
+	_fleet_fresh.add_font_override("font", XatTheme.font(P.FONT_MONO, P.FONT_SIZE - 4))
+	h.add_child(_fleet_fresh)
+	m.add_child(_fleet_strip)
+	_rebuild_fleet()
+	return m
+
+func _on_fleet_pressed() -> void:
+	emit_signal("fleet_requested")
+
+# Recalcula la franja a partir de `_fleet` (mismo formato que fleet_snapshot).
+func _rebuild_fleet() -> void:
+	if _fleet_strip == null:
+		return
+	var entities = _fleet.get("entities", [])
+	var has = not entities.empty()
+	if not has:
+		_fleet_bar.visible = false
+		_fleet_fresh.text = "sin datos"
+		_fleet_fresh.add_color_override("font_color", P.TEXT_DIM)
+		_fleet_strip.hint_tooltip = "Configurar la flota"
+		return
+	var ready := 0
+	for e in entities:
+		if _fleet_state_key(e) == "ready":
+			ready += 1
+	var frac = float(ready) / float(entities.size())
+	_fleet_bar.visible = true
+	_fleet_bar.value = int(round(frac * 100.0))
+	var col = P.context_color(frac)
+	_fleet_bar.add_stylebox_override("bg", XatTheme.box(P.LINE, 4, 0, 0))
+	_fleet_bar.add_stylebox_override("fg", XatTheme.box(col, 4, 0, 0))
+	var fresh = fleet_freshness(str(_fleet.get("generated_at", "")), OS.get_unix_time())
+	var stale = bool(_fleet.get("stale", false)) or str(_fleet.get("generated_at", "")) == ""
+	var head = "STALE" if stale else "LIVE"
+	if fresh == "":
+		_fleet_fresh.text = "sin hora"
+		_fleet_fresh.add_color_override("font_color", P.TEXT_DIM)
+	elif stale:
+		_fleet_fresh.text = head + " · " + fresh
+		_fleet_fresh.add_color_override("font_color", P.PENDING)
+	else:
+		_fleet_fresh.text = head + " · " + fresh
+		_fleet_fresh.add_color_override("font_color", P.OK)
+
+# Clasificación de salud de una instancia (misma semántica que fleet_monitor).
+static func _fleet_state_key(p_entity: Dictionary) -> String:
+	var lifecycle = str(p_entity.get("lifecycle", "")).to_lower()
+	var health = str(p_entity.get("health", p_entity.get("status", ""))).to_lower()
+	if lifecycle == "hibernated" or health == "hibernated":
+		return "hibernated"
+	if health in ["ready", "healthy", "up", "running", "online", "active", "ok"]:
+		return "ready"
+	if health in ["degraded", "unhealthy"]:
+		return "degraded"
+	if health in ["down", "failed", "error"]:
+		return "down"
+	return "unknown"
+
 func _tab_button(p_text: String, p_index: int) -> Button:
 	var b = Button.new()
 	b.text = p_text
@@ -381,13 +500,18 @@ func has_request(p_bare: String) -> bool:
 # --- Invitaciones a salas (MUC) ---
 
 func add_invite(p_room: String, p_from: String, p_reason: String = "") -> void:
+	_deferred.erase(p_room)
 	_invites[p_room] = {"from": p_from, "reason": p_reason}
 	_rebuild_requests()
+	_rebuild_rooms()
 
 func remove_invite(p_room: String) -> void:
-	if _invites.has(p_room):
-		_invites.erase(p_room)
+	var had = _invites.has(p_room) or _deferred.has(p_room)
+	_invites.erase(p_room)
+	_deferred.erase(p_room)
+	if had:
 		_rebuild_requests()
+		_rebuild_rooms()
 
 func _rebuild_requests() -> void:
 	for c in _req_box.get_children():
@@ -399,9 +523,11 @@ func _rebuild_requests() -> void:
 	for room in _invites.keys():
 		_req_box.add_child(_make_invite_row(str(room)))
 
+# X2.4: "{nombre} te invita a #{sala}", con el nombre visible del roster y el
+# localpart de la sala. Nunca se muestra el JID crudo (ni el recurso).
 func _make_invite_row(p_room: String) -> PanelContainer:
 	var info = _invites.get(p_room, {})
-	var who = str(info.get("from", ""))
+	var from = str(info.get("from", ""))
 	var reason = str(info.get("reason", ""))
 	var card = PanelContainer.new()
 	card.add_stylebox_override("panel", XatTheme.with_border(XatTheme.box(P.BG2, 10), P.AGENT_EDGE))
@@ -409,9 +535,8 @@ func _make_invite_row(p_room: String) -> PanelContainer:
 	v.add_constant_override("separation", 4)
 	card.add_child(v)
 	var l = Label.new()
-	l.text = "%s te invita a %s" % [who if who != "" else "Alguien", p_room]
+	l.text = humanize_invite(from, p_room, str(_names.get(jid_bare(from), "")))
 	l.clip_text = true
-	l.hint_tooltip = p_room
 	v.add_child(l)
 	if reason != "":
 		var note = Label.new()
@@ -423,20 +548,32 @@ func _make_invite_row(p_room: String) -> PanelContainer:
 	actions.add_constant_override("separation", 6)
 	v.add_child(actions)
 	var accept = Button.new()
-	accept.text = "Unirse"
+	accept.text = "Unirme"
 	accept.focus_mode = Control.FOCUS_NONE
+	accept.rect_min_size = Vector2(0, 44)
 	accept.connect("pressed", self, "_on_invite_accept", [p_room])
 	actions.add_child(accept)
-	var ignore = Button.new()
-	ignore.text = "Ignorar"
-	ignore.focus_mode = Control.FOCUS_NONE
-	ignore.connect("pressed", self, "_on_invite_ignore", [p_room])
-	actions.add_child(ignore)
+	var defer = Button.new()
+	defer.text = "Ahora no"
+	defer.focus_mode = Control.FOCUS_NONE
+	defer.rect_min_size = Vector2(0, 44)
+	defer.connect("pressed", self, "_on_invite_defer", [p_room])
+	actions.add_child(defer)
 	return card
 
 func _on_invite_accept(p_room: String) -> void:
 	remove_invite(p_room)
 	emit_signal("room_invite_accept", p_room)
+
+# "Ahora no" deja la invitación pendiente en Salas (no la descarta): sale de la
+# banda de solicitudes y se ofrece como tarjeta en la pestaña Salas. No emite
+# `room_invite_ignore` para que main no borre la invitación pendiente.
+func _on_invite_defer(p_room: String) -> void:
+	var info = _invites.get(p_room, {})
+	_invites.erase(p_room)
+	_deferred[p_room] = info
+	_rebuild_requests()
+	_rebuild_rooms()
 
 func _on_invite_ignore(p_room: String) -> void:
 	remove_invite(p_room)
@@ -493,7 +630,7 @@ func set_juice(p_juice) -> void:
 # Iconos vectoriales compartidos con el sidebar de landscape (mismo estilo).
 func _icon_button(p_glyph: String, p_tip: String) -> IconButton:
 	var b = IconButton.new()
-	b.setup(p_glyph, 40, P.TEXT_DIM, p_tip)
+	b.setup(p_glyph, 44, P.TEXT_DIM, p_tip)
 	for st in ["normal", "focus"]:
 		b.add_stylebox_override(st, XatTheme.box(P.BG2, 10, 4, 4))
 	b.add_stylebox_override("hover", XatTheme.box(P.BG2.lightened(0.12), 10, 4, 4))
@@ -513,7 +650,7 @@ func _circle_box(p_bg: Color, p_border: Color) -> StyleBoxFlat:
 
 func _icon_toggle(p_glyph: String, p_key: String, p_tip: String) -> IconButton:
 	var b = IconButton.new()
-	b.setup(p_glyph, 40, P.TEXT_DIM, p_tip)
+	b.setup(p_glyph, 44, P.TEXT_DIM, p_tip)
 	b.toggle_mode = true
 	if p_glyph == "sound":
 		b.set_off_glyph("sound_off")
@@ -612,6 +749,11 @@ func _sorted() -> Array:
 	return out
 
 func _before(a, b) -> bool:
+	# X2.2: los contactos con caps de agente se fijan arriba.
+	var aa = _agents.has(a)
+	var ab = _agents.has(b)
+	if aa != ab:
+		return aa
 	var ta = str(_activity.get(a, ""))
 	var tb = str(_activity.get(b, ""))
 	if ta != tb:
@@ -659,7 +801,32 @@ func set_rooms(p_rooms: Array) -> void:
 	for b in _rooms_activity.keys():
 		if not kept.has(b):
 			_rooms_activity.erase(b)
+	for b in _room_info.keys():
+		if not kept.has(b):
+			_room_info.erase(b)
 	_rebuild_rooms()
+
+# X3.1: metadatos de una sala (sujeto, último mensaje, ocupantes). `info`:
+# {subject, last_from, last_body, last_ts, occupants:[{nick, jid, ...}]}.
+func set_room_info(p_room: String, p_info: Dictionary) -> void:
+	_room_info[p_room] = p_info
+	if _rooms.has(p_room) or _deferred.has(p_room):
+		_rebuild_rooms()
+
+# X2.4: nombre visible del contacto (roster); humaniza las invitaciones.
+func set_display_name(p_bare: String, p_name: String) -> void:
+	_names[p_bare] = p_name
+
+# X2.2: último mensaje de un contacto, para la tarjeta de agente.
+func set_last_message(p_bare: String, p_from: String, p_body: String, p_ts: String = "") -> void:
+	_last_msg[p_bare] = {"from": p_from, "body": p_body, "ts": p_ts}
+	if _agents.has(p_bare):
+		_rebuild()
+
+# X2.5: resumen del snapshot de flota (mismo formato que fleet_snapshot.parse).
+func set_fleet_state(p_fleet: Dictionary) -> void:
+	_fleet = p_fleet
+	_rebuild_fleet()
 
 func _sorted_rooms() -> Array:
 	var out = _rooms.duplicate()
@@ -682,14 +849,57 @@ func _rebuild_rooms() -> void:
 	for c in _rooms_box.get_children():
 		_rooms_box.remove_child(c)
 		c.queue_free()
-	var has = not _rooms.empty()
+	var has = not _rooms.empty() or not _deferred.empty()
 	_rooms_empty.visible = not has
 	_rooms_box.visible = has
 	_update_tab_labels()
 	if not has:
 		return
+	# Invitaciones diferidas con "Ahora no": quedan pendientes acá (X2.4).
+	for room in _deferred.keys():
+		if not _rooms.has(str(room)):
+			_rooms_box.add_child(_make_deferred_row(str(room)))
 	for b in _sorted_rooms():
 		_rooms_box.add_child(_make_room_row(str(b)))
+
+# Tarjeta de invitación pendiente en Salas ("Ahora no"): Unirme o descartar.
+func _make_deferred_row(p_room: String) -> PanelContainer:
+	var info = _deferred.get(p_room, {})
+	var from = str(info.get("from", ""))
+	var card = PanelContainer.new()
+	card.add_stylebox_override("panel", XatTheme.with_border(XatTheme.box(P.BG2, 10), P.PENDING))
+	var v = VBoxContainer.new()
+	v.add_constant_override("separation", 4)
+	card.add_child(v)
+	var l = Label.new()
+	l.text = humanize_invite(from, p_room, str(_names.get(jid_bare(from), "")))
+	l.clip_text = true
+	v.add_child(l)
+	var tag = Label.new()
+	tag.text = "invitación pendiente"
+	tag.add_color_override("font_color", P.TEXT_DIM)
+	tag.add_font_override("font", XatTheme.font(P.FONT_REGULAR, P.FONT_SIZE - 3))
+	v.add_child(tag)
+	var actions = HBoxContainer.new()
+	actions.add_constant_override("separation", 6)
+	v.add_child(actions)
+	var accept = Button.new()
+	accept.text = "Unirme"
+	accept.focus_mode = Control.FOCUS_NONE
+	accept.rect_min_size = Vector2(0, 44)
+	accept.connect("pressed", self, "_on_invite_accept", [p_room])
+	actions.add_child(accept)
+	var dismiss = Button.new()
+	dismiss.text = "Descartar"
+	dismiss.focus_mode = Control.FOCUS_NONE
+	dismiss.rect_min_size = Vector2(0, 44)
+	dismiss.connect("pressed", self, "_on_deferred_dismiss", [p_room])
+	actions.add_child(dismiss)
+	return card
+
+func _on_deferred_dismiss(p_room: String) -> void:
+	_deferred.erase(p_room)
+	_rebuild_rooms()
 
 # Alterna entre lista simple (portrait) y multicolumna con scroll lateral
 # (landscape). El número de columnas lo decide main según el ancho.
@@ -715,16 +925,19 @@ func set_columns(p_n: int) -> void:
 		_rebuild_rooms()
 
 func _make_room_row(p_room: String) -> Button:
+	var info = _room_info.get(p_room, {})
+	var rich = not info.empty()
 	var row = Button.new()
 	row.name = _room_row_name(p_room)
 	row.toggle_mode = true
 	row.mouse_filter = Control.MOUSE_FILTER_PASS
-	row.add_stylebox_override("normal", StyleBoxEmpty.new())
+	# X3.1: cada sala es una tarjeta.
+	row.add_stylebox_override("normal", XatTheme.with_border(XatTheme.box(P.BG2, 10, 8, 6), P.LINE))
 	row.add_stylebox_override("focus", StyleBoxEmpty.new())
-	row.add_stylebox_override("hover", XatTheme.box(P.BG2.darkened(0.15), 10))
-	row.add_stylebox_override("pressed", XatTheme.with_border(XatTheme.box(P.BG2, 10), P.LINE))
+	row.add_stylebox_override("hover", XatTheme.with_border(XatTheme.box(P.BG2.lightened(0.1), 10, 8, 6), P.LINE))
+	row.add_stylebox_override("pressed", XatTheme.with_border(XatTheme.box(P.BG2, 10, 8, 6), P.AGENT_EDGE))
 	row.pressed = p_room == _selected
-	row.rect_min_size = Vector2(0, 54)
+	row.rect_min_size = Vector2(0, 66 if rich else 54)
 	row.set_meta("bare", p_room)
 	row.set_meta("room", true)
 	row.connect("pressed", self, "_on_row", [p_room])
@@ -743,14 +956,8 @@ func _make_room_row(p_room: String) -> Button:
 	inner.add_constant_override("separation", 10)
 	h.add_child(inner)
 	row.set_meta("inner", inner)
-	var hash_l = Label.new()
-	hash_l.text = "#"
-	hash_l.rect_min_size = Vector2(48, 0)
-	hash_l.align = Label.ALIGN_CENTER
-	hash_l.valign = Label.VALIGN_CENTER
-	hash_l.add_color_override("font_color", P.LINE)
-	hash_l.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	inner.add_child(hash_l)
+	# X3.2: el "#" vive en un contenedor de 44 px y queda centrado siempre.
+	inner.add_child(_hash_box())
 	var v = VBoxContainer.new()
 	v.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	v.alignment = BoxContainer.ALIGN_CENTER
@@ -762,13 +969,116 @@ func _make_room_row(p_room: String) -> Button:
 	name_l.clip_text = true
 	name_l.hint_tooltip = p_room
 	v.add_child(name_l)
+	if rich:
+		var subj = str(info.get("subject", "")).strip_edges()
+		if subj != "":
+			var subj_l = Label.new()
+			subj_l.text = subj
+			subj_l.clip_text = true
+			subj_l.add_color_override("font_color", P.TEXT_DIM)
+			subj_l.add_font_override("font", XatTheme.font(P.FONT_REGULAR, P.FONT_SIZE - 2))
+			v.add_child(subj_l)
+		var last = _room_last_line(info)
+		if last != "":
+			var last_l = Label.new()
+			last_l.text = last
+			last_l.clip_text = true
+			last_l.autowrap = true
+			last_l.rect_min_size = Vector2(0, 32) # ~2 líneas
+			last_l.add_color_override("font_color", P.TEXT_DIM)
+			last_l.add_font_override("font", XatTheme.font(P.FONT_REGULAR, P.FONT_SIZE - 2))
+			v.add_child(last_l)
 	var st = Label.new()
 	st.text = _status_text(p_room)
 	st.clip_text = true
 	st.add_color_override("font_color", P.TEXT_DIM)
 	v.add_child(st)
 	row.set_meta("status", st)
+	if rich:
+		var right = VBoxContainer.new()
+		right.alignment = BoxContainer.ALIGN_CENTER
+		right.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		right.add_constant_override("separation", 2)
+		inner.add_child(right)
+		var ts = str(info.get("last_ts", ""))
+		if ts != "":
+			var time_l = Label.new()
+			time_l.text = clock_time(ts)
+			time_l.align = Label.ALIGN_RIGHT
+			time_l.add_color_override("font_color", P.TEXT_DIM)
+			time_l.add_font_override("font", XatTheme.font(P.FONT_MONO, P.FONT_SIZE - 4))
+			time_l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			right.add_child(time_l)
+		right.add_child(_occupant_stack(info.get("occupants", [])))
 	return row
+
+# "#" centrado dentro de un contenedor de 44 px (X3.2).
+func _hash_box() -> Control:
+	var c = Control.new()
+	c.rect_min_size = Vector2(44, 44)
+	c.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var l = Label.new()
+	l.text = "#"
+	l.anchor_right = 1.0
+	l.anchor_bottom = 1.0
+	l.align = Label.ALIGN_CENTER
+	l.valign = Label.VALIGN_CENTER
+	l.add_color_override("font_color", P.LINE)
+	l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	c.add_child(l)
+	return c
+
+# Remitente + cuerpo del último mensaje de la sala (una línea; el Label envuelve).
+func _room_last_line(p_info: Dictionary) -> String:
+	var body = str(p_info.get("last_body", "")).strip_edges()
+	if body == "":
+		return ""
+	var from = str(p_info.get("last_from", "")).strip_edges()
+	if from == "":
+		return body
+	return "%s: %s" % [from, body]
+
+# Avatares apilados de ocupantes (máx. 3 + "+N"); orbe para agentes (X3.1).
+func _occupant_stack(p_occupants: Array) -> Control:
+	var c = Control.new()
+	c.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	c.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	var n = p_occupants.size()
+	if n == 0:
+		c.rect_min_size = Vector2(0, 0)
+		return c
+	var shown = int(min(n, 3))
+	var step := 16.0
+	var side := 26.0
+	c.rect_min_size = Vector2(step * float(shown - 1) + side, side)
+	for i in range(shown):
+		var occ = p_occupants[i]
+		var bare = jid_bare(str(occ.get("jid", "")))
+		var node
+		if bare != "" and _agents.has(bare):
+			var orb = AgentOrb.new()
+			orb.set_compact(true)
+			orb.rect_size = Vector2(48, 48)
+			orb.rect_scale = Vector2(side / 48.0, side / 48.0)
+			orb.mouse_filter = Control.MOUSE_FILTER_IGNORE
+			node = orb
+		else:
+			var badge = AvatarBadge.new(side)
+			badge.bare = bare if bare != "" else str(occ.get("nick", ""))
+			badge.set_texture(_avatars.get(bare))
+			badge.rect_size = Vector2(side, side)
+			node = badge
+		node.rect_position = Vector2(step * float(i), 0)
+		c.add_child(node)
+	if n > shown:
+		var more = Label.new()
+		more.text = "+%d" % (n - shown)
+		more.add_color_override("font_color", P.TEXT_DIM)
+		more.add_font_override("font", XatTheme.font(P.FONT_REGULAR, P.FONT_SIZE - 4))
+		more.rect_position = Vector2(step * float(shown) - 8.0, side * 0.5 - 9.0)
+		more.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		c.add_child(more)
+	return c
 
 func _rebuild() -> void:
 	for c in _box.get_children():
@@ -813,6 +1123,9 @@ func _rebuild_grid() -> void:
 		_rooms_box.visible = false
 	var items := []
 	if _tab == 1:
+		for room in _deferred.keys():
+			if not _rooms.has(str(room)):
+				items.append(_make_deferred_row(str(room)))
 		for b in _sorted_rooms():
 			items.append(_make_room_row(str(b)))
 	else:
@@ -837,16 +1150,25 @@ func _rebuild_grid() -> void:
 			it.get_meta("orb").set_connected(_online.get(b, false))
 
 func _make_row(p_bare: String) -> Button:
+	var is_agent = _agents.has(p_bare)
+	var last_body = str(_last_msg.get(p_bare, {}).get("body", "")) if _last_msg.has(p_bare) else ""
 	var row = Button.new()
 	row.name = _row_name(p_bare)
 	row.toggle_mode = true
 	row.mouse_filter = Control.MOUSE_FILTER_PASS # el arrastre debe llegar al ScrollContainer
-	row.add_stylebox_override("normal", StyleBoxEmpty.new())
-	row.add_stylebox_override("focus", StyleBoxEmpty.new())
-	row.add_stylebox_override("hover", XatTheme.box(P.BG2.darkened(0.15), 10))
-	row.add_stylebox_override("pressed", XatTheme.with_border(XatTheme.box(P.BG2, 10), P.LINE))
+	# X2.2: el contacto con caps de agente es una tarjeta (borde AGENT_EDGE).
+	if is_agent:
+		row.add_stylebox_override("normal", XatTheme.with_border(XatTheme.box(P.BG2, 10, 8, 6), P.AGENT_EDGE))
+		row.add_stylebox_override("hover", XatTheme.with_border(XatTheme.box(P.BG2.lightened(0.1), 10, 8, 6), P.AGENT_EDGE))
+		row.add_stylebox_override("focus", StyleBoxEmpty.new())
+		row.add_stylebox_override("pressed", XatTheme.with_border(XatTheme.box(P.BG2, 10, 8, 6), P.LINE))
+	else:
+		row.add_stylebox_override("normal", StyleBoxEmpty.new())
+		row.add_stylebox_override("hover", XatTheme.box(P.BG2.darkened(0.15), 10))
+		row.add_stylebox_override("focus", StyleBoxEmpty.new())
+		row.add_stylebox_override("pressed", XatTheme.with_border(XatTheme.box(P.BG2, 10), P.LINE))
 	row.pressed = p_bare == _selected
-	row.rect_min_size = Vector2(0, 60)
+	row.rect_min_size = Vector2(0, 74 if (is_agent and last_body != "") else 60)
 	row.set_meta("bare", p_bare)
 	row.connect("pressed", self, "_on_row", [p_bare])
 	# h llena la fila y centra el contenido; la columna (inner) tiene ancho fijo,
@@ -889,7 +1211,7 @@ func _make_row(p_bare: String) -> Button:
 	v.add_constant_override("separation", 0)
 	inner.add_child(v)
 	var name_l = Label.new()
-	name_l.text = p_bare.split("@")[0]
+	name_l.text = str(_names.get(p_bare, p_bare.split("@")[0]))
 	name_l.clip_text = true
 	name_l.hint_tooltip = p_bare
 	v.add_child(name_l)
@@ -899,7 +1221,69 @@ func _make_row(p_bare: String) -> Button:
 	st.add_color_override("font_color", P.activity_color(_agents[p_bare].get("activity", "")) if _agents.has(p_bare) and online else P.TEXT_DIM)
 	v.add_child(st)
 	row.set_meta("status", st)
+	# X2.2: último mensaje en la tarjeta del agente.
+	if is_agent and last_body != "":
+		var lm = Label.new()
+		lm.text = last_body
+		lm.clip_text = true
+		lm.add_color_override("font_color", P.TEXT_DIM)
+		lm.add_font_override("font", XatTheme.font(P.FONT_REGULAR, P.FONT_SIZE - 3))
+		v.add_child(lm)
+	# X2.3: chips de preguntas rápidas en la tarjeta del agente (hasta 4).
+	if is_agent:
+		var chips = _agent_chips()
+		if not chips.empty():
+			v.add_child(_agent_chips_row(p_bare, chips))
+			# El Button no crece con sus hijos: reservar alto para los chips.
+			row.rect_min_size = Vector2(0, row.rect_min_size.y + chips.size() * 46)
 	return row
+
+# X2.3: chips de la tarjeta de agente. Sólo datos del helper puro (defaults +
+# settings); se acota a `MAX_QUESTIONS`, conservando el chip `/status`.
+func _agent_chips() -> Array:
+	var out = QuickQuestions.load_chips()
+	if out.size() <= QuickQuestions.MAX_QUESTIONS:
+		return out
+	var keep := []
+	for q in out:
+		if str(q) == QuickQuestions.STATUS_VALUE:
+			continue
+		if keep.size() >= QuickQuestions.MAX_QUESTIONS - 1:
+			break
+		keep.append(q)
+	if QuickQuestions.STATUS_VALUE in out:
+		keep.append(QuickQuestions.STATUS_VALUE)
+	return keep
+
+func _agent_chips_row(p_bare: String, p_chips: Array) -> VBoxContainer:
+	var box = VBoxContainer.new()
+	box.add_constant_override("separation", 2)
+	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	for q in p_chips:
+		var text = str(q)
+		if text == "":
+			continue
+		var b = Button.new()
+		b.text = text
+		b.clip_text = true
+		b.hint_tooltip = text
+		b.focus_mode = Control.FOCUS_NONE
+		b.rect_min_size = Vector2(0, 44) # toque >= 44 px
+		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		b.add_color_override("font_color", P.TEXT_DIM)
+		b.add_color_override("font_color_hover", P.AGENT_EDGE)
+		b.add_font_override("font", XatTheme.font(P.FONT_REGULAR, P.FONT_SIZE - 4))
+		b.add_stylebox_override("normal", XatTheme.with_border(XatTheme.box(P.BG1, 10, 6, 4), P.LINE))
+		b.add_stylebox_override("hover", XatTheme.with_border(XatTheme.box(P.BG2, 10, 6, 4), P.AGENT_EDGE))
+		b.add_stylebox_override("pressed", XatTheme.with_border(XatTheme.box(P.BG2.darkened(0.15), 10, 6, 4), P.AGENT_EDGE))
+		b.connect("pressed", self, "_on_quick_chip", [p_bare, text])
+		box.add_child(b)
+	return box
+
+func _on_quick_chip(p_bare: String, p_text: String) -> void:
+	if p_bare == "" or p_text == "":
+		return
+	emit_signal("quick_question_requested", p_bare, p_text)
 
 # Ancho de la columna: acotado a COLUMN_MAX y con margen simétrico; si el panel
 # es angosto (sidebar de escritorio), ocupa el ancho disponible.
@@ -974,3 +1358,59 @@ func _row_name(p_bare: String) -> String:
 
 func _room_row_name(p_room: String) -> String:
 	return "room_" + p_room.replace("@", "_").replace(".", "_")
+
+# --- Helpers puros (X2.4/X2.5) ---
+# Se extraen acá para poder testearlos sin instanciar el panel (tests/invite_label_test.gd).
+
+# JID sin recurso ("ana@h/x" -> "ana@h"); "" queda "".
+static func jid_bare(p_jid: String) -> String:
+	var s = p_jid.strip_edges()
+	var slash = s.find("/")
+	return s.substr(0, slash) if slash >= 0 else s
+
+# Nick (parte local) del JID, sin recurso ni dominio ("ana@h/x" -> "ana").
+static func jid_nick(p_jid: String) -> String:
+	var bare = jid_bare(p_jid)
+	var at = bare.find("@")
+	return bare.substr(0, at) if at >= 0 else bare
+
+# Localpart de la sala ("sala@conference.h" -> "sala"); nunca expone el dominio.
+static func room_localpart(p_room: String) -> String:
+	return jid_nick(p_room)
+
+# X2.4: texto humano de la invitación. Usa el nombre del roster si lo hay, si no
+# el nick del JID; jamás el JID crudo (ni el recurso). Sala = su localpart.
+static func humanize_invite(p_from_jid: String, p_room_bare: String, p_roster_name: String = "") -> String:
+	var name = p_roster_name.strip_edges()
+	if name == "":
+		name = jid_nick(p_from_jid)
+	if name == "":
+		name = "Alguien"
+	var room = room_localpart(p_room_bare)
+	return "%s te invita a #%s" % [name, room]
+
+# X2.5: antigüedad en lenguaje natural. Negativo -> "hace 0 s" (no inventa).
+static func ago_label(p_seconds: int) -> String:
+	var s = max(0, p_seconds)
+	if s < 60:
+		return "hace %d s" % s
+	if s < 3600:
+		return "hace %d min" % int(s / 60)
+	if s < 86400:
+		return "hace %d h" % int(s / 3600)
+	return "hace %d d" % int(s / 86400)
+
+# X2.5: frescura de un snapshot ("hace 12 s"). "" si no hay hora válida.
+static func fleet_freshness(p_generated_at: String, p_now_unix: int) -> String:
+	var iso = p_generated_at.strip_edges()
+	if iso == "":
+		return ""
+	var t = Time.get_unix_time_from_datetime_string(iso)
+	if t <= 0:
+		return ""
+	return ago_label(p_now_unix - int(t))
+
+# Hora corta "HH:MM" de un timestamp ISO ("" si no alcanza).
+static func clock_time(p_iso: String) -> String:
+	return p_iso.substr(11, 5) if p_iso.length() >= 16 else ""
+
