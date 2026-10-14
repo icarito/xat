@@ -1,5 +1,7 @@
 extends Reference
 
+const Platform = preload("res://addons/xat_xmpp/xmpp/platform.gd")
+
 # Persistencia de la cuenta. Guarda la config en un JSON con permisos 0600 y
 # resuelve la contraseña con override por variable de entorno (la contraseña
 # del archivo es el último recurso). Puro salvo por el chmod/archivo.
@@ -27,7 +29,7 @@ func save(p_path: String, p_config: Dictionary) -> bool:
 	f.close()
 	# Permisos 0600 (contiene la contraseña). Best-effort y sólo en escritorio:
 	# en Android/iOS no hay binario `chmod` y no debe spawnearse nada.
-	if OS.get_name() in ["Linux", "macOS"]:
+	if Platform.is_linux() or Platform.is_mac():
 		OS.execute("chmod", ["600", ProjectSettings.globalize_path(p_path)])
 	return true
 

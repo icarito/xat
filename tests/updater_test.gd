@@ -29,6 +29,10 @@ func _init():
 	]
 	var linux = u._platform_asset(assets, "Linux")
 	check(linux.get("name", "") == "xat-0.1.9-linux.x86_64" and linux.get("kind", "") == "linux", "Linux elige el binario linux")
+	# En Godot 3 el release Linux del template stock reporta "X11" y el platform
+	# frt "Unix": ambos deben resolver al binario linux.
+	check(u._platform_asset(assets, "X11").get("name", "") == "xat-0.1.9-linux.x86_64", "X11 elige el binario linux")
+	check(u._platform_asset(assets, "Unix").get("name", "") == "xat-0.1.9-linux.x86_64", "Unix elige el binario linux")
 	check(linux.get("size", 0) == 2, "Linux toma el tamaño del asset")
 	check(u._platform_asset(assets, "Android").get("name", "") == "xat-0.1.9-debug.apk", "Android elige el APK")
 	check(u._platform_asset(assets, "iOS").get("name", "") == "xat-0.1.9.ipa", "iOS elige el IPA")

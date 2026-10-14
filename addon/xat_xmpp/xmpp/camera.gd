@@ -1,5 +1,7 @@
 extends Reference
 
+const Platform = preload("res://addons/xat_xmpp/xmpp/platform.gd")
+
 # Captura de foto de cámara. Godot 3 no trae API de webcam: en escritorio Linux
 # se delega en `ffmpeg`/`fswebcam` sobre V4L2; en Android/iOS no hay backend y se
 # devuelve un motivo claro (haría falta un plugin nativo). Helper puro salvo el
@@ -11,7 +13,7 @@ const Media = preload("res://addons/xat_xmpp/xmpp/media.gd")
 
 # Backend disponible: "ffmpeg", "fswebcam", "" (ninguno).
 static func backend() -> String:
-	if OS.get_name() != "Linux":
+	if not Platform.is_linux():
 		return ""
 	if _has_command("ffmpeg"):
 		return "ffmpeg"

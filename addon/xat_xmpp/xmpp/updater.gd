@@ -1,5 +1,7 @@
 extends Node
 
+const Platform = preload("res://addons/xat_xmpp/xmpp/platform.gd")
+
 # Actualizaciones in-app desde los GitHub Releases de xat.
 #   check()            -> consulta releases/latest y compara versiones
 #   download()         -> baja el asset de esta plataforma a user://updates/
@@ -140,7 +142,7 @@ func install(p_path: String) -> bool:
 # Sólo tiene sentido en un build exportado (no en el editor, donde el
 # ejecutable es el propio Godot).
 func _linux_self_update() -> bool:
-	if OS.get_name() != "Linux" or not OS.has_feature("standalone"):
+	if not Platform.is_linux() or not OS.has_feature("standalone"):
 		return false
 	return OS.get_executable_path() != ""
 

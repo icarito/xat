@@ -1,5 +1,7 @@
 extends Node
 
+const Platform = preload("res://addons/xat_xmpp/xmpp/platform.gd")
+
 # Selector de archivos nativo para escritorio. El FileDialog de Godot se dibuja
 # a mano y "se ve raro" en GNOME/KDE, así que en Linux se delega en zenity
 # (GNOME) o kdialog (KDE); en macOS osascript; en Windows PowerShell. Si no hay
@@ -29,13 +31,12 @@ func open(p_title: String = "Elegir archivo", p_filters: Array = []) -> void:
 	_thread.start(self, "_run", {"title": p_title, "filters": p_filters})
 
 static func has_native() -> bool:
-	match OS.get_name():
-		"Linux":
-			return _which("zenity") != "" or _which("kdialog") != ""
-		"macOS":
-			return _which("osascript") != ""
-		"Windows":
-			return true
+	if Platform.is_linux():
+		return _which("zenity") != "" or _which("kdialog") != ""
+	if Platform.is_mac():
+		return _which("osascript") != ""
+	if Platform.is_windows():
+		return true
 	return false
 
 static func _which(p_bin: String) -> String:
@@ -59,13 +60,12 @@ func _finish(p_path: String) -> void:
 		emit_signal("picked", p_path)
 
 func _native(p_args: Dictionary) -> String:
-	match OS.get_name():
-		"Linux":
-			return _linux(p_args)
-		"macOS":
-			return _macos(p_args)
-		"Windows":
-			return _windows(p_args)
+	if Platform.is_linux():
+		return _linux(p_args)
+	if Platform.is_mac():
+		return _macos(p_args)
+	if Platform.is_windows():
+		return _windows(p_args)
 	return ""
 
 func _linux(p_args: Dictionary) -> String:

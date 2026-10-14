@@ -1,5 +1,7 @@
 extends Node
 
+const Platform = preload("res://addons/xat_xmpp/xmpp/platform.gd")
+
 # Imagen del portapapeles (escritorio). Godot 3 no expone imágenes del
 # portapapeles, así que en Linux se lee con wl-paste (Wayland) o xclip (X11) y
 # se vuelca a un PNG temporal. La lectura bloquea, así que va en un Thread y la
@@ -11,9 +13,8 @@ var _thread: Thread
 var _running := false
 
 static func available() -> bool:
-	match OS.get_name():
-		"Linux":
-			return _which("wl-paste") != "" or _which("xclip") != ""
+	if Platform.is_linux():
+		return _which("wl-paste") != "" or _which("xclip") != ""
 	return false
 
 static func _which(p_bin: String) -> String:
@@ -41,9 +42,8 @@ func _finish(p_path: String) -> void:
 	emit_signal("pasted", p_path)
 
 func _read() -> String:
-	match OS.get_name():
-		"Linux":
-			return _linux()
+	if Platform.is_linux():
+		return _linux()
 	return ""
 
 func _linux() -> String:
