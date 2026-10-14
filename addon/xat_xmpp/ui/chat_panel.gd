@@ -45,7 +45,6 @@ const ApprovalCard = preload("res://addons/xat_xmpp/ui/approval_card.gd")
 const Shimmer = preload("res://addons/xat_xmpp/ui/fx/shimmer.gd")
 const IconButton = preload("res://addons/xat_xmpp/ui/icon_button.gd")
 const Waveform = preload("res://addons/xat_xmpp/ui/waveform.gd")
-const QuickQuestions = preload("res://addons/xat_xmpp/ui/quick_questions.gd")
 
 const MAX_LINES := 6
 # Umbrales del gesto de voz (px lógicos ≈ dp). Ver docs/input-bar-design.md §5.1.
@@ -97,8 +96,6 @@ var _status: Label            # "activity · contexto % · modelo"
 var _compact := false         # cabecera compacta (52 px) con el teclado abierto
 var _sys_chip: PanelContainer # chip de sistema (cifrado)
 var _sys_chip_label: Label
-var _qq_scroll: ScrollContainer # fila de preguntas rápidas sobre el composer
-var _qq_row: HBoxContainer
 var _scroll: ScrollContainer
 var _list: VBoxContainer
 var _state: RichTextLabel
@@ -391,17 +388,6 @@ func _build() -> void:
 	_anim.wait_time = 0.05
 	_anim.connect("timeout", _state, "update")
 	add_child(_anim)
-	# Preguntas rápidas (REQ-X4.4): fila de chips sobre el composer. Se rellena
-	# al abrir un chat 1:1 (no en salas). Scroll horizontal si no caben.
-	_qq_scroll = ScrollContainer.new()
-	_qq_scroll.visible = false
-	_qq_scroll.scroll_vertical_enabled = false
-	_qq_scroll.scroll_horizontal_enabled = true
-	_qq_scroll.mouse_filter = Control.MOUSE_FILTER_PASS
-	_qq_row = HBoxContainer.new()
-	_qq_row.add_constant_override("separation", 6)
-	_qq_scroll.add_child(_qq_row)
-	f.add_child(_qq_scroll)
 	# Composer: una sola fila con iconos incrustados y botón cola que muta
 	# (mic <-> enviar). Ver docs/input-bar-design.md §3–§5.
 	_compose = MarginContainer.new()
@@ -753,40 +739,6 @@ func _reset_header_state() -> void:
 		_status.visible = false
 	if _sys_chip != null:
 		_sys_chip.visible = false
-	_refresh_quick()
-
-# --- Preguntas rápidas (REQ-X4.4) ---
-
-func _refresh_quick() -> void:
-	if _qq_row == null:
-		return
-	for c in _qq_row.get_children():
-		_qq_row.remove_child(c)
-		c.queue_free()
-	var show = _peer != "" and _room == ""
-	if _qq_scroll != null:
-		_qq_scroll.visible = show
-	if not show:
-		return
-	for q in QuickQuestions.load_chips():
-		var b = _pill_button(q)
-		b.rect_min_size = Vector2(0, 44) # objetivo táctil >= 44 px
-		b.connect("pressed", self, "_on_quick_question", [q])
-		_qq_row.add_child(b)
-
-func _on_quick_question(p_text: String) -> void:
-	if _peer == "" or p_text == "":
-		return
-	emit_signal("message_submitted", _peer, p_text)
-
-func quick_questions() -> Array:
-	var out := []
-	if _qq_row == null:
-		return out
-	for c in _qq_row.get_children():
-		if c is Button:
-			out.append(c.text)
-	return out
 
 # Juice (háptica/sonido) inyectado por main; opcional para instanciar en tests.
 func set_juice(p_juice) -> void:

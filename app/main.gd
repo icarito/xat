@@ -249,7 +249,7 @@ func _ready() -> void:
 	_roster.connect("room_invite_ignore", self, "_on_room_invite_ignore")
 	# X2.5: la franja de flota abre la vista Flota. X2.3: chips de pregunta rápida.
 	_roster.connect("fleet_requested", self, "_open_fleet_monitor")
-	_roster.connect("quick_question_requested", self, "_on_roster_quick")
+	_roster.connect("join_room_requested", self, "_on_join_room_requested")
 	_roster.set_juice(juice)
 	_chat = ChatPanel.new()
 	_split.add_child(_chat)
@@ -1593,15 +1593,6 @@ func _on_action_selected(p_bare: String, p_item) -> void:
 func _on_quick_selected(p_bare: String, p_value: String) -> void:
 	_celebrate()
 	session.send_message(p_bare, p_value)
-
-# X2.3: chip de pregunta rápida tocado en la tarjeta del agente del roster:
-# abre (o ya está en) esa conversación y envía el texto por el camino estándar.
-func _on_roster_quick(p_bare: String, p_text: String) -> void:
-	if p_bare == "" or p_text.strip_edges() == "":
-		return
-	if _peer != p_bare:
-		_on_peer_selected(p_bare)
-	_on_message_submitted(p_bare, p_text)
 
 func _on_command_form(p_from_jid: String, p_resp: Dictionary) -> void:
 	_pending_command = {

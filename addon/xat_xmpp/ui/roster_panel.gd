@@ -15,7 +15,6 @@ signal font_scale_requested(dir) # -1 achicar, +1 agrandar letra
 signal room_invite_accept(room)
 signal room_invite_ignore(room)
 signal fleet_requested() # X2.5: tocar la franja de flota abre la vista Flota
-signal quick_question_requested(bare, text) # X2.3: chip de pregunta rápida
 
 const P = preload("res://addons/xat_xmpp/ui/palette.gd")
 const AgentOrb = preload("res://addons/xat_xmpp/ui/agent_orb.gd")
@@ -23,7 +22,6 @@ const XatTheme = preload("res://addons/xat_xmpp/ui/xat_theme.gd")
 const AvatarBadge = preload("res://addons/xat_xmpp/ui/avatar_badge.gd")
 const XatXmpp = preload("res://addons/xat_xmpp/xat_xmpp.gd")
 const IconButton = preload("res://addons/xat_xmpp/ui/icon_button.gd")
-const QuickQuestions = preload("res://addons/xat_xmpp/ui/quick_questions.gd")
 
 var _peers := []
 var _agents := {} # bare -> último state de agente
@@ -1168,7 +1166,11 @@ func _make_row(p_bare: String) -> Button:
 		row.add_stylebox_override("focus", StyleBoxEmpty.new())
 		row.add_stylebox_override("pressed", XatTheme.with_border(XatTheme.box(P.BG2, 10), P.LINE))
 	row.pressed = p_bare == _selected
-	row.rect_min_size = Vector2(0, 74 if (is_agent and last_body != "") else 60)
+	# Tarjeta de agente más compacta; los contactos normales mantienen su alto.
+	if is_agent:
+		row.rect_min_size = Vector2(0, 62 if last_body != "" else 54)
+	else:
+		row.rect_min_size = Vector2(0, 60)
 	row.set_meta("bare", p_bare)
 	row.connect("pressed", self, "_on_row", [p_bare])
 	# h llena la fila y centra el contenido; la columna (inner) tiene ancho fijo,
@@ -1229,61 +1231,7 @@ func _make_row(p_bare: String) -> Button:
 		lm.add_color_override("font_color", P.TEXT_DIM)
 		lm.add_font_override("font", XatTheme.font(P.FONT_REGULAR, P.FONT_SIZE - 3))
 		v.add_child(lm)
-	# X2.3: chips de preguntas rápidas en la tarjeta del agente (hasta 4).
-	if is_agent:
-		var chips = _agent_chips()
-		if not chips.empty():
-			v.add_child(_agent_chips_row(p_bare, chips))
-			# El Button no crece con sus hijos: reservar alto para los chips.
-			row.rect_min_size = Vector2(0, row.rect_min_size.y + chips.size() * 46)
 	return row
-
-# X2.3: chips de la tarjeta de agente. Sólo datos del helper puro (defaults +
-# settings); se acota a `MAX_QUESTIONS`, conservando el chip `/status`.
-func _agent_chips() -> Array:
-	var out = QuickQuestions.load_chips()
-	if out.size() <= QuickQuestions.MAX_QUESTIONS:
-		return out
-	var keep := []
-	for q in out:
-		if str(q) == QuickQuestions.STATUS_VALUE:
-			continue
-		if keep.size() >= QuickQuestions.MAX_QUESTIONS - 1:
-			break
-		keep.append(q)
-	if QuickQuestions.STATUS_VALUE in out:
-		keep.append(QuickQuestions.STATUS_VALUE)
-	return keep
-
-func _agent_chips_row(p_bare: String, p_chips: Array) -> VBoxContainer:
-	var box = VBoxContainer.new()
-	box.add_constant_override("separation", 2)
-	box.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	for q in p_chips:
-		var text = str(q)
-		if text == "":
-			continue
-		var b = Button.new()
-		b.text = text
-		b.clip_text = true
-		b.hint_tooltip = text
-		b.focus_mode = Control.FOCUS_NONE
-		b.rect_min_size = Vector2(0, 44) # toque >= 44 px
-		b.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		b.add_color_override("font_color", P.TEXT_DIM)
-		b.add_color_override("font_color_hover", P.AGENT_EDGE)
-		b.add_font_override("font", XatTheme.font(P.FONT_REGULAR, P.FONT_SIZE - 4))
-		b.add_stylebox_override("normal", XatTheme.with_border(XatTheme.box(P.BG1, 10, 6, 4), P.LINE))
-		b.add_stylebox_override("hover", XatTheme.with_border(XatTheme.box(P.BG2, 10, 6, 4), P.AGENT_EDGE))
-		b.add_stylebox_override("pressed", XatTheme.with_border(XatTheme.box(P.BG2.darkened(0.15), 10, 6, 4), P.AGENT_EDGE))
-		b.connect("pressed", self, "_on_quick_chip", [p_bare, text])
-		box.add_child(b)
-	return box
-
-func _on_quick_chip(p_bare: String, p_text: String) -> void:
-	if p_bare == "" or p_text == "":
-		return
-	emit_signal("quick_question_requested", p_bare, p_text)
 
 # Ancho de la columna: acotado a COLUMN_MAX y con margen simétrico; si el panel
 # es angosto (sidebar de escritorio), ocupa el ancho disponible.
