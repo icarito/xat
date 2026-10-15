@@ -1161,6 +1161,7 @@ func _lock_recording() -> void:
 func _rec_send() -> void:
 	if _rec_arm_timer != null:
 		_rec_arm_timer.stop()
+	_juice_haptic("tick")
 	_rec_phase = "idle"
 	_rec_index = -1
 	_rec_cancel = false

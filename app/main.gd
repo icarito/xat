@@ -1342,11 +1342,17 @@ func _on_camera_requested(peer: String) -> void:
 
 func _on_voice_toggle(peer: String, start: bool) -> void:
 	if start:
-		if not _mic_permitted():
+		if OS.get_name() == "Android":
+			# El motor arranca la captura del micrófono desde el callback de
+			# permiso (Java GodotLib.requestPermissionResult -> AudioDriver
+			# capture_start). Si el permiso ya está concedido igual hay que
+			# re-pedirlo para que el callback dispare; si no, capture_start
+			# nunca corre y la nota de voz sale muda.
 			OS.request_permissions()
-			_chat.set_recording(false, 0)
-			juice.toast("Concedé el permiso de micrófono y reintentá", P.ERROR)
-			return
+			if not _mic_permitted():
+				_chat.set_recording(false, 0)
+				juice.toast("Concedé el permiso de micrófono y reintentá", P.ERROR)
+				return
 		# Arrancar el micrófono crea el AudioRecord por JNI y puede bloquear el
 		# hilo principal ~100 ms. Se difiere un frame para que el UI pinte el
 		# indicador de grabación antes (si no, parece que se colgó).

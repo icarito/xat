@@ -441,6 +441,15 @@ static func downmix_resample(p_pcm: PoolByteArray, p_channels: int, p_in_rate: i
 		for ch in range(p_channels):
 			acc += _sample_at(p_pcm, f * p_channels + ch)
 		mono[f] = acc / float(p_channels)
+	# 1b) Anti-alias: al bajar de sample rate, todo lo que quede por encima del
+	# Nyquist de SALIDA se pliega de vuelta al audio (metálico/robótico). Antes
+	# del re-sampleo recortamos el espectro con un biquad low-pass al ~92% del
+	# Nyquist de salida.
+	if p_in_rate > p_out_rate:
+		var cutoff = p_out_rate * 0.46
+		if cutoff > p_in_rate * 0.92:
+			cutoff = p_in_rate * 0.92
+		mono = _lowpass_biquad(mono, p_in_rate, cutoff)
 	# 2) Remuestreo lineal a out_rate.
 	var out_frames = int(round(frames * float(p_out_rate) / float(p_in_rate)))
 	if out_frames <= 0:
@@ -461,6 +470,38 @@ static func downmix_resample(p_pcm: PoolByteArray, p_channels: int, p_in_rate: i
 		out[i * 2] = u & 0xFF
 		out[i * 2 + 1] = (u >> 8) & 0xFF
 	return out
+
+static func _lowpass_biquad(p_data: PoolRealArray, p_rate: int, p_cutoff: float) -> PoolRealArray:
+	# Low-pass Butterworth de 2do orden aplicado en dos pasadas (24 dB/oct
+	# acumuladas): barato y suficiente para evitar el aliasing del re-sampleo.
+	# OJO: en Godot 3 escribir por índice dentro de la función dispara el
+	# copy-on-write del PoolRealArray, así que hay que DEVOLVER el array.
+	if p_data.size() == 0 or p_cutoff <= 0 or p_rate <= 0:
+		return p_data
+	var w0 = 2.0 * PI * min(p_cutoff, p_rate * 0.49) / float(p_rate)
+	var cw = cos(w0)
+	var alpha = sin(w0) / (2.0 * 0.7071)
+	var a0 = 1.0 + alpha
+	var b0 = (1.0 - cw) / 2.0 / a0
+	var b1 = (1.0 - cw) / a0
+	var b2 = (1.0 - cw) / 2.0 / a0
+	var a1 = -2.0 * cw / a0
+	var a2 = (1.0 - alpha) / a0
+	var out_feed = p_data
+	for rep in range(2):
+		var x1 := 0.0
+		var x2 := 0.0
+		var y1 := 0.0
+		var y2 := 0.0
+		for i in range(out_feed.size()):
+			var x0 = out_feed[i]
+			var y0 = b0 * x0 + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+			out_feed[i] = y0
+			x2 = x1
+			x1 = x0
+			y2 = y1
+			y1 = y0
+	return out_feed
 
 static func _sample_at(p_pcm: PoolByteArray, p_index: int) -> float:
 	var v = p_pcm[p_index * 2] | (p_pcm[p_index * 2 + 1] << 8)
